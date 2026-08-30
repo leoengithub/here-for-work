@@ -1,0 +1,1 @@
+{"main-window":{"identifier":"main-window","description":"Allows the bundled HereForWork window to call only explicitly registered core commands.","local":true,"windows":["main"],"permissions":["core:default"]}}

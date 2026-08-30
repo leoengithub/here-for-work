@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-08-30T12:00:00+02:00",
+  "findings": [
+    {
+      "sourceId": "example-source",
+      "source": "Example source",
+      "sourceRoleId": "example-001",
+      "company": "Northstar Tools",
+      "title": "Frontend Engineer",
+      "location": "Remote, Europe",
+      "discoveredAt": "2026-08-30T09:00:00+02:00",
+      "applicationUrl": "https://example.test/jobs/001",
+      "normalizedKey": "northstar-tools/frontend-engineer",
+      "queueGroup": "needs_decision",
+      "eligibilitySummary": "Location appears plausible, but authorization is not yet verified.",
+      "uncertainty": "Confirm whether Spain is an eligible hiring location."
+    }
+  ]
+}

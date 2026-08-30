@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hereforwork.local/contracts/discovery-dataset.v1.schema.json",
+  "title": "HereForWork discovery dataset",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "generatedAt", "findings"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "generatedAt": { "type": "string", "format": "date-time" },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "sourceId",
+          "source",
+          "sourceRoleId",
+          "company",
+          "title",
+          "location",
+          "discoveredAt",
+          "applicationUrl",
+          "normalizedKey",
+          "queueGroup",
+          "eligibilitySummary",
+          "uncertainty"
+        ],
+        "properties": {
+          "sourceId": { "type": "string", "minLength": 1 },
+          "source": { "type": "string", "minLength": 1 },
+          "sourceRoleId": { "type": "string", "minLength": 1 },
+          "company": { "type": "string", "minLength": 1 },
+          "title": { "type": "string", "minLength": 1 },
+          "location": { "type": "string", "minLength": 1 },
+          "discoveredAt": { "type": "string", "format": "date-time" },
+          "applicationUrl": {
+            "oneOf": [
+              { "type": "string", "format": "uri", "pattern": "^https://" },
+              { "type": "null" }
+            ]
+          },
+          "normalizedKey": { "type": "string", "minLength": 3 },
+          "queueGroup": {
+            "enum": ["strong_match", "other_new", "needs_decision"]
+          },
+          "eligibilitySummary": { "type": "string", "minLength": 1 },
+          "uncertainty": {
+            "oneOf": [{ "type": "string", "minLength": 1 }, { "type": "null" }]
+          }
+        }
+      }
+    }
+  }
+}

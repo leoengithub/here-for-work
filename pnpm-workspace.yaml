@@ -1,0 +1,8 @@
+packages:
+  - packages/*
+
+allowBuilds:
+  '@tauri-apps/cli': true
+  esbuild: true
+
+storeDir: /Users/leo/Library/pnpm/store

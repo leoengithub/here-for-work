@@ -1,0 +1,194 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hereforwork.local/contracts/preparation-result.v1.schema.json",
+  "title": "HereForWork provider-neutral preparation result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contractVersion",
+    "contextHash",
+    "score",
+    "legitimacy",
+    "authorizationConfidence",
+    "reportBodyMarkdown",
+    "cvPayload",
+    "cvChangesMarkdown"
+  ],
+  "properties": {
+    "contractVersion": { "type": "integer", "const": 1 },
+    "contextHash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "score": { "type": "number", "minimum": 1, "maximum": 5 },
+    "legitimacy": {
+      "type": "string",
+      "enum": ["High Confidence", "Proceed with Caution", "Suspicious"]
+    },
+    "authorizationConfidence": {
+      "type": "string",
+      "enum": ["excellent", "interesting", "investigate", "problem"]
+    },
+    "reportBodyMarkdown": { "type": "string", "minLength": 200, "maxLength": 120000 },
+    "cvChangesMarkdown": { "type": "string", "minLength": 1, "maxLength": 30000 },
+    "cvPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "lang",
+        "page_format",
+        "candidate",
+        "summary",
+        "competencies",
+        "experience",
+        "projects",
+        "education",
+        "certifications",
+        "awards",
+        "skills"
+      ],
+      "properties": {
+        "lang": { "type": "string", "minLength": 2, "maxLength": 12 },
+        "page_format": { "type": "string", "enum": ["a4", "letter"] },
+        "candidate": { "$ref": "#/$defs/candidate" },
+        "summary": { "type": "string", "minLength": 1, "maxLength": 3000 },
+        "competencies": {
+          "type": "array",
+          "maxItems": 12,
+          "items": { "type": "string", "minLength": 1, "maxLength": 160 }
+        },
+        "experience": {
+          "type": "array",
+          "maxItems": 20,
+          "items": { "$ref": "#/$defs/experience" }
+        },
+        "projects": {
+          "type": "array",
+          "maxItems": 12,
+          "items": { "$ref": "#/$defs/project" }
+        },
+        "education": {
+          "type": "array",
+          "maxItems": 12,
+          "items": { "$ref": "#/$defs/education" }
+        },
+        "certifications": {
+          "type": "array",
+          "maxItems": 20,
+          "items": { "$ref": "#/$defs/certification" }
+        },
+        "awards": {
+          "type": "array",
+          "maxItems": 20,
+          "items": { "$ref": "#/$defs/certification" }
+        },
+        "skills": {
+          "type": "array",
+          "maxItems": 20,
+          "items": { "$ref": "#/$defs/skill" }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "link": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["url", "display"],
+      "properties": {
+        "url": { "type": "string", "maxLength": 2000 },
+        "display": { "type": "string", "maxLength": 500 }
+      }
+    },
+    "candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "phone",
+        "email",
+        "location",
+        "linkedin",
+        "github",
+        "portfolio",
+        "photo",
+        "photo_style"
+      ],
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 300 },
+        "phone": { "type": "string", "maxLength": 100 },
+        "email": { "type": "string", "minLength": 3, "maxLength": 320 },
+        "location": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "linkedin": { "$ref": "#/$defs/link" },
+        "github": { "$ref": "#/$defs/link" },
+        "portfolio": { "$ref": "#/$defs/link" },
+        "photo": { "type": "string", "maxLength": 2000 },
+        "photo_style": { "type": "string", "enum": ["rounded", "circle", "square"] }
+      }
+    },
+    "experience": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["company", "role", "location", "dates", "bullets"],
+      "properties": {
+        "company": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "role": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "location": { "type": "string", "maxLength": 500 },
+        "dates": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "bullets": {
+          "type": "array",
+          "maxItems": 20,
+          "items": { "type": "string", "minLength": 1, "maxLength": 1600 }
+        }
+      }
+    },
+    "project": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "url", "badge", "tech", "description"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "url": { "type": "string", "maxLength": 2000 },
+        "badge": { "type": "string", "maxLength": 200 },
+        "tech": { "type": "string", "maxLength": 1000 },
+        "description": { "type": "string", "minLength": 1, "maxLength": 3000 }
+      }
+    },
+    "education": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["title", "org", "year", "description"],
+      "properties": {
+        "title": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "org": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "year": { "type": "string", "maxLength": 100 },
+        "description": { "type": "string", "maxLength": 2000 }
+      }
+    },
+    "certification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["title", "org", "year"],
+      "properties": {
+        "title": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "org": { "type": "string", "maxLength": 500 },
+        "year": { "type": "string", "maxLength": 100 }
+      }
+    },
+    "skill": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["category", "items"],
+      "properties": {
+        "category": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "items": {
+          "anyOf": [
+            { "type": "string", "minLength": 1, "maxLength": 3000 },
+            {
+              "type": "array",
+              "maxItems": 100,
+              "items": { "type": "string", "minLength": 1, "maxLength": 200 }
+            }
+          ]
+        }
+      }
+    }
+  }
+}

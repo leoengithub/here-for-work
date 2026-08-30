@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>HereForWork</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <main>
+      <p class="eyebrow">HereForWork</p>
+      <h1>Form assistant</h1>
+      <p data-status aria-live="polite">Checking local connection…</p>
+      <label>
+        Installation ID
+        <input data-installation type="text" readonly aria-describedby="installation-help" />
+      </label>
+      <button type="button" data-copy-installation>Copy Installation ID</button>
+      <small id="installation-help">This identifies this extension installation in this Chrome profile.</small>
+      <button type="button" data-inspect>Inspect this form</button>
+      <button type="button" data-release>Release for my review</button>
+      <small>Inspects, fills safe verified fields, and verifies. Never submits.</small>
+    </main>
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>

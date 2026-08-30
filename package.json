@@ -1,0 +1,48 @@
+{
+  "name": "here-for-work",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.24.0",
+  "engines": {
+    "node": ">=22.18.0"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc -b --pretty false",
+    "typecheck:extension": "tsc -p packages/extension/tsconfig.json --pretty false",
+    "generate:contracts": "node scripts/generate-contract-types.mjs",
+    "check:contracts": "node scripts/generate-contract-types.mjs && git diff --exit-code -- src/generated",
+    "test": "vitest run",
+    "test:adapter": "node --test packages/career-ops-adapter/adapter.test.mjs",
+    "build:extension": "node packages/extension/build.mjs",
+    "test:watch": "vitest",
+    "tauri": "tauri",
+    "check:rust": "cargo check --manifest-path src-tauri/Cargo.toml",
+    "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.11.0",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.11.4",
+    "@testing-library/jest-dom": "6.9.1",
+    "@testing-library/react": "^16.3.2",
+    "@types/chrome": "^0.1.32",
+    "@types/node": "^24.10.1",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^5.1.4",
+    "esbuild": "^0.25.12",
+    "jsdom": "^28.0.0",
+    "json-schema-to-typescript": "^16.0.0",
+    "typescript": "^7.0.2",
+    "vite": "^8.2.2",
+    "vitest": "^4.1.11"
+  }
+}

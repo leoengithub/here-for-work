@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main-window",
+  "description": "Allows the bundled HereForWork window to call only explicitly registered core commands.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

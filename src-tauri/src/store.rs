@@ -1,0 +1,3632 @@
+use std::path::{Path, PathBuf};
+
+use chrono::{DateTime, Duration, NaiveTime, TimeZone, Utc};
+use chrono_tz::Europe::Madrid;
+use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
+use sha2::{Digest, Sha256};
+use thiserror::Error;
+use uuid::Uuid;
+
+use crate::domain::{
+    ActivityEntry, AdapterEffectContext, AdapterRoleContext, BrowserAnswerCommitWork,
+    BrowserAnswerWork, BrowserCommand, BrowserInspection, BrowserSessionSummary, DashboardState,
+    DiscoveryDataset, DiscoveryFinding, HistoryRecord, ImportResult, LeasedRun, PreparationSummary,
+    PreparationWork, QueueGroup, ReconcileResult, RestorePreflight, RoleSummary, RunSummary,
+    ScheduledRun, SourceScheduleSummary,
+};
+
+const SCHEMA_VERSION: i64 = 9;
+const MAX_RUN_ATTEMPTS: i64 = 3;
+const MAX_BROWSER_COMMAND_ATTEMPTS: i64 = 3;
+const RUN_STEPS: [&str; 3] = ["discover", "reconcile", "notify"];
+
+#[derive(Debug, Error)]
+pub enum StoreError {
+    #[error("database error: {0}")]
+    Database(#[from] rusqlite::Error),
+    #[error("dataset is not valid JSON: {0}")]
+    InvalidDataset(#[from] serde_json::Error),
+    #[error("filesystem error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("unsupported dataset schema version {0}")]
+    UnsupportedDataset(u32),
+    #[error("invalid queue group in operational store: {0}")]
+    InvalidQueueGroup(String),
+    #[error("unknown discovery source: {0}")]
+    UnknownSource(String),
+    #[error("discovery source {0} is staged; the existing external workflow still owns execution")]
+    SourceNotReady(String),
+    #[error("invalid run transition: {0}")]
+    #[cfg_attr(not(test), allow(dead_code))]
+    InvalidRunTransition(String),
+    #[error("invalid browser transition: {0}")]
+    InvalidBrowserTransition(String),
+    #[error("invalid adapter effect: {0}")]
+    InvalidAdapterEffect(String),
+    #[error("invalid preparation: {0}")]
+    InvalidPreparation(String),
+}
+
+pub struct Store {
+    connection: Connection,
+}
+
+impl Store {
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
+        let path = path.as_ref();
+        let should_consider_backup = path
+            .metadata()
+            .map(|metadata| metadata.len() > 0)
+            .unwrap_or(false);
+        let connection = Connection::open(path)?;
+        connection.pragma_update(None, "foreign_keys", "ON")?;
+        connection.pragma_update(None, "journal_mode", "WAL")?;
+        connection.busy_timeout(std::time::Duration::from_secs(5))?;
+        if should_consider_backup {
+            backup_before_migration(&connection, path)?;
+        }
+        let mut store = Self { connection };
+        store.migrate()?;
+        Ok(store)
+    }
+
+    fn migrate(&mut self) -> Result<(), StoreError> {
+        self.connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             CREATE TABLE IF NOT EXISTS schema_meta (
+               version INTEGER NOT NULL
+             );
+             INSERT INTO schema_meta(version)
+               SELECT 0 WHERE NOT EXISTS (SELECT 1 FROM schema_meta);
+             CREATE TABLE IF NOT EXISTS settings (
+               key TEXT PRIMARY KEY,
+               value TEXT NOT NULL,
+               updated_at TEXT NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS roles (
+               id TEXT PRIMARY KEY,
+               normalized_key TEXT NOT NULL UNIQUE,
+               company TEXT NOT NULL,
+               title TEXT NOT NULL,
+               location TEXT NOT NULL,
+               queue_group TEXT NOT NULL,
+               eligibility_summary TEXT NOT NULL,
+               uncertainty TEXT,
+               application_url TEXT,
+               preparation_state TEXT NOT NULL DEFAULT 'not_started',
+               discovered_at TEXT NOT NULL,
+               updated_at TEXT NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS source_occurrences (
+               id TEXT PRIMARY KEY,
+               role_id TEXT NOT NULL REFERENCES roles(id) ON DELETE CASCADE,
+               source_id TEXT NOT NULL,
+               source TEXT NOT NULL,
+               source_role_id TEXT NOT NULL,
+               payload_hash TEXT NOT NULL,
+               discovered_at TEXT NOT NULL,
+               UNIQUE(source_id, source_role_id)
+             );
+             CREATE TABLE IF NOT EXISTS activity (
+               id TEXT PRIMARY KEY,
+               kind TEXT NOT NULL,
+               message TEXT NOT NULL,
+               occurred_at TEXT NOT NULL
+             );
+             COMMIT;",
+        )?;
+
+        let mut version: i64 =
+            self.connection
+                .query_row("SELECT version FROM schema_meta LIMIT 1", [], |row| {
+                    row.get(0)
+                })?;
+        if version < 1 {
+            self.connection
+                .execute("UPDATE schema_meta SET version = 1", [])?;
+            version = 1;
+        }
+        if version < 2 {
+            self.connection.execute_batch(
+                "BEGIN IMMEDIATE;
+                 ALTER TABLE roles ADD COLUMN canonical_tracker_id INTEGER;
+                 ALTER TABLE roles ADD COLUMN canonical_status TEXT;
+                 ALTER TABLE roles ADD COLUMN canonical_date TEXT;
+                 UPDATE schema_meta SET version = 2;
+                 COMMIT;",
+            )?;
+            version = 2;
+        }
+        if version < 3 {
+            self.connection.execute_batch(
+                "BEGIN IMMEDIATE;
+                 CREATE TABLE IF NOT EXISTS source_schedules (
+                   source_id TEXT PRIMARY KEY,
+                   display_name TEXT NOT NULL,
+                   timezone TEXT NOT NULL,
+                   schedule_hours TEXT NOT NULL,
+                   last_successful_at TEXT,
+                   enabled INTEGER NOT NULL DEFAULT 1
+                 );
+                 CREATE TABLE IF NOT EXISTS runs (
+                   id TEXT PRIMARY KEY,
+                   source_id TEXT NOT NULL REFERENCES source_schedules(source_id),
+                   kind TEXT NOT NULL,
+                   coverage_start TEXT NOT NULL,
+                   coverage_end TEXT NOT NULL,
+                   status TEXT NOT NULL,
+                   attempt INTEGER NOT NULL DEFAULT 0,
+                   lease_expires_at TEXT,
+                   error_class TEXT,
+                   created_at TEXT NOT NULL,
+                   updated_at TEXT NOT NULL,
+                   dedupe_key TEXT NOT NULL UNIQUE
+                 );
+                 CREATE TABLE IF NOT EXISTS run_steps (
+                   id TEXT PRIMARY KEY,
+                   run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+                   name TEXT NOT NULL,
+                   status TEXT NOT NULL,
+                   attempt INTEGER NOT NULL DEFAULT 0,
+                   input_hash TEXT,
+                   output_hash TEXT,
+                   error_class TEXT,
+                   updated_at TEXT NOT NULL,
+                   UNIQUE(run_id, name)
+                 );
+                 CREATE TABLE IF NOT EXISTS notification_outbox (
+                   id TEXT PRIMARY KEY,
+                   dedupe_key TEXT NOT NULL UNIQUE,
+                   title TEXT NOT NULL,
+                   body TEXT NOT NULL,
+                   status TEXT NOT NULL DEFAULT 'pending',
+                   attempts INTEGER NOT NULL DEFAULT 0,
+                   next_attempt_at TEXT NOT NULL,
+                   created_at TEXT NOT NULL
+                 );
+                 INSERT OR IGNORE INTO source_schedules(source_id, display_name, timezone, schedule_hours, last_successful_at)
+                   VALUES ('frontend-role-scan', 'Frontend Role Scan', 'Europe/Madrid', '8', '2026-08-29T06:00:00Z');
+                 INSERT OR IGNORE INTO source_schedules(source_id, display_name, timezone, schedule_hours, last_successful_at)
+                   VALUES ('eu-job-radar', 'EU Job Radar', 'Europe/Madrid', '9,13,18', '2026-08-29T06:00:00Z');
+                 UPDATE schema_meta SET version = 3;
+                 COMMIT;",
+            )?;
+            version = 3;
+        }
+        if version < 4 {
+            self.connection.execute_batch(
+                "BEGIN IMMEDIATE;
+                 ALTER TABLE source_schedules ADD COLUMN execution_mode TEXT NOT NULL DEFAULT 'staged';
+                 UPDATE runs
+                    SET status = 'action_required',
+                        error_class = 'source_adapter_not_configured',
+                        lease_expires_at = NULL,
+                        updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                  WHERE status IN ('queued', 'retryable', 'running');
+                 INSERT OR IGNORE INTO run_steps(id, run_id, name, status, attempt, error_class, updated_at)
+                   SELECT lower(hex(randomblob(16))), id, 'discover', 'action_required', 0,
+                          'source_adapter_not_configured', updated_at FROM runs;
+                 INSERT OR IGNORE INTO run_steps(id, run_id, name, status, attempt, error_class, updated_at)
+                   SELECT lower(hex(randomblob(16))), id, 'reconcile', 'blocked', 0,
+                          'source_adapter_not_configured', updated_at FROM runs;
+                 INSERT OR IGNORE INTO run_steps(id, run_id, name, status, attempt, error_class, updated_at)
+                   SELECT lower(hex(randomblob(16))), id, 'notify', 'blocked', 0,
+                          'source_adapter_not_configured', updated_at FROM runs;
+                 UPDATE schema_meta SET version = 4;
+                 COMMIT;",
+            )?;
+            version = 4;
+        }
+        if version < 5 {
+            self.connection.execute_batch(
+                "BEGIN IMMEDIATE;
+                 CREATE TABLE IF NOT EXISTS browser_sessions (
+                   id TEXT PRIMARY KEY,
+                   purpose TEXT NOT NULL,
+                   role_id TEXT REFERENCES roles(id),
+                   status TEXT NOT NULL,
+                   ats TEXT,
+                   page_title TEXT,
+                   page_url TEXT,
+                   snapshot_fingerprint TEXT,
+                   fields_json TEXT,
+                   field_count INTEGER NOT NULL DEFAULT 0,
+                   safe_field_count INTEGER NOT NULL DEFAULT 0,
+                   needs_user_count INTEGER NOT NULL DEFAULT 0,
+                   error_code TEXT,
+                   created_at TEXT NOT NULL,
+                   updated_at TEXT NOT NULL
+                 );
+                 CREATE TABLE IF NOT EXISTS browser_commands (
+                   id TEXT PRIMARY KEY,
+                   session_id TEXT NOT NULL REFERENCES browser_sessions(id) ON DELETE CASCADE,
+                   command_type TEXT NOT NULL,
+                   payload_json TEXT NOT NULL,
+                   status TEXT NOT NULL,
+                   attempt INTEGER NOT NULL DEFAULT 0,
+                   lease_expires_at TEXT,
+                   error_code TEXT,
+                   created_at TEXT NOT NULL,
+                   updated_at TEXT NOT NULL
+                 );
+                 CREATE INDEX IF NOT EXISTS browser_commands_claimable
+                   ON browser_commands(status, created_at);
+                 INSERT INTO activity(id, kind, message, occurred_at)
+                   SELECT lower(hex(randomblob(16))), 'schedule',
+                          'Earlier queued catch-up entries were reclassified as preserved windows; the existing external workflows still own execution.',
+                          strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                    WHERE EXISTS (
+                      SELECT 1 FROM runs
+                       WHERE status = 'action_required'
+                         AND error_class = 'source_adapter_not_configured'
+                    )
+                      AND NOT EXISTS (
+                        SELECT 1 FROM activity
+                         WHERE message = 'Earlier queued catch-up entries were reclassified as preserved windows; the existing external workflows still own execution.'
+                      );
+                 UPDATE schema_meta SET version = 5;
+                 COMMIT;",
+            )?;
+            version = 5;
+        }
+        if version < 6 {
+            self.connection.execute_batch(
+                "BEGIN IMMEDIATE;
+                 ALTER TABLE roles ADD COLUMN review_state TEXT NOT NULL DEFAULT 'unviewed';
+                 ALTER TABLE roles ADD COLUMN canonical_visibility_override INTEGER NOT NULL DEFAULT 0;
+                 CREATE TABLE IF NOT EXISTS adapter_effects (
+                   idempotency_key TEXT PRIMARY KEY,
+                   role_id TEXT NOT NULL REFERENCES roles(id),
+                   operation TEXT NOT NULL,
+                   status TEXT NOT NULL,
+                   parent_effect_key TEXT,
+                   tracker_id INTEGER,
+                   error_class TEXT,
+                   created_at TEXT NOT NULL,
+                   updated_at TEXT NOT NULL
+                 );
+                 CREATE INDEX IF NOT EXISTS adapter_effects_role
+                   ON adapter_effects(role_id, operation, updated_at);
+                 UPDATE schema_meta SET version = 6;
+                 COMMIT;",
+            )?;
+            version = 6;
+        }
+        if version < 7 {
+            self.connection.execute_batch(
+                "BEGIN IMMEDIATE;
+                 CREATE TABLE IF NOT EXISTS preparation_jobs (
+                   id TEXT PRIMARY KEY,
+                   role_id TEXT NOT NULL REFERENCES roles(id),
+                   provider TEXT NOT NULL,
+                   status TEXT NOT NULL,
+                   step TEXT NOT NULL,
+                   attempt INTEGER NOT NULL DEFAULT 0,
+                   context_hash TEXT,
+                   tracker_id INTEGER,
+                   report_path TEXT,
+                   report_hash TEXT,
+                   cv_pdf_path TEXT,
+                   cv_pdf_hash TEXT,
+                   error_class TEXT,
+                   created_at TEXT NOT NULL,
+                   updated_at TEXT NOT NULL
+                 );
+                 CREATE INDEX IF NOT EXISTS preparation_jobs_role
+                   ON preparation_jobs(role_id, updated_at);
+                 UPDATE preparation_jobs
+                    SET status = 'action_required', error_class = 'app_interrupted',
+                        updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                  WHERE status IN ('queued', 'preparing');
+                 UPDATE roles SET preparation_state = 'failed'
+                  WHERE id IN (
+                    SELECT role_id FROM preparation_jobs WHERE status = 'action_required'
+                  );
+                 UPDATE schema_meta SET version = 7;
+                 COMMIT;",
+            )?;
+            version = 7;
+        }
+        if version < 8 {
+            self.connection.execute_batch(
+                "BEGIN IMMEDIATE;
+                 ALTER TABLE browser_sessions ADD COLUMN preparation_id TEXT REFERENCES preparation_jobs(id);
+                 ALTER TABLE browser_sessions ADD COLUMN provider TEXT;
+                 ALTER TABLE browser_sessions ADD COLUMN answers_context_hash TEXT;
+                 ALTER TABLE browser_sessions ADD COLUMN review_items_json TEXT;
+                 ALTER TABLE browser_sessions ADD COLUMN fill_results_json TEXT;
+                 UPDATE browser_sessions
+                    SET status = 'action_required', error_code = 'app_interrupted',
+                        updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                  WHERE status IN ('drafting_answers', 'answering', 'filling');
+                 CREATE INDEX IF NOT EXISTS browser_sessions_preparation
+                   ON browser_sessions(preparation_id, updated_at);
+                 UPDATE schema_meta SET version = 8;
+                 COMMIT;",
+            )?;
+            version = 8;
+        }
+        if version < 9 {
+            self.connection.execute_batch(
+                "BEGIN IMMEDIATE;
+                 ALTER TABLE browser_sessions ADD COLUMN answers_report_hash TEXT;
+                 UPDATE browser_sessions
+                    SET status = 'action_required', error_code = 'answer_persistence_interrupted',
+                        updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                  WHERE status IN ('persisting_answers', 'saving_answers');
+                 UPDATE schema_meta SET version = 9;
+                 COMMIT;",
+            )?;
+            version = 9;
+        }
+        if version != SCHEMA_VERSION {
+            return Err(StoreError::Database(rusqlite::Error::InvalidQuery));
+        }
+        Ok(())
+    }
+
+    pub fn import_dataset(&mut self, payload: &str) -> Result<ImportResult, StoreError> {
+        let dataset: DiscoveryDataset = serde_json::from_str(payload)?;
+        if dataset.schema_version != 1 {
+            return Err(StoreError::UnsupportedDataset(dataset.schema_version));
+        }
+
+        let transaction = self.connection.transaction()?;
+        let mut result = ImportResult::default();
+
+        for finding in &dataset.findings {
+            let existing_role_id = transaction
+                .query_row(
+                    "SELECT id FROM roles WHERE normalized_key = ?1",
+                    [&finding.normalized_key],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?;
+            let role_id = existing_role_id.unwrap_or_else(|| Uuid::new_v4().to_string());
+            let payload_hash = hash_finding(finding);
+            let existing_hash = transaction
+                .query_row(
+                    "SELECT payload_hash FROM source_occurrences WHERE source_id = ?1 AND source_role_id = ?2",
+                    params![finding.source_id, finding.source_role_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?;
+
+            match existing_hash.as_deref() {
+                None => result.imported += 1,
+                Some(hash) if hash == payload_hash => result.unchanged += 1,
+                Some(_) => result.updated += 1,
+            }
+
+            upsert_role(&transaction, &role_id, finding)?;
+            transaction.execute(
+                "INSERT INTO source_occurrences (
+                   id, role_id, source_id, source, source_role_id, payload_hash, discovered_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                 ON CONFLICT(source_id, source_role_id) DO UPDATE SET
+                   role_id = excluded.role_id,
+                   source = excluded.source,
+                   payload_hash = excluded.payload_hash,
+                   discovered_at = excluded.discovered_at",
+                params![
+                    Uuid::new_v4().to_string(),
+                    role_id,
+                    finding.source_id,
+                    finding.source,
+                    finding.source_role_id,
+                    payload_hash,
+                    finding.discovered_at,
+                ],
+            )?;
+        }
+
+        transaction.execute(
+            "INSERT INTO settings(key, value, updated_at) VALUES ('last_successful_discovery_at', ?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+            params![dataset.generated_at, Utc::now().to_rfc3339()],
+        )?;
+        transaction.execute(
+            "INSERT INTO activity(id, kind, message, occurred_at) VALUES (?1, 'import', ?2, ?3)",
+            params![
+                Uuid::new_v4().to_string(),
+                format!(
+                    "Discovery snapshot reconciled: {} new, {} updated, {} unchanged.",
+                    result.imported, result.updated, result.unchanged
+                ),
+                Utc::now().to_rfc3339(),
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(result)
+    }
+
+    pub fn set_background_enabled(&mut self, enabled: bool) -> Result<(), StoreError> {
+        self.connection.execute(
+            "INSERT INTO settings(key, value, updated_at) VALUES ('background_enabled', ?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+            params![if enabled { "true" } else { "false" }, Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    pub fn background_enabled(&self) -> Result<bool, StoreError> {
+        Ok(setting(&self.connection, "background_enabled")?.as_deref() == Some("true"))
+    }
+
+    pub fn set_adapter_ready(&mut self, ready: bool) -> Result<(), StoreError> {
+        self.connection.execute(
+            "INSERT INTO settings(key, value, updated_at) VALUES ('adapter_ready', ?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+            params![if ready { "true" } else { "false" }, Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    pub fn approved_extension_id(&self) -> Result<Option<String>, StoreError> {
+        Ok(setting(&self.connection, "approved_extension_id")?)
+    }
+
+    pub fn pending_extension_id(&self) -> Result<Option<String>, StoreError> {
+        Ok(setting(&self.connection, "pending_extension_id")?)
+    }
+
+    pub fn approved_installation_id(&self) -> Result<Option<String>, StoreError> {
+        Ok(setting(&self.connection, "approved_installation_id")?)
+    }
+
+    pub fn pending_installation_id(&self) -> Result<Option<String>, StoreError> {
+        Ok(setting(&self.connection, "pending_installation_id")?)
+    }
+
+    pub fn selected_chrome_profile(&self) -> Result<Option<String>, StoreError> {
+        Ok(setting(&self.connection, "selected_chrome_profile")?)
+    }
+
+    pub fn set_pending_browser_identity(
+        &mut self,
+        extension_id: &str,
+        installation_id: &str,
+    ) -> Result<(), StoreError> {
+        if self.pending_extension_id()?.as_deref() == Some(extension_id)
+            && self.pending_installation_id()?.as_deref() == Some(installation_id)
+        {
+            return Ok(());
+        }
+        let now = Utc::now().to_rfc3339();
+        for (key, value) in [
+            ("pending_extension_id", extension_id),
+            ("pending_installation_id", installation_id),
+        ] {
+            self.connection.execute(
+                "INSERT INTO settings(key, value, updated_at) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+                params![key, value, now],
+            )?;
+        }
+        self.connection.execute(
+            "INSERT INTO activity(id, kind, message, occurred_at) VALUES (?1, 'browser', 'A browser extension requested pairing.', ?2)",
+            params![Uuid::new_v4().to_string(), now],
+        )?;
+        Ok(())
+    }
+
+    pub fn configure_browser(
+        &mut self,
+        extension_id: &str,
+        installation_id: &str,
+        profile_id: &str,
+    ) -> Result<(), StoreError> {
+        let transaction = self.connection.transaction()?;
+        let now = Utc::now().to_rfc3339();
+        for (key, value) in [
+            ("approved_extension_id", extension_id),
+            ("approved_installation_id", installation_id),
+            ("selected_chrome_profile", profile_id),
+        ] {
+            transaction.execute(
+                "INSERT INTO settings(key, value, updated_at) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+                params![key, value, now],
+            )?;
+        }
+        transaction.execute(
+            "DELETE FROM settings WHERE key IN ('pending_extension_id', 'pending_installation_id')",
+            [],
+        )?;
+        transaction.execute(
+            "INSERT INTO activity(id, kind, message, occurred_at) VALUES (?1, 'browser', 'The selected Chrome profile and extension were connected.', ?2)",
+            params![Uuid::new_v4().to_string(), now],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn record_browser_connected(&mut self) -> Result<(), StoreError> {
+        let now = Utc::now();
+        if let Some(previous) = self.browser_last_connected_at()?
+            && let Ok(previous) = chrono::DateTime::parse_from_rfc3339(&previous)
+            && now.signed_duration_since(previous.with_timezone(&Utc)) < Duration::seconds(30)
+        {
+            return Ok(());
+        }
+        self.connection.execute(
+            "INSERT INTO settings(key, value, updated_at) VALUES ('browser_last_connected_at', ?1, ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+            [now.to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    pub fn browser_last_connected_at(&self) -> Result<Option<String>, StoreError> {
+        Ok(setting(&self.connection, "browser_last_connected_at")?)
+    }
+
+    pub fn queue_browser_connection_check(&mut self) -> Result<BrowserSessionSummary, StoreError> {
+        if self.approved_extension_id()?.is_none() || self.approved_installation_id()?.is_none() {
+            return Err(StoreError::InvalidBrowserTransition(
+                "connect an approved Chrome extension before checking a page".to_string(),
+            ));
+        }
+        let existing = self
+            .connection
+            .query_row(
+                "SELECT id FROM browser_sessions
+                  WHERE purpose = 'connection_check'
+                    AND status IN ('waiting_for_extension', 'inspecting', 'releasing')
+                  ORDER BY created_at DESC LIMIT 1",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        if let Some(id) = existing {
+            return self.browser_session(&id);
+        }
+        let transaction = self.connection.transaction()?;
+        let now = Utc::now().to_rfc3339();
+        let session_id = Uuid::new_v4().to_string();
+        transaction.execute(
+            "INSERT INTO browser_sessions(
+               id, purpose, status, created_at, updated_at
+             ) VALUES (?1, 'connection_check', 'waiting_for_extension', ?2, ?2)",
+            params![session_id, now],
+        )?;
+        insert_browser_command(
+            &transaction,
+            &session_id,
+            "inspect_request",
+            &serde_json::json!({}),
+            &now,
+        )?;
+        transaction.execute(
+            "INSERT INTO activity(id, kind, message, occurred_at)
+             VALUES (?1, 'browser', 'Waiting for the selected Chrome extension to inspect the active supported ATS page.', ?2)",
+            params![Uuid::new_v4().to_string(), now],
+        )?;
+        transaction.commit()?;
+        self.browser_session(&session_id)
+    }
+
+    pub fn queue_application_session(
+        &mut self,
+        preparation_id: &str,
+    ) -> Result<BrowserSessionSummary, StoreError> {
+        if self.approved_extension_id()?.is_none() || self.approved_installation_id()?.is_none() {
+            return Err(StoreError::InvalidBrowserTransition(
+                "connect an approved Chrome profile before continuing".to_string(),
+            ));
+        }
+        let preparation = self
+            .connection
+            .query_row(
+                "SELECT p.role_id, p.provider, p.report_path, r.application_url
+               FROM preparation_jobs p JOIN roles r ON r.id = p.role_id
+              WHERE p.id = ?1 AND p.status = 'completed'",
+                [preparation_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                    ))
+                },
+            )
+            .optional()?
+            .ok_or_else(|| {
+                StoreError::InvalidBrowserTransition(
+                    "the preparation is missing or not completed".to_string(),
+                )
+            })?;
+        if preparation.2.as_deref().unwrap_or_default().is_empty() {
+            return Err(StoreError::InvalidBrowserTransition(
+                "the preparation has no canonical report".to_string(),
+            ));
+        }
+        let url = preparation.3.ok_or_else(|| {
+            StoreError::InvalidBrowserTransition("the role has no application URL".to_string())
+        })?;
+        let form_url = application_form_url(&url)?;
+        let existing = self
+            .connection
+            .query_row(
+                "SELECT id FROM browser_sessions
+              WHERE preparation_id = ?1 AND status IN (
+                    'waiting_for_extension', 'inspecting', 'drafting_answers', 'answering',
+                    'filling', 'persisting_answers', 'saving_answers', 'releasing',
+                    'submitted_tracking_pending', 'applied_recorded'
+              )
+              ORDER BY created_at DESC LIMIT 1",
+                [preparation_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        if let Some(id) = existing {
+            return self.browser_session(&id);
+        }
+        let transaction = self.connection.transaction()?;
+        let now = Utc::now().to_rfc3339();
+        let session_id = Uuid::new_v4().to_string();
+        transaction.execute(
+            "INSERT INTO browser_sessions(
+               id, purpose, role_id, preparation_id, provider, status, page_url, created_at, updated_at
+             ) VALUES (?1, 'application', ?2, ?3, ?4, 'waiting_for_extension', ?5, ?6, ?6)",
+            params![session_id, preparation.0, preparation_id, preparation.1, form_url, now],
+        )?;
+        insert_browser_command(
+            &transaction,
+            &session_id,
+            "inspect_request",
+            &serde_json::json!({ "expectedUrl": form_url }),
+            &now,
+        )?;
+        transaction.commit()?;
+        self.browser_session(&session_id)
+    }
+
+    pub fn browser_sessions(&self) -> Result<Vec<BrowserSessionSummary>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, purpose, role_id, preparation_id, status, ats, page_title, page_url,
+                    snapshot_fingerprint, field_count, safe_field_count,
+                    needs_user_count, error_code, review_items_json, fill_results_json, updated_at
+               FROM browser_sessions ORDER BY updated_at DESC LIMIT 20",
+        )?;
+        statement
+            .query_map([], browser_session_from_row)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
+    }
+
+    pub fn claim_browser_command(
+        &mut self,
+        now: DateTime<Utc>,
+        lease_duration: Duration,
+    ) -> Result<Option<BrowserCommand>, StoreError> {
+        let transaction = self.connection.transaction()?;
+        let now_text = now.to_rfc3339();
+        transaction.execute(
+            "UPDATE browser_commands
+                SET status = CASE WHEN attempt >= ?1 THEN 'permanent' ELSE 'pending' END,
+                    error_code = 'lease_expired', lease_expires_at = NULL, updated_at = ?2
+              WHERE status = 'leased' AND lease_expires_at < ?2",
+            params![MAX_BROWSER_COMMAND_ATTEMPTS, now_text],
+        )?;
+        transaction.execute(
+            "UPDATE browser_sessions SET status = 'action_required', error_code = 'extension_command_expired', updated_at = ?1
+              WHERE id IN (
+                SELECT session_id FROM browser_commands WHERE status = 'permanent' AND error_code = 'lease_expired'
+              )",
+            [now_text.clone()],
+        )?;
+        let candidate = transaction
+            .query_row(
+                "SELECT id, session_id, command_type, payload_json
+                   FROM browser_commands
+                  WHERE status = 'pending' AND attempt < ?1
+                  ORDER BY created_at, id LIMIT 1",
+                [MAX_BROWSER_COMMAND_ATTEMPTS],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((command_id, session_id, command_type, payload_json)) = candidate else {
+            transaction.commit()?;
+            return Ok(None);
+        };
+        let lease_expires_at = now + lease_duration;
+        transaction.execute(
+            "UPDATE browser_commands
+                SET status = 'leased', attempt = attempt + 1, lease_expires_at = ?1,
+                    error_code = NULL, updated_at = ?2
+              WHERE id = ?3 AND status = 'pending'",
+            params![lease_expires_at.to_rfc3339(), now_text, command_id],
+        )?;
+        let session_status = match command_type.as_str() {
+            "release_for_review" => "releasing",
+            "fill_plan" => "filling",
+            _ => "inspecting",
+        };
+        transaction.execute(
+            "UPDATE browser_sessions SET status = ?1, error_code = NULL, updated_at = ?2 WHERE id = ?3",
+            params![session_status, now_text, session_id],
+        )?;
+        transaction.commit()?;
+        let payload = serde_json::from_str(&payload_json).map_err(|error| {
+            StoreError::InvalidBrowserTransition(format!(
+                "stored browser payload is invalid: {error}"
+            ))
+        })?;
+        Ok(Some(BrowserCommand {
+            command_id,
+            session_id,
+            command_type,
+            payload,
+        }))
+    }
+
+    pub fn complete_browser_inspection(
+        &mut self,
+        command_id: &str,
+        inspection: &BrowserInspection,
+    ) -> Result<BrowserSessionSummary, StoreError> {
+        let transaction = self.connection.transaction()?;
+        let session_id = leased_browser_command(&transaction, command_id, "inspect_request")?;
+        let now = Utc::now().to_rfc3339();
+        transaction.execute(
+            "UPDATE browser_commands
+                SET status = 'completed', lease_expires_at = NULL, error_code = NULL, updated_at = ?1
+              WHERE id = ?2",
+            params![now, command_id],
+        )?;
+        let (purpose, expected_url) = transaction.query_row(
+            "SELECT purpose, page_url FROM browser_sessions WHERE id = ?1",
+            [&session_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+        )?;
+        if purpose == "application"
+            && expected_url.as_deref().is_none_or(|expected| {
+                expected.split('#').next() != inspection.page_url.split('#').next()
+            })
+        {
+            return Err(StoreError::InvalidBrowserTransition(
+                "inspected page does not match the prepared role".to_string(),
+            ));
+        }
+        let next_status = if purpose == "application" {
+            "drafting_answers"
+        } else {
+            "releasing"
+        };
+        transaction.execute(
+            "UPDATE browser_sessions
+                SET status = ?1, ats = ?2, page_title = ?3, page_url = ?4,
+                    snapshot_fingerprint = ?5, fields_json = ?6, field_count = ?7,
+                    safe_field_count = ?8, needs_user_count = ?9, error_code = NULL,
+                    updated_at = ?10
+              WHERE id = ?11",
+            params![
+                next_status,
+                inspection.ats,
+                inspection.page_title,
+                inspection.page_url,
+                inspection.snapshot_fingerprint,
+                inspection.fields.to_string(),
+                inspection.fields.as_array().map_or(0, Vec::len) as i64,
+                inspection.safe_field_count as i64,
+                inspection.needs_user_count as i64,
+                now,
+                session_id
+            ],
+        )?;
+        if purpose == "connection_check" {
+            insert_browser_command(
+                &transaction,
+                &session_id,
+                "release_for_review",
+                &serde_json::json!({ "expectedUrl": inspection.page_url }),
+                &now,
+            )?;
+        }
+        transaction.commit()?;
+        self.browser_session(&session_id)
+    }
+
+    pub fn claim_answer_work(&mut self) -> Result<Option<BrowserAnswerWork>, StoreError> {
+        let transaction = self.connection.transaction()?;
+        let candidate = transaction
+            .query_row(
+                "SELECT b.id, b.preparation_id, b.provider, p.report_path, b.ats, b.page_url,
+                    b.page_title, b.fields_json, b.snapshot_fingerprint
+               FROM browser_sessions b JOIN preparation_jobs p ON p.id = b.preparation_id
+              WHERE b.status = 'drafting_answers'
+              ORDER BY b.updated_at LIMIT 1",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, String>(6)?,
+                        row.get::<_, String>(7)?,
+                        row.get::<_, String>(8)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some(candidate) = candidate else {
+            transaction.commit()?;
+            return Ok(None);
+        };
+        let now = Utc::now().to_rfc3339();
+        let changed = transaction.execute(
+            "UPDATE browser_sessions SET status = 'answering', error_code = NULL, updated_at = ?1
+              WHERE id = ?2 AND status = 'drafting_answers'",
+            params![now, candidate.0],
+        )?;
+        if changed != 1 {
+            transaction.commit()?;
+            return Ok(None);
+        }
+        transaction.commit()?;
+        let fields: serde_json::Value = serde_json::from_str(&candidate.7).map_err(|error| {
+            StoreError::InvalidBrowserTransition(format!("stored form fields are invalid: {error}"))
+        })?;
+        Ok(Some(BrowserAnswerWork {
+            session_id: candidate.0,
+            preparation_id: candidate.1,
+            provider: candidate.2,
+            report_path: candidate.3,
+            snapshot: serde_json::json!({
+                "protocolVersion": 1,
+                "ats": candidate.4,
+                "url": candidate.5,
+                "title": candidate.6,
+                "fields": fields,
+                "fingerprint": candidate.8,
+            }),
+            snapshot_fingerprint: candidate.8,
+        }))
+    }
+
+    pub fn complete_answer_work(
+        &mut self,
+        session_id: &str,
+        context_hash: &str,
+        fill_plan: &serde_json::Value,
+        review_items: &serde_json::Value,
+    ) -> Result<BrowserSessionSummary, StoreError> {
+        let transaction = self.connection.transaction()?;
+        let fingerprint = transaction.query_row(
+            "SELECT snapshot_fingerprint FROM browser_sessions WHERE id = ?1 AND status = 'answering'",
+            [session_id],
+            |row| row.get::<_, String>(0),
+        ).optional()?.ok_or_else(|| StoreError::InvalidBrowserTransition(
+            "answer session is missing or no longer active".to_string(),
+        ))?;
+        if fill_plan
+            .get("snapshotFingerprint")
+            .and_then(serde_json::Value::as_str)
+            != Some(fingerprint.as_str())
+        {
+            return Err(StoreError::InvalidBrowserTransition(
+                "fill plan does not match the inspected form".to_string(),
+            ));
+        }
+        let instructions = fill_plan
+            .get("instructions")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| {
+                StoreError::InvalidBrowserTransition(
+                    "fill plan is missing instructions".to_string(),
+                )
+            })?;
+        let now = Utc::now().to_rfc3339();
+        let next_status = if instructions.is_empty() {
+            "persisting_answers"
+        } else {
+            "filling"
+        };
+        let empty_fill_results = serde_json::json!([]);
+        transaction.execute(
+            "UPDATE browser_sessions SET status = ?1, answers_context_hash = ?2,
+                    review_items_json = ?3, fill_results_json = ?4,
+                    error_code = NULL, updated_at = ?5 WHERE id = ?6",
+            params![
+                next_status,
+                context_hash,
+                review_items.to_string(),
+                if instructions.is_empty() {
+                    Some(empty_fill_results.to_string())
+                } else {
+                    None
+                },
+                now,
+                session_id
+            ],
+        )?;
+        if !instructions.is_empty() {
+            insert_browser_command(
+                &transaction,
+                session_id,
+                "fill_plan",
+                &serde_json::json!({ "plan": fill_plan }),
+                &now,
+            )?;
+        }
+        transaction.commit()?;
+        self.browser_session(session_id)
+    }
+
+    pub fn fail_answer_work(
+        &mut self,
+        session_id: &str,
+        error_code: &str,
+    ) -> Result<(), StoreError> {
+        self.connection.execute(
+            "UPDATE browser_sessions SET status = 'action_required', error_code = ?1, updated_at = ?2
+              WHERE id = ?3 AND status = 'answering'",
+            params![error_code, Utc::now().to_rfc3339(), session_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn complete_browser_fill(
+        &mut self,
+        command_id: &str,
+        results: &serde_json::Value,
+    ) -> Result<BrowserSessionSummary, StoreError> {
+        let transaction = self.connection.transaction()?;
+        let session_id = leased_browser_command(&transaction, command_id, "fill_plan")?;
+        let now = Utc::now().to_rfc3339();
+        transaction.execute(
+            "UPDATE browser_commands SET status = 'completed', lease_expires_at = NULL,
+                    error_code = NULL, updated_at = ?1 WHERE id = ?2",
+            params![now, command_id],
+        )?;
+        transaction.execute(
+            "UPDATE browser_sessions SET status = 'persisting_answers', fill_results_json = ?1,
+                    error_code = NULL, updated_at = ?2 WHERE id = ?3",
+            params![results.to_string(), now, session_id],
+        )?;
+        transaction.commit()?;
+        self.browser_session(&session_id)
+    }
+
+    pub fn claim_answer_commit_work(
+        &mut self,
+    ) -> Result<Option<BrowserAnswerCommitWork>, StoreError> {
+        let transaction = self.connection.transaction()?;
+        let candidate = transaction
+            .query_row(
+                "SELECT b.id, b.preparation_id, p.report_path, p.cv_pdf_path,
+                        b.answers_context_hash, b.review_items_json, b.fill_results_json
+                   FROM browser_sessions b JOIN preparation_jobs p ON p.id = b.preparation_id
+                  WHERE b.status = 'persisting_answers'
+                  ORDER BY b.updated_at LIMIT 1",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, String>(6)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some(candidate) = candidate else {
+            transaction.commit()?;
+            return Ok(None);
+        };
+        let now = Utc::now().to_rfc3339();
+        let changed = transaction.execute(
+            "UPDATE browser_sessions SET status = 'saving_answers', error_code = NULL,
+                    updated_at = ?1 WHERE id = ?2 AND status = 'persisting_answers'",
+            params![now, candidate.0],
+        )?;
+        if changed != 1 {
+            transaction.commit()?;
+            return Ok(None);
+        }
+        transaction.commit()?;
+        let review_items = serde_json::from_str(&candidate.5).map_err(|error| {
+            StoreError::InvalidBrowserTransition(format!(
+                "stored review items are invalid: {error}"
+            ))
+        })?;
+        let fill_results = serde_json::from_str(&candidate.6).map_err(|error| {
+            StoreError::InvalidBrowserTransition(format!(
+                "stored fill results are invalid: {error}"
+            ))
+        })?;
+        Ok(Some(BrowserAnswerCommitWork {
+            session_id: candidate.0,
+            preparation_id: candidate.1,
+            report_path: candidate.2,
+            cv_pdf_path: candidate.3,
+            context_hash: candidate.4,
+            review_items,
+            fill_results,
+        }))
+    }
+
+    pub fn complete_answer_commit(
+        &mut self,
+        session_id: &str,
+        context_hash: &str,
+        report_hash: &str,
+    ) -> Result<BrowserSessionSummary, StoreError> {
+        let transaction = self.connection.transaction()?;
+        let (stored_hash, expected_url) = transaction
+            .query_row(
+                "SELECT answers_context_hash, page_url FROM browser_sessions
+                  WHERE id = ?1 AND status = 'saving_answers'",
+                [session_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?
+            .ok_or_else(|| {
+                StoreError::InvalidBrowserTransition(
+                    "answer persistence session is missing or no longer active".to_string(),
+                )
+            })?;
+        if stored_hash != context_hash || report_hash.len() != 64 {
+            return Err(StoreError::InvalidBrowserTransition(
+                "persisted answers do not match this form session".to_string(),
+            ));
+        }
+        let now = Utc::now().to_rfc3339();
+        transaction.execute(
+            "UPDATE browser_sessions SET status = 'releasing', answers_report_hash = ?1,
+                    error_code = NULL, updated_at = ?2 WHERE id = ?3",
+            params![report_hash, now, session_id],
+        )?;
+        insert_browser_command(
+            &transaction,
+            session_id,
+            "release_for_review",
+            &serde_json::json!({ "expectedUrl": expected_url }),
+            &now,
+        )?;
+        transaction.commit()?;
+        self.browser_session(session_id)
+    }
+
+    pub fn fail_answer_commit(
+        &mut self,
+        session_id: &str,
+        error_code: &str,
+    ) -> Result<(), StoreError> {
+        self.connection.execute(
+            "UPDATE browser_sessions SET status = 'action_required', error_code = ?1,
+                    updated_at = ?2 WHERE id = ?3 AND status = 'saving_answers'",
+            params![error_code, Utc::now().to_rfc3339(), session_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn complete_browser_release(
+        &mut self,
+        command_id: &str,
+    ) -> Result<BrowserSessionSummary, StoreError> {
+        let transaction = self.connection.transaction()?;
+        let session_id = leased_browser_command(&transaction, command_id, "release_for_review")?;
+        let purpose = transaction.query_row(
+            "SELECT purpose FROM browser_sessions WHERE id = ?1",
+            [&session_id],
+            |row| row.get::<_, String>(0),
+        )?;
+        let next_status = if purpose == "connection_check" {
+            "connection_verified"
+        } else {
+            "review_required"
+        };
+        let now = Utc::now().to_rfc3339();
+        transaction.execute(
+            "UPDATE browser_commands
+                SET status = 'completed', lease_expires_at = NULL, error_code = NULL, updated_at = ?1
+              WHERE id = ?2",
+            params![now, command_id],
+        )?;
+        transaction.execute(
+            "UPDATE browser_sessions SET status = ?1, error_code = NULL, updated_at = ?2 WHERE id = ?3",
+            params![next_status, now, session_id],
+        )?;
+        if purpose == "connection_check" {
+            transaction.execute(
+                "INSERT INTO activity(id, kind, message, occurred_at)
+                 VALUES (?1, 'browser', 'The extension inspected a supported ATS page and released it without filling or finalizing anything.', ?2)",
+                params![Uuid::new_v4().to_string(), now],
+            )?;
+        }
+        transaction.commit()?;
+        self.browser_session(&session_id)
+    }
+
+    pub fn fail_browser_command(
+        &mut self,
+        command_id: &str,
+        error_code: &str,
+    ) -> Result<BrowserSessionSummary, StoreError> {
+        let transaction = self.connection.transaction()?;
+        let (session_id, attempt) = transaction.query_row(
+            "SELECT session_id, attempt FROM browser_commands WHERE id = ?1 AND status = 'leased'",
+            [command_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+        )?;
+        let command_status = if attempt >= MAX_BROWSER_COMMAND_ATTEMPTS {
+            "permanent"
+        } else {
+            "failed"
+        };
+        let now = Utc::now().to_rfc3339();
+        transaction.execute(
+            "UPDATE browser_commands SET status = ?1, lease_expires_at = NULL,
+                    error_code = ?2, updated_at = ?3 WHERE id = ?4",
+            params![command_status, error_code, now, command_id],
+        )?;
+        transaction.execute(
+            "UPDATE browser_sessions SET status = 'action_required', error_code = ?1,
+                    updated_at = ?2 WHERE id = ?3",
+            params![error_code, now, session_id],
+        )?;
+        transaction.commit()?;
+        self.browser_session(&session_id)
+    }
+
+    pub fn retry_browser_session(
+        &mut self,
+        session_id: &str,
+    ) -> Result<BrowserSessionSummary, StoreError> {
+        let transaction = self.connection.transaction()?;
+        let (status, error_code) = transaction
+            .query_row(
+                "SELECT status, error_code FROM browser_sessions WHERE id = ?1",
+                [session_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+            )
+            .optional()?
+            .ok_or_else(|| {
+                StoreError::InvalidBrowserTransition("browser session not found".to_string())
+            })?;
+        if status != "action_required" {
+            return Err(StoreError::InvalidBrowserTransition(
+                "only an action-required browser session can be retried".to_string(),
+            ));
+        }
+        let failed_command = transaction
+            .query_row(
+                "SELECT command_type, payload_json FROM browser_commands
+              WHERE session_id = ?1 AND status IN ('failed', 'permanent')
+              ORDER BY updated_at DESC LIMIT 1",
+                [session_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?;
+        if failed_command.is_none() {
+            let next_status = match error_code.as_deref() {
+                Some("answer_persistence_failed" | "answer_persistence_interrupted") => {
+                    "persisting_answers"
+                }
+                _ => "drafting_answers",
+            };
+            transaction.execute(
+                "UPDATE browser_sessions SET status = ?1, error_code = NULL, updated_at = ?2 WHERE id = ?3",
+                params![next_status, Utc::now().to_rfc3339(), session_id],
+            )?;
+            transaction.commit()?;
+            return self.browser_session(session_id);
+        }
+        let (command_type, payload_json) = failed_command.expect("checked above");
+        let payload: serde_json::Value = serde_json::from_str(&payload_json).map_err(|error| {
+            StoreError::InvalidBrowserTransition(format!(
+                "stored browser payload is invalid: {error}"
+            ))
+        })?;
+        let now = Utc::now().to_rfc3339();
+        insert_browser_command(&transaction, session_id, &command_type, &payload, &now)?;
+        let next_status = match command_type.as_str() {
+            "release_for_review" => "releasing",
+            "fill_plan" => "filling",
+            _ => "waiting_for_extension",
+        };
+        transaction.execute(
+            "UPDATE browser_sessions SET status = ?1, error_code = NULL, updated_at = ?2 WHERE id = ?3",
+            params![next_status, now, session_id],
+        )?;
+        transaction.commit()?;
+        self.browser_session(session_id)
+    }
+
+    fn browser_session(&self, session_id: &str) -> Result<BrowserSessionSummary, StoreError> {
+        self.connection
+            .query_row(
+                "SELECT id, purpose, role_id, preparation_id, status, ats, page_title, page_url,
+                        snapshot_fingerprint, field_count, safe_field_count,
+                        needs_user_count, error_code, review_items_json, fill_results_json, updated_at
+                   FROM browser_sessions WHERE id = ?1",
+                [session_id],
+                browser_session_from_row,
+            )
+            .map_err(StoreError::from)
+    }
+
+    pub fn integrity_check(&self) -> Result<String, StoreError> {
+        self.connection
+            .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+            .map_err(StoreError::from)
+    }
+
+    pub fn backup_to(&self, path: &Path) -> Result<(), StoreError> {
+        self.connection.backup(rusqlite::MAIN_DB, path, None)?;
+        Ok(())
+    }
+
+    pub fn redacted_diagnostics(&self) -> Result<serde_json::Value, StoreError> {
+        let role_count = self
+            .connection
+            .query_row("SELECT COUNT(*) FROM roles", [], |row| row.get::<_, i64>(0))?;
+        let occurrence_count =
+            self.connection
+                .query_row("SELECT COUNT(*) FROM source_occurrences", [], |row| {
+                    row.get::<_, i64>(0)
+                })?;
+        let handled_count = self.connection.query_row(
+            "SELECT COUNT(*) FROM roles WHERE canonical_tracker_id IS NOT NULL",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?;
+        let mut status_statement = self
+            .connection
+            .prepare("SELECT status, COUNT(*) FROM runs GROUP BY status ORDER BY status")?;
+        let run_statuses = status_statement
+            .query_map([], |row| {
+                Ok(serde_json::json!({
+                    "status": row.get::<_, String>(0)?,
+                    "count": row.get::<_, i64>(1)?,
+                }))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut source_statement = self.connection.prepare(
+            "SELECT source_id, timezone, schedule_hours, execution_mode,
+                    last_successful_at
+               FROM source_schedules WHERE enabled = 1 ORDER BY source_id",
+        )?;
+        let sources = source_statement
+            .query_map([], |row| {
+                Ok(serde_json::json!({
+                    "sourceId": row.get::<_, String>(0)?,
+                    "timezone": row.get::<_, String>(1)?,
+                    "scheduleHours": row.get::<_, String>(2)?,
+                    "executionMode": row.get::<_, String>(3)?,
+                    "lastSuccessfulAt": row.get::<_, Option<String>>(4)?,
+                }))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        let browser_session_count =
+            self.connection
+                .query_row("SELECT COUNT(*) FROM browser_sessions", [], |row| {
+                    row.get::<_, i64>(0)
+                })?;
+        let mut browser_status_statement = self.connection.prepare(
+            "SELECT status, COUNT(*) FROM browser_sessions GROUP BY status ORDER BY status",
+        )?;
+        let browser_statuses = browser_status_statement
+            .query_map([], |row| {
+                Ok(serde_json::json!({
+                    "status": row.get::<_, String>(0)?,
+                    "count": row.get::<_, i64>(1)?,
+                }))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut preparation_status_statement = self.connection.prepare(
+            "SELECT status, COUNT(*) FROM preparation_jobs GROUP BY status ORDER BY status",
+        )?;
+        let preparation_statuses = preparation_status_statement
+            .query_map([], |row| {
+                Ok(serde_json::json!({
+                    "status": row.get::<_, String>(0)?,
+                    "count": row.get::<_, i64>(1)?,
+                }))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(serde_json::json!({
+            "operationalSchemaVersion": SCHEMA_VERSION,
+            "counts": {
+                "roles": role_count,
+                "sourceOccurrences": occurrence_count,
+                "handledRoles": handled_count,
+            },
+            "runStatuses": run_statuses,
+            "browser": {
+                "sessionCount": browser_session_count,
+                "statuses": browser_statuses,
+            },
+            "preparationStatuses": preparation_statuses,
+            "sources": sources,
+            "redaction": {
+                "roleDetails": "omitted",
+                "applicationUrls": "omitted",
+                "activityMessages": "omitted",
+                "providerOutput": "omitted",
+                "artifactPathsAndHashes": "omitted",
+                "browserProfile": "omitted",
+                "browserPageUrls": "omitted",
+                "browserPageTitles": "omitted",
+                "formFields": "omitted"
+            }
+        }))
+    }
+
+    pub fn restore_preflight(path: &Path) -> Result<RestorePreflight, StoreError> {
+        let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let integrity =
+            connection.query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0))?;
+        let schema_version =
+            connection.query_row("SELECT version FROM schema_meta LIMIT 1", [], |row| {
+                row.get::<_, i64>(0)
+            })?;
+        let role_count =
+            connection.query_row("SELECT COUNT(*) FROM roles", [], |row| row.get::<_, i64>(0))?;
+        let run_count =
+            connection.query_row("SELECT COUNT(*) FROM runs", [], |row| row.get::<_, i64>(0))?;
+        Ok(RestorePreflight {
+            path: path.display().to_string(),
+            integrity,
+            schema_version,
+            role_count,
+            run_count,
+        })
+    }
+
+    pub fn reconcile_history(
+        &mut self,
+        records: &[HistoryRecord],
+    ) -> Result<ReconcileResult, StoreError> {
+        let transaction = self.connection.transaction()?;
+        let cleared = transaction.execute(
+            "UPDATE roles SET canonical_tracker_id = NULL, canonical_status = NULL, canonical_date = NULL
+             WHERE canonical_tracker_id IS NOT NULL",
+            [],
+        )?;
+        let mut role_statement = transaction.prepare("SELECT id, company, title FROM roles")?;
+        let roles = role_statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(role_statement);
+
+        let mut matched = 0;
+        for (role_id, company, title) in roles {
+            if let Some(record) = records
+                .iter()
+                .filter(|record| company_matches(&company, &record.company))
+                .find(|record| title_matches(&title, &record.role))
+            {
+                transaction.execute(
+                    "UPDATE roles SET canonical_tracker_id = ?1, canonical_status = ?2, canonical_date = ?3,
+                       canonical_visibility_override = CASE
+                         WHEN canonical_visibility_override = 1 AND ?2 = 'Evaluated' THEN 1 ELSE 0 END,
+                       updated_at = ?4 WHERE id = ?5",
+                    params![
+                        record.id,
+                        record.status,
+                        record.date,
+                        Utc::now().to_rfc3339(),
+                        role_id
+                    ],
+                )?;
+                matched += 1;
+            }
+        }
+        transaction.execute(
+            "UPDATE roles SET canonical_visibility_override = 0 WHERE canonical_tracker_id IS NULL",
+            [],
+        )?;
+        transaction.execute(
+            "INSERT INTO activity(id, kind, message, occurred_at) VALUES (?1, 'history', ?2, ?3)",
+            params![
+                Uuid::new_v4().to_string(),
+                format!(
+                    "Canonical history reconciled: {matched} queue roles matched against {} career-ops records.",
+                    records.len()
+                ),
+                Utc::now().to_rfc3339(),
+            ],
+        )?;
+        transaction.execute(
+            "INSERT INTO settings(key, value, updated_at) VALUES ('last_history_reconcile_at', ?1, ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+            [Utc::now().to_rfc3339()],
+        )?;
+        transaction.commit()?;
+        Ok(ReconcileResult {
+            matched,
+            cleared,
+            unmatched: records.len().saturating_sub(matched),
+        })
+    }
+
+    pub fn begin_discard_effect(
+        &mut self,
+        role_id: &str,
+    ) -> Result<AdapterEffectContext, StoreError> {
+        self.begin_adapter_effect(role_id, "role.discard", None, None)
+    }
+
+    pub fn begin_applied_effect_for_session(
+        &mut self,
+        session_id: &str,
+    ) -> Result<(String, AdapterEffectContext), StoreError> {
+        let (role_id, tracker_id) = self
+            .connection
+            .query_row(
+                "SELECT b.role_id, r.canonical_tracker_id
+               FROM browser_sessions b JOIN roles r ON r.id = b.role_id
+              WHERE b.id = ?1 AND b.purpose = 'application'
+                AND b.status IN ('review_required', 'submitted_tracking_pending')",
+                [session_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?)),
+            )
+            .optional()?
+            .ok_or_else(|| {
+                StoreError::InvalidAdapterEffect(
+                    "application is not waiting for outcome confirmation".to_string(),
+                )
+            })?;
+        let tracker_id = tracker_id.ok_or_else(|| {
+            StoreError::InvalidAdapterEffect("canonical tracker row is missing".to_string())
+        })?;
+        let effect = self.begin_adapter_effect(
+            &role_id,
+            "application.applied.confirm",
+            None,
+            Some(tracker_id),
+        )?;
+        Ok((role_id, effect))
+    }
+
+    pub fn begin_preparation(
+        &mut self,
+        role_id: &str,
+        provider: &str,
+    ) -> Result<PreparationWork, StoreError> {
+        if !matches!(provider, "codex" | "claude") {
+            return Err(StoreError::InvalidPreparation(
+                "provider must be codex or claude".to_string(),
+            ));
+        }
+        let role = self.adapter_role_context(role_id)?;
+        if role.application_url.is_none() {
+            return Err(StoreError::InvalidPreparation(
+                "the role has no application URL".to_string(),
+            ));
+        }
+        let existing = self
+            .connection
+            .query_row(
+                "SELECT id, provider FROM preparation_jobs
+                  WHERE role_id = ?1 AND status = 'action_required'
+                  ORDER BY updated_at DESC LIMIT 1",
+                [role_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?;
+        let now = Utc::now().to_rfc3339();
+        if let Some((id, stored_provider)) = existing {
+            if stored_provider != provider {
+                return Err(StoreError::InvalidPreparation(format!(
+                    "retry must use the original {stored_provider} provider"
+                )));
+            }
+            self.connection.execute(
+                "UPDATE preparation_jobs
+                    SET status = 'preparing', step = 'preparing_report', attempt = attempt + 1,
+                        error_class = NULL, updated_at = ?1
+                  WHERE id = ?2",
+                params![now, id],
+            )?;
+            self.connection.execute(
+                "UPDATE roles SET preparation_state = 'preparing', updated_at = ?1 WHERE id = ?2",
+                params![now, role_id],
+            )?;
+            return Ok(PreparationWork { id, role });
+        }
+        let already_active: bool = self.connection.query_row(
+            "SELECT EXISTS(
+               SELECT 1 FROM preparation_jobs
+                WHERE role_id = ?1 AND status IN ('queued', 'preparing', 'completed')
+             )",
+            [role_id],
+            |row| row.get(0),
+        )?;
+        if already_active {
+            return Err(StoreError::InvalidPreparation(
+                "this role already has an active or completed preparation".to_string(),
+            ));
+        }
+        let id = Uuid::new_v4().to_string();
+        let transaction = self.connection.transaction()?;
+        transaction.execute(
+            "INSERT INTO preparation_jobs(
+               id, role_id, provider, status, step, attempt, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, 'preparing', 'preparing_report', 1, ?4, ?4)",
+            params![id, role_id, provider, now],
+        )?;
+        transaction.execute(
+            "UPDATE roles SET preparation_state = 'preparing', review_state = 'viewed', updated_at = ?1
+              WHERE id = ?2",
+            params![now, role_id],
+        )?;
+        transaction.commit()?;
+        Ok(PreparationWork { id, role })
+    }
+
+    pub fn preparation_artifact_paths(
+        &self,
+        preparation_id: &str,
+    ) -> Result<(String, String), StoreError> {
+        self.connection
+            .query_row(
+                "SELECT report_path, cv_pdf_path FROM preparation_jobs
+                  WHERE id = ?1 AND status = 'completed'",
+                [preparation_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?
+            .ok_or_else(|| {
+                StoreError::InvalidPreparation(
+                    "completed preparation artifacts were not found".to_string(),
+                )
+            })
+    }
+
+    pub fn record_preparation_context(
+        &mut self,
+        preparation_id: &str,
+        context_hash: &str,
+    ) -> Result<(), StoreError> {
+        let changed = self.connection.execute(
+            "UPDATE preparation_jobs
+                SET context_hash = ?1, step = 'preparing_cv', updated_at = ?2
+              WHERE id = ?3 AND status = 'preparing'",
+            params![context_hash, Utc::now().to_rfc3339(), preparation_id],
+        )?;
+        if changed != 1 {
+            return Err(StoreError::InvalidPreparation(
+                "preparation is missing or no longer active".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn complete_preparation(
+        &mut self,
+        preparation_id: &str,
+        tracker_id: i64,
+        report_path: &str,
+        report_hash: &str,
+        cv_pdf_path: &str,
+        cv_pdf_hash: &str,
+    ) -> Result<(), StoreError> {
+        let now = Utc::now().to_rfc3339();
+        let transaction = self.connection.transaction()?;
+        let role_id = transaction
+            .query_row(
+                "SELECT role_id FROM preparation_jobs WHERE id = ?1 AND status = 'preparing'",
+                [preparation_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .ok_or_else(|| {
+                StoreError::InvalidPreparation(
+                    "preparation is missing or no longer active".to_string(),
+                )
+            })?;
+        transaction.execute(
+            "UPDATE preparation_jobs
+                SET status = 'completed', step = 'prepared', tracker_id = ?1,
+                    report_path = ?2, report_hash = ?3, cv_pdf_path = ?4, cv_pdf_hash = ?5,
+                    error_class = NULL, updated_at = ?6
+              WHERE id = ?7",
+            params![
+                tracker_id,
+                report_path,
+                report_hash,
+                cv_pdf_path,
+                cv_pdf_hash,
+                now,
+                preparation_id
+            ],
+        )?;
+        transaction.execute(
+            "UPDATE roles
+                SET preparation_state = 'prepared', canonical_tracker_id = ?1,
+                    canonical_status = 'Evaluated', canonical_visibility_override = 0,
+                    updated_at = ?2
+              WHERE id = ?3",
+            params![tracker_id, now, role_id],
+        )?;
+        transaction.execute(
+            "INSERT INTO activity(id, kind, message, occurred_at)
+             VALUES (?1, 'preparation', 'career-ops prepared a report and verified tailored CV.', ?2)",
+            params![Uuid::new_v4().to_string(), now],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn fail_preparation(
+        &mut self,
+        preparation_id: &str,
+        error_class: &str,
+    ) -> Result<(), StoreError> {
+        let now = Utc::now().to_rfc3339();
+        let transaction = self.connection.transaction()?;
+        let role_id = transaction
+            .query_row(
+                "SELECT role_id FROM preparation_jobs WHERE id = ?1 AND status = 'preparing'",
+                [preparation_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        if let Some(role_id) = role_id {
+            transaction.execute(
+                "UPDATE preparation_jobs
+                    SET status = 'action_required', error_class = ?1, updated_at = ?2
+                  WHERE id = ?3",
+                params![error_class, now, preparation_id],
+            )?;
+            transaction.execute(
+                "UPDATE roles SET preparation_state = 'failed', updated_at = ?1 WHERE id = ?2",
+                params![now, role_id],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn cancel_preparation(&mut self, preparation_id: &str) -> Result<(), StoreError> {
+        let now = Utc::now().to_rfc3339();
+        let transaction = self.connection.transaction()?;
+        let role_id = transaction
+            .query_row(
+                "SELECT role_id FROM preparation_jobs WHERE id = ?1 AND status = 'preparing'",
+                [preparation_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        if let Some(role_id) = role_id {
+            transaction.execute(
+                "UPDATE preparation_jobs SET status = 'cancelled', step = 'cancelled',
+                        error_class = NULL, updated_at = ?1 WHERE id = ?2",
+                params![now, preparation_id],
+            )?;
+            transaction.execute(
+                "UPDATE roles SET preparation_state = 'not_started', updated_at = ?1 WHERE id = ?2",
+                params![now, role_id],
+            )?;
+            transaction.execute(
+                "INSERT INTO activity(id, kind, message, occurred_at)
+                 VALUES (?1, 'preparation', 'Application preparation was cancelled before canonical artifacts were committed.', ?2)",
+                params![Uuid::new_v4().to_string(), now],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn begin_undo_discard_effect(
+        &mut self,
+        role_id: &str,
+    ) -> Result<AdapterEffectContext, StoreError> {
+        let parent = self
+            .connection
+            .query_row(
+                "SELECT idempotency_key, tracker_id FROM adapter_effects
+                  WHERE role_id = ?1 AND operation = 'role.discard' AND status = 'completed'
+                  ORDER BY updated_at DESC LIMIT 1",
+                [role_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?)),
+            )
+            .optional()?
+            .ok_or_else(|| {
+                StoreError::InvalidAdapterEffect(
+                    "no completed HereForWork dismissal is available to undo".to_string(),
+                )
+            })?;
+        let tracker_id = parent.1.ok_or_else(|| {
+            StoreError::InvalidAdapterEffect(
+                "the completed dismissal has no canonical tracker id".to_string(),
+            )
+        })?;
+        self.begin_adapter_effect(
+            role_id,
+            "role.discard.undo",
+            Some(parent.0),
+            Some(tracker_id),
+        )
+    }
+
+    fn begin_adapter_effect(
+        &mut self,
+        role_id: &str,
+        operation: &str,
+        parent_effect_key: Option<String>,
+        tracker_id: Option<i64>,
+    ) -> Result<AdapterEffectContext, StoreError> {
+        let role = self.adapter_role_context(role_id)?;
+        let existing = self
+            .connection
+            .query_row(
+                "SELECT idempotency_key, parent_effect_key, tracker_id
+                   FROM adapter_effects
+                  WHERE role_id = ?1 AND operation = ?2
+                    AND status IN ('pending', 'action_required')
+                  ORDER BY updated_at DESC LIMIT 1",
+                params![role_id, operation],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<i64>>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+        if let Some((idempotency_key, stored_parent, stored_tracker_id)) = existing {
+            self.connection.execute(
+                "UPDATE adapter_effects SET status = 'pending', error_class = NULL, updated_at = ?1
+                  WHERE idempotency_key = ?2",
+                params![Utc::now().to_rfc3339(), idempotency_key],
+            )?;
+            return Ok(AdapterEffectContext {
+                idempotency_key,
+                role,
+                parent_effect_key: stored_parent,
+                tracker_id: stored_tracker_id,
+            });
+        }
+        let idempotency_key = Uuid::new_v4().to_string();
+        let now = Utc::now().to_rfc3339();
+        self.connection.execute(
+            "INSERT INTO adapter_effects(
+               idempotency_key, role_id, operation, status, parent_effect_key,
+               tracker_id, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, 'pending', ?4, ?5, ?6, ?6)",
+            params![
+                idempotency_key,
+                role_id,
+                operation,
+                parent_effect_key,
+                tracker_id,
+                now
+            ],
+        )?;
+        Ok(AdapterEffectContext {
+            idempotency_key,
+            role,
+            parent_effect_key,
+            tracker_id,
+        })
+    }
+
+    pub fn complete_discard_effect(
+        &mut self,
+        role_id: &str,
+        idempotency_key: &str,
+        tracker_id: i64,
+        canonical_status: &str,
+    ) -> Result<(), StoreError> {
+        if canonical_status != "Discarded" {
+            return Err(StoreError::InvalidAdapterEffect(
+                "discard effect returned a non-Discarded status".to_string(),
+            ));
+        }
+        self.complete_adapter_effect(
+            role_id,
+            idempotency_key,
+            tracker_id,
+            canonical_status,
+            "dismissed",
+            false,
+        )
+    }
+
+    pub fn complete_undo_discard_effect(
+        &mut self,
+        role_id: &str,
+        idempotency_key: &str,
+        tracker_id: i64,
+        canonical_status: &str,
+    ) -> Result<(), StoreError> {
+        if canonical_status != "Evaluated" {
+            return Err(StoreError::InvalidAdapterEffect(
+                "undo effect returned a non-Evaluated status".to_string(),
+            ));
+        }
+        self.complete_adapter_effect(
+            role_id,
+            idempotency_key,
+            tracker_id,
+            canonical_status,
+            "viewed",
+            true,
+        )
+    }
+
+    pub fn complete_applied_effect(
+        &mut self,
+        session_id: &str,
+        role_id: &str,
+        idempotency_key: &str,
+        tracker_id: i64,
+        canonical_status: &str,
+    ) -> Result<(), StoreError> {
+        if canonical_status != "Applied" {
+            return Err(StoreError::InvalidAdapterEffect(
+                "applied effect returned a non-Applied status".to_string(),
+            ));
+        }
+        let transaction = self.connection.transaction()?;
+        let changed = transaction.execute(
+            "UPDATE adapter_effects SET status = 'completed', tracker_id = ?1,
+                    error_class = NULL, updated_at = ?2
+              WHERE idempotency_key = ?3 AND role_id = ?4 AND status = 'pending'",
+            params![
+                tracker_id,
+                Utc::now().to_rfc3339(),
+                idempotency_key,
+                role_id
+            ],
+        )?;
+        if changed != 1 {
+            return Err(StoreError::InvalidAdapterEffect(
+                "applied effect is missing or no longer pending".to_string(),
+            ));
+        }
+        transaction.execute(
+            "UPDATE roles SET canonical_tracker_id = ?1, canonical_status = 'Applied',
+                    canonical_visibility_override = 0, updated_at = ?2 WHERE id = ?3",
+            params![tracker_id, Utc::now().to_rfc3339(), role_id],
+        )?;
+        transaction.execute(
+            "UPDATE browser_sessions SET status = 'applied_recorded', error_code = NULL,
+                    updated_at = ?1 WHERE id = ?2
+                    AND status IN ('review_required', 'submitted_tracking_pending')",
+            params![Utc::now().to_rfc3339(), session_id],
+        )?;
+        transaction.execute(
+            "INSERT INTO activity(id, kind, message, occurred_at)
+             VALUES (?1, 'application', 'The user confirmed submission; career-ops recorded the canonical Applied outcome.', ?2)",
+            params![Uuid::new_v4().to_string(), Utc::now().to_rfc3339()],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn mark_submitted_tracking_pending(&mut self, session_id: &str) -> Result<(), StoreError> {
+        self.connection.execute(
+            "UPDATE browser_sessions SET status = 'submitted_tracking_pending',
+                    error_code = 'canonical_write_failed', updated_at = ?1
+              WHERE id = ?2 AND status IN ('review_required', 'submitted_tracking_pending')",
+            params![Utc::now().to_rfc3339(), session_id],
+        )?;
+        Ok(())
+    }
+
+    fn complete_adapter_effect(
+        &mut self,
+        role_id: &str,
+        idempotency_key: &str,
+        tracker_id: i64,
+        canonical_status: &str,
+        review_state: &str,
+        visibility_override: bool,
+    ) -> Result<(), StoreError> {
+        let transaction = self.connection.transaction()?;
+        let changed = transaction.execute(
+            "UPDATE adapter_effects
+                SET status = 'completed', tracker_id = ?1, error_class = NULL, updated_at = ?2
+              WHERE idempotency_key = ?3 AND role_id = ?4 AND status = 'pending'",
+            params![
+                tracker_id,
+                Utc::now().to_rfc3339(),
+                idempotency_key,
+                role_id
+            ],
+        )?;
+        if changed != 1 {
+            return Err(StoreError::InvalidAdapterEffect(
+                "adapter effect is missing or no longer pending".to_string(),
+            ));
+        }
+        transaction.execute(
+            "UPDATE roles
+                SET canonical_tracker_id = ?1, canonical_status = ?2, review_state = ?3,
+                    canonical_visibility_override = ?4, updated_at = ?5
+              WHERE id = ?6",
+            params![
+                tracker_id,
+                canonical_status,
+                review_state,
+                i64::from(visibility_override),
+                Utc::now().to_rfc3339(),
+                role_id
+            ],
+        )?;
+        transaction.execute(
+            "INSERT INTO activity(id, kind, message, occurred_at) VALUES (?1, 'decision', ?2, ?3)",
+            params![
+                Uuid::new_v4().to_string(),
+                if visibility_override {
+                    "A dismissal was undone and the role returned to the review queue."
+                } else {
+                    "A role was recorded as Discarded in canonical career-ops history."
+                },
+                Utc::now().to_rfc3339()
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn fail_adapter_effect(
+        &mut self,
+        idempotency_key: &str,
+        error_class: &str,
+    ) -> Result<(), StoreError> {
+        self.connection.execute(
+            "UPDATE adapter_effects SET status = 'action_required', error_class = ?1, updated_at = ?2
+              WHERE idempotency_key = ?3 AND status = 'pending'",
+            params![error_class, Utc::now().to_rfc3339(), idempotency_key],
+        )?;
+        Ok(())
+    }
+
+    fn adapter_role_context(&self, role_id: &str) -> Result<AdapterRoleContext, StoreError> {
+        self.connection
+            .query_row(
+                "SELECT company, title, location, application_url FROM roles WHERE id = ?1",
+                [role_id],
+                |row| {
+                    Ok(AdapterRoleContext {
+                        company: row.get(0)?,
+                        title: row.get(1)?,
+                        location: row.get(2)?,
+                        application_url: row.get(3)?,
+                    })
+                },
+            )
+            .optional()?
+            .ok_or_else(|| StoreError::InvalidAdapterEffect("role not found".to_string()))
+    }
+
+    pub fn reconcile_due_runs(
+        &mut self,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<ScheduledRun>, StoreError> {
+        self.recover_expired_leases(now)?;
+        let mut statement = self.connection.prepare(
+            "SELECT source_id, schedule_hours, last_successful_at, execution_mode
+               FROM source_schedules WHERE enabled = 1",
+        )?;
+        let schedules = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(statement);
+        let mut created = Vec::new();
+        for (source_id, hours, last_successful_at, execution_mode) in schedules {
+            let cursor = last_successful_at
+                .as_deref()
+                .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+                .map(|value| value.with_timezone(&Utc))
+                .unwrap_or(now - Duration::days(1));
+            let due = missed_nominal_times(cursor, now, &hours);
+            let Some(coverage_end) = due.last().copied() else {
+                continue;
+            };
+            let status = if execution_mode == "active" {
+                "queued"
+            } else {
+                "action_required"
+            };
+            let run = ScheduledRun {
+                id: Uuid::new_v4().to_string(),
+                source_id: source_id.clone(),
+                coverage_start: cursor.to_rfc3339(),
+                coverage_end: coverage_end.to_rfc3339(),
+                status: status.to_string(),
+            };
+            let inserted = self.connection.execute(
+                "INSERT OR IGNORE INTO runs(
+                   id, source_id, kind, coverage_start, coverage_end, status, error_class,
+                   created_at, updated_at, dedupe_key
+                 ) VALUES (?1, ?2, 'catch_up', ?3, ?4, ?5, ?6, ?7, ?7, ?8)",
+                params![
+                    run.id,
+                    run.source_id,
+                    run.coverage_start,
+                    run.coverage_end,
+                    status,
+                    if status == "action_required" {
+                        Some("source_adapter_not_configured")
+                    } else {
+                        None
+                    },
+                    now.to_rfc3339(),
+                    format!("{}:{}", source_id, coverage_end.to_rfc3339())
+                ],
+            )?;
+            if inserted > 0 {
+                insert_run_steps(&self.connection, &run.id, status, &now.to_rfc3339())?;
+                self.connection.execute(
+                    "INSERT INTO activity(id, kind, message, occurred_at) VALUES (?1, 'schedule', ?2, ?3)",
+                    params![
+                        Uuid::new_v4().to_string(),
+                        if status == "queued" {
+                            format!("Queued one consolidated catch-up for {source_id}.")
+                        } else {
+                            format!(
+                                "Preserved a missed window for {source_id}; execution remains with the existing external workflow."
+                            )
+                        },
+                        now.to_rfc3339()
+                    ],
+                )?;
+                created.push(run);
+            }
+        }
+        Ok(created)
+    }
+
+    pub fn queue_manual_run(&mut self, source_id: &str) -> Result<ScheduledRun, StoreError> {
+        let execution_mode = self
+            .connection
+            .query_row(
+                "SELECT execution_mode FROM source_schedules WHERE source_id = ?1 AND enabled = 1",
+                [source_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .ok_or_else(|| StoreError::UnknownSource(source_id.to_string()))?;
+        if execution_mode != "active" {
+            return Err(StoreError::SourceNotReady(source_id.to_string()));
+        }
+        let now = Utc::now();
+        let run = ScheduledRun {
+            id: Uuid::new_v4().to_string(),
+            source_id: source_id.to_string(),
+            coverage_start: now.to_rfc3339(),
+            coverage_end: now.to_rfc3339(),
+            status: "queued".to_string(),
+        };
+        self.connection.execute(
+            "INSERT INTO runs(id, source_id, kind, coverage_start, coverage_end, status, created_at, updated_at, dedupe_key)
+             VALUES (?1, ?2, 'manual', ?3, ?4, 'queued', ?5, ?5, ?6)",
+            params![
+                run.id,
+                run.source_id,
+                run.coverage_start,
+                run.coverage_end,
+                now.to_rfc3339(),
+                format!("manual:{}", run.id)
+            ],
+        )?;
+        insert_run_steps(&self.connection, &run.id, "queued", &now.to_rfc3339())?;
+        Ok(run)
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn set_source_execution_mode(
+        &mut self,
+        source_id: &str,
+        execution_mode: &str,
+    ) -> Result<(), StoreError> {
+        if !matches!(execution_mode, "staged" | "active") {
+            return Err(StoreError::InvalidRunTransition(format!(
+                "unsupported source execution mode {execution_mode}"
+            )));
+        }
+        let changed = self.connection.execute(
+            "UPDATE source_schedules SET execution_mode = ?1 WHERE source_id = ?2",
+            params![execution_mode, source_id],
+        )?;
+        if changed == 0 {
+            return Err(StoreError::UnknownSource(source_id.to_string()));
+        }
+        if execution_mode == "active" {
+            let now = Utc::now().to_rfc3339();
+            self.connection.execute(
+                "UPDATE runs SET status = 'queued', error_class = NULL, updated_at = ?1
+                  WHERE source_id = ?2 AND status = 'action_required'
+                    AND error_class = 'source_adapter_not_configured'",
+                params![now, source_id],
+            )?;
+            self.connection.execute(
+                "UPDATE run_steps SET status = 'pending', error_class = NULL, updated_at = ?1
+                  WHERE name = 'discover' AND status = 'action_required'
+                    AND run_id IN (SELECT id FROM runs WHERE source_id = ?2 AND status = 'queued')",
+                params![now, source_id],
+            )?;
+        }
+        Ok(())
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn claim_next_run(
+        &mut self,
+        now: DateTime<Utc>,
+        lease_duration: Duration,
+    ) -> Result<Option<LeasedRun>, StoreError> {
+        self.recover_expired_leases(now)?;
+        let transaction = self.connection.transaction()?;
+        let candidate = transaction
+            .query_row(
+                "SELECT r.id, r.source_id, r.coverage_start, r.coverage_end, r.attempt
+                   FROM runs r
+                   JOIN source_schedules s ON s.source_id = r.source_id
+                  WHERE r.status IN ('queued', 'retryable')
+                    AND s.execution_mode = 'active'
+                    AND EXISTS (
+                      SELECT 1 FROM run_steps rs
+                       WHERE rs.run_id = r.id
+                         AND rs.status IN ('pending', 'retryable')
+                         AND rs.attempt < ?1
+                    )
+                  ORDER BY r.created_at, r.id
+                  LIMIT 1",
+                [MAX_RUN_ATTEMPTS],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, i64>(4)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((id, source_id, coverage_start, coverage_end, attempt)) = candidate else {
+            transaction.commit()?;
+            return Ok(None);
+        };
+        let step_name = transaction
+            .query_row(
+                "SELECT name FROM run_steps
+                  WHERE run_id = ?1 AND status IN ('pending', 'retryable')
+                  ORDER BY CASE name WHEN 'discover' THEN 0 WHEN 'reconcile' THEN 1 ELSE 2 END
+                  LIMIT 1",
+                [&id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .ok_or_else(|| {
+                StoreError::InvalidRunTransition(format!("run {id} has no claimable step"))
+            })?;
+        let next_attempt = attempt + 1;
+        let lease_expires_at = now + lease_duration;
+        transaction.execute(
+            "UPDATE runs SET status = 'running', attempt = ?1, lease_expires_at = ?2,
+                    error_class = NULL, updated_at = ?3 WHERE id = ?4",
+            params![
+                next_attempt,
+                lease_expires_at.to_rfc3339(),
+                now.to_rfc3339(),
+                id
+            ],
+        )?;
+        transaction.execute(
+            "UPDATE run_steps SET status = 'running', attempt = attempt + 1,
+                    error_class = NULL, updated_at = ?1 WHERE run_id = ?2 AND name = ?3",
+            params![now.to_rfc3339(), id, step_name],
+        )?;
+        transaction.commit()?;
+        Ok(Some(LeasedRun {
+            id,
+            source_id,
+            coverage_start,
+            coverage_end,
+            attempt: next_attempt,
+            step_name,
+            lease_expires_at: lease_expires_at.to_rfc3339(),
+        }))
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn complete_run_step(
+        &mut self,
+        run_id: &str,
+        step_name: &str,
+        input_hash: Option<&str>,
+        output_hash: Option<&str>,
+        now: DateTime<Utc>,
+    ) -> Result<(), StoreError> {
+        let transaction = self.connection.transaction()?;
+        let changed = transaction.execute(
+            "UPDATE run_steps SET status = 'completed', input_hash = ?1, output_hash = ?2,
+                    error_class = NULL, updated_at = ?3
+              WHERE run_id = ?4 AND name = ?5 AND status = 'running'",
+            params![input_hash, output_hash, now.to_rfc3339(), run_id, step_name],
+        )?;
+        if changed == 0 {
+            return Err(StoreError::InvalidRunTransition(format!(
+                "step {step_name} on run {run_id} is not running"
+            )));
+        }
+        let next_step = match step_name {
+            "discover" => Some("reconcile"),
+            "reconcile" => Some("notify"),
+            "notify" => None,
+            _ => {
+                return Err(StoreError::InvalidRunTransition(format!(
+                    "unknown run step {step_name}"
+                )));
+            }
+        };
+        if let Some(next_step) = next_step {
+            transaction.execute(
+                "UPDATE run_steps SET status = 'pending', error_class = NULL, updated_at = ?1
+                  WHERE run_id = ?2 AND name = ?3 AND status = 'blocked'",
+                params![now.to_rfc3339(), run_id, next_step],
+            )?;
+            transaction.execute(
+                "UPDATE runs SET status = 'queued', lease_expires_at = NULL, updated_at = ?1
+                  WHERE id = ?2",
+                params![now.to_rfc3339(), run_id],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn fail_run_step(
+        &mut self,
+        run_id: &str,
+        step_name: &str,
+        requested_class: &str,
+        now: DateTime<Utc>,
+    ) -> Result<String, StoreError> {
+        if !matches!(
+            requested_class,
+            "retryable" | "action_required" | "permanent"
+        ) {
+            return Err(StoreError::InvalidRunTransition(format!(
+                "unsupported failure class {requested_class}"
+            )));
+        }
+        let transaction = self.connection.transaction()?;
+        let step_attempt = transaction.query_row(
+            "SELECT rs.attempt FROM run_steps rs
+               JOIN runs r ON r.id = rs.run_id
+              WHERE rs.run_id = ?1 AND rs.name = ?2
+                AND rs.status = 'running' AND r.status = 'running'",
+            params![run_id, step_name],
+            |row| row.get::<_, i64>(0),
+        )?;
+        let effective_class = if requested_class == "retryable" && step_attempt >= MAX_RUN_ATTEMPTS
+        {
+            "permanent"
+        } else {
+            requested_class
+        };
+        let changed = transaction.execute(
+            "UPDATE run_steps SET status = ?1, error_class = ?1, updated_at = ?2
+              WHERE run_id = ?3 AND name = ?4 AND status = 'running'",
+            params![effective_class, now.to_rfc3339(), run_id, step_name],
+        )?;
+        if changed == 0 {
+            return Err(StoreError::InvalidRunTransition(format!(
+                "step {step_name} on run {run_id} is not running"
+            )));
+        }
+        transaction.execute(
+            "UPDATE runs SET status = ?1, error_class = ?1, lease_expires_at = NULL,
+                    updated_at = ?2 WHERE id = ?3",
+            params![effective_class, now.to_rfc3339(), run_id],
+        )?;
+        transaction.commit()?;
+        Ok(effective_class.to_string())
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn complete_run(
+        &mut self,
+        run_id: &str,
+        new_viable_roles: usize,
+        now: DateTime<Utc>,
+    ) -> Result<(), StoreError> {
+        let transaction = self.connection.transaction()?;
+        let (source_id, coverage_end, incomplete_steps) = transaction.query_row(
+            "SELECT r.source_id, r.coverage_end,
+                    (SELECT COUNT(*) FROM run_steps rs WHERE rs.run_id = r.id AND rs.status != 'completed')
+               FROM runs r WHERE r.id = ?1",
+            [run_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            },
+        )?;
+        if incomplete_steps != 0 {
+            return Err(StoreError::InvalidRunTransition(format!(
+                "run {run_id} still has {incomplete_steps} incomplete steps"
+            )));
+        }
+        transaction.execute(
+            "UPDATE runs SET status = 'completed', error_class = NULL, lease_expires_at = NULL,
+                    updated_at = ?1 WHERE id = ?2",
+            params![now.to_rfc3339(), run_id],
+        )?;
+        transaction.execute(
+            "UPDATE source_schedules SET last_successful_at = ?1 WHERE source_id = ?2",
+            params![coverage_end, source_id],
+        )?;
+        if new_viable_roles > 0 {
+            transaction.execute(
+                "INSERT OR IGNORE INTO notification_outbox(
+                   id, dedupe_key, title, body, status, attempts, next_attempt_at, created_at
+                 ) VALUES (?1, ?2, 'New roles to review', ?3, 'pending', 0, ?4, ?4)",
+                params![
+                    Uuid::new_v4().to_string(),
+                    format!("discovery-completed:{run_id}"),
+                    format!("{new_viable_roles} viable role(s) are ready for review."),
+                    now.to_rfc3339()
+                ],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    fn recover_expired_leases(&mut self, now: DateTime<Utc>) -> Result<usize, StoreError> {
+        let transaction = self.connection.transaction()?;
+        let recovered_steps = transaction.execute(
+            "UPDATE run_steps SET status = 'retryable', error_class = 'lease_expired', updated_at = ?1
+              WHERE status = 'running' AND run_id IN (
+                SELECT id FROM runs WHERE status = 'running' AND lease_expires_at < ?1
+              )",
+            [now.to_rfc3339()],
+        )?;
+        transaction.execute(
+            "UPDATE runs
+                SET status = CASE
+                      WHEN EXISTS (
+                        SELECT 1 FROM run_steps rs
+                         WHERE rs.run_id = runs.id AND rs.status = 'retryable'
+                           AND rs.attempt >= ?1
+                      ) THEN 'permanent'
+                      ELSE 'retryable'
+                    END,
+                    error_class = 'lease_expired', lease_expires_at = NULL, updated_at = ?2
+              WHERE status = 'running' AND lease_expires_at < ?2",
+            params![MAX_RUN_ATTEMPTS, now.to_rfc3339()],
+        )?;
+        transaction.commit()?;
+        Ok(recovered_steps)
+    }
+
+    pub fn dashboard(&self) -> Result<DashboardState, StoreError> {
+        let mut roles_statement = self.connection.prepare(
+            "SELECT
+               r.id, r.company, r.title, r.location,
+               COALESCE(MIN(s.source), 'Unknown'), COUNT(s.id),
+               r.queue_group, r.eligibility_summary, r.uncertainty,
+               r.discovered_at, r.application_url, r.preparation_state,
+               r.canonical_tracker_id, r.canonical_status
+             FROM roles r
+             LEFT JOIN source_occurrences s ON s.role_id = r.id
+             WHERE r.canonical_tracker_id IS NULL OR r.canonical_visibility_override = 1
+             GROUP BY r.id
+             ORDER BY
+               CASE r.queue_group
+                 WHEN 'strong_match' THEN 0
+                 WHEN 'other_new' THEN 1
+                 ELSE 2
+               END,
+               r.discovered_at DESC,
+               r.company COLLATE NOCASE",
+        )?;
+        let roles = roles_statement
+            .query_map([], |row| {
+                let queue_group: String = row.get(6)?;
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, i64>(5)?,
+                    queue_group,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, Option<String>>(8)?,
+                    row.get::<_, String>(9)?,
+                    row.get::<_, Option<String>>(10)?,
+                    row.get::<_, String>(11)?,
+                    row.get::<_, Option<i64>>(12)?,
+                    row.get::<_, Option<String>>(13)?,
+                ))
+            })?
+            .map(role_summary_from_tuple)
+            .collect::<Result<Vec<_>, StoreError>>()?;
+
+        let mut dismissed_statement = self.connection.prepare(
+            "SELECT
+               r.id, r.company, r.title, r.location,
+               COALESCE(MIN(s.source), 'Unknown'), COUNT(s.id),
+               r.queue_group, r.eligibility_summary, r.uncertainty,
+               r.discovered_at, r.application_url, r.preparation_state,
+               r.canonical_tracker_id, r.canonical_status
+             FROM roles r
+             LEFT JOIN source_occurrences s ON s.role_id = r.id
+             WHERE r.review_state = 'dismissed' AND r.canonical_status = 'Discarded'
+             GROUP BY r.id
+             ORDER BY r.updated_at DESC LIMIT 5",
+        )?;
+        let recently_dismissed = dismissed_statement
+            .query_map([], |row| {
+                let queue_group: String = row.get(6)?;
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, i64>(5)?,
+                    queue_group,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, Option<String>>(8)?,
+                    row.get::<_, String>(9)?,
+                    row.get::<_, Option<String>>(10)?,
+                    row.get::<_, String>(11)?,
+                    row.get::<_, Option<i64>>(12)?,
+                    row.get::<_, Option<String>>(13)?,
+                ))
+            })?
+            .map(role_summary_from_tuple)
+            .collect::<Result<Vec<_>, StoreError>>()?;
+
+        let mut preparation_statement = self.connection.prepare(
+            "SELECT p.id, p.role_id, r.company, r.title, p.provider, p.status, p.step,
+                    p.attempt, p.report_path, p.cv_pdf_path, p.error_class, p.updated_at
+               FROM preparation_jobs p
+               JOIN roles r ON r.id = p.role_id
+              ORDER BY p.updated_at DESC LIMIT 30",
+        )?;
+        let preparations = preparation_statement
+            .query_map([], |row| {
+                Ok(PreparationSummary {
+                    id: row.get(0)?,
+                    role_id: row.get(1)?,
+                    company: row.get(2)?,
+                    title: row.get(3)?,
+                    provider: row.get(4)?,
+                    status: row.get(5)?,
+                    step: row.get(6)?,
+                    attempt: row.get(7)?,
+                    report_path: row.get(8)?,
+                    cv_pdf_path: row.get(9)?,
+                    error_class: row.get(10)?,
+                    updated_at: row.get(11)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let mut activity_statement = self.connection.prepare(
+            "SELECT id, kind, message, occurred_at FROM activity ORDER BY occurred_at DESC LIMIT 30",
+        )?;
+        let activity = activity_statement
+            .query_map([], |row| {
+                Ok(ActivityEntry {
+                    id: row.get(0)?,
+                    kind: row.get(1)?,
+                    message: row.get(2)?,
+                    occurred_at: row.get(3)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let last_successful_discovery_at =
+            setting(&self.connection, "last_successful_discovery_at")?;
+        let background_enabled =
+            setting(&self.connection, "background_enabled")?.as_deref() == Some("true");
+        let adapter_ready = setting(&self.connection, "adapter_ready")?.as_deref() == Some("true");
+        let handled_count = self.connection.query_row(
+            "SELECT COUNT(*) FROM roles
+              WHERE canonical_tracker_id IS NOT NULL AND canonical_visibility_override = 0",
+            [],
+            |row| row.get(0),
+        )?;
+        let pending_run_count = self.connection.query_row(
+            "SELECT COUNT(*) FROM runs WHERE status IN ('queued', 'retryable', 'running')",
+            [],
+            |row| row.get(0),
+        )?;
+        let action_required_run_count = self.connection.query_row(
+            "SELECT COUNT(*) FROM runs WHERE status = 'action_required'",
+            [],
+            |row| row.get(0),
+        )?;
+        let mut sources_statement = self.connection.prepare(
+            "SELECT s.source_id, s.display_name, s.timezone, s.schedule_hours,
+                    s.execution_mode, s.last_successful_at,
+                    COUNT(CASE WHEN r.status = 'action_required' THEN 1 END)
+               FROM source_schedules s
+               LEFT JOIN runs r ON r.source_id = s.source_id
+              WHERE s.enabled = 1
+              GROUP BY s.source_id
+              ORDER BY s.display_name COLLATE NOCASE",
+        )?;
+        let sources = sources_statement
+            .query_map([], |row| {
+                Ok(SourceScheduleSummary {
+                    source_id: row.get(0)?,
+                    display_name: row.get(1)?,
+                    timezone: row.get(2)?,
+                    schedule_hours: row.get(3)?,
+                    execution_mode: row.get(4)?,
+                    last_successful_at: row.get(5)?,
+                    action_required_count: row.get(6)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut runs_statement = self.connection.prepare(
+            "SELECT id, source_id, kind, coverage_start, coverage_end, status, attempt,
+                    error_class, updated_at
+               FROM runs ORDER BY updated_at DESC, created_at DESC LIMIT 12",
+        )?;
+        let recent_runs = runs_statement
+            .query_map([], |row| {
+                Ok(RunSummary {
+                    id: row.get(0)?,
+                    source_id: row.get(1)?,
+                    kind: row.get(2)?,
+                    coverage_start: row.get(3)?,
+                    coverage_end: row.get(4)?,
+                    status: row.get(5)?,
+                    attempt: row.get(6)?,
+                    error_class: row.get(7)?,
+                    updated_at: row.get(8)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(DashboardState {
+            roles,
+            recently_dismissed,
+            preparations,
+            activity,
+            last_successful_discovery_at,
+            background_enabled,
+            adapter_status: if adapter_ready {
+                "ready"
+            } else {
+                "not_configured"
+            }
+            .to_string(),
+            handled_count,
+            pending_run_count,
+            action_required_run_count,
+            sources,
+            recent_runs,
+        })
+    }
+}
+
+fn application_form_url(value: &str) -> Result<String, StoreError> {
+    let mut url = url::Url::parse(value).map_err(|_| {
+        StoreError::InvalidBrowserTransition("the role application URL is invalid".to_string())
+    })?;
+    if url.scheme() != "https" {
+        return Err(StoreError::InvalidBrowserTransition(
+            "the role application URL must use HTTPS".to_string(),
+        ));
+    }
+    url.set_fragment(None);
+    if url.host_str() == Some("jobs.ashbyhq.com") {
+        let path = url.path().trim_end_matches('/').to_string();
+        if !path.ends_with("/application") {
+            url.set_path(&format!("{path}/application"));
+        }
+    }
+    Ok(url.to_string())
+}
+
+fn backup_before_migration(connection: &Connection, path: &Path) -> Result<(), StoreError> {
+    let has_schema_meta = connection.query_row(
+        "SELECT EXISTS(
+           SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_meta'
+         )",
+        [],
+        |row| row.get::<_, bool>(0),
+    )?;
+    if !has_schema_meta {
+        return Ok(());
+    }
+    let version = connection.query_row("SELECT version FROM schema_meta LIMIT 1", [], |row| {
+        row.get::<_, i64>(0)
+    })?;
+    if version >= SCHEMA_VERSION {
+        return Ok(());
+    }
+    let backup_directory = path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("migration-backups");
+    std::fs::create_dir_all(&backup_directory)?;
+    let stem = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("here-for-work");
+    let timestamp = Utc::now().format("%Y%m%dT%H%M%S%.3fZ");
+    let backup_path: PathBuf = backup_directory.join(format!(
+        "{stem}-pre-v{SCHEMA_VERSION}-from-v{version}-{timestamp}.sqlite3"
+    ));
+    connection.backup(rusqlite::MAIN_DB, backup_path, None)?;
+    Ok(())
+}
+
+fn insert_run_steps(
+    connection: &Connection,
+    run_id: &str,
+    run_status: &str,
+    now: &str,
+) -> Result<(), StoreError> {
+    for (index, step_name) in RUN_STEPS.iter().enumerate() {
+        let status = if index == 0 {
+            if run_status == "action_required" {
+                "action_required"
+            } else {
+                "pending"
+            }
+        } else {
+            "blocked"
+        };
+        let error_class = if run_status == "action_required" {
+            Some("source_adapter_not_configured")
+        } else {
+            None
+        };
+        connection.execute(
+            "INSERT OR IGNORE INTO run_steps(
+               id, run_id, name, status, attempt, error_class, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, 0, ?5, ?6)",
+            params![
+                Uuid::new_v4().to_string(),
+                run_id,
+                step_name,
+                status,
+                error_class,
+                now
+            ],
+        )?;
+    }
+    Ok(())
+}
+
+fn upsert_role(
+    transaction: &Transaction<'_>,
+    role_id: &str,
+    finding: &DiscoveryFinding,
+) -> Result<(), rusqlite::Error> {
+    transaction.execute(
+        "INSERT INTO roles (
+           id, normalized_key, company, title, location, queue_group,
+           eligibility_summary, uncertainty, application_url, discovered_at, updated_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+         ON CONFLICT(normalized_key) DO UPDATE SET
+           company = excluded.company,
+           title = excluded.title,
+           location = excluded.location,
+           queue_group = excluded.queue_group,
+           eligibility_summary = excluded.eligibility_summary,
+           uncertainty = excluded.uncertainty,
+           application_url = COALESCE(excluded.application_url, roles.application_url),
+           discovered_at = MIN(roles.discovered_at, excluded.discovered_at),
+           updated_at = excluded.updated_at",
+        params![
+            role_id,
+            finding.normalized_key,
+            finding.company,
+            finding.title,
+            finding.location,
+            finding.queue_group.as_str(),
+            finding.eligibility_summary,
+            finding.uncertainty,
+            finding.application_url,
+            finding.discovered_at,
+            Utc::now().to_rfc3339(),
+        ],
+    )?;
+    Ok(())
+}
+
+fn hash_finding(finding: &DiscoveryFinding) -> String {
+    let encoded = serde_json::to_vec(finding).expect("serializing a validated finding cannot fail");
+    format!("{:x}", Sha256::digest(encoded))
+}
+
+fn setting(connection: &Connection, key: &str) -> Result<Option<String>, rusqlite::Error> {
+    connection
+        .query_row("SELECT value FROM settings WHERE key = ?1", [key], |row| {
+            row.get(0)
+        })
+        .optional()
+}
+
+fn insert_browser_command(
+    transaction: &Transaction<'_>,
+    session_id: &str,
+    command_type: &str,
+    payload: &serde_json::Value,
+    now: &str,
+) -> Result<(), rusqlite::Error> {
+    transaction.execute(
+        "INSERT INTO browser_commands(
+           id, session_id, command_type, payload_json, status, created_at, updated_at
+         ) VALUES (?1, ?2, ?3, ?4, 'pending', ?5, ?5)",
+        params![
+            Uuid::new_v4().to_string(),
+            session_id,
+            command_type,
+            payload.to_string(),
+            now
+        ],
+    )?;
+    Ok(())
+}
+
+fn leased_browser_command(
+    transaction: &Transaction<'_>,
+    command_id: &str,
+    expected_type: &str,
+) -> Result<String, StoreError> {
+    let command = transaction
+        .query_row(
+            "SELECT session_id, command_type FROM browser_commands
+              WHERE id = ?1 AND status = 'leased'",
+            [command_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()?;
+    let Some((session_id, command_type)) = command else {
+        return Err(StoreError::InvalidBrowserTransition(
+            "browser command is missing or no longer leased".to_string(),
+        ));
+    };
+    if command_type != expected_type {
+        return Err(StoreError::InvalidBrowserTransition(format!(
+            "browser command type {command_type} does not match {expected_type}"
+        )));
+    }
+    Ok(session_id)
+}
+
+fn browser_session_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<BrowserSessionSummary> {
+    Ok(BrowserSessionSummary {
+        id: row.get(0)?,
+        purpose: row.get(1)?,
+        role_id: row.get(2)?,
+        preparation_id: row.get(3)?,
+        status: row.get(4)?,
+        ats: row.get(5)?,
+        page_title: row.get(6)?,
+        page_url: row.get(7)?,
+        snapshot_fingerprint: row.get(8)?,
+        field_count: row.get(9)?,
+        safe_field_count: row.get(10)?,
+        needs_user_count: row.get(11)?,
+        error_code: row.get(12)?,
+        review_items: row
+            .get::<_, Option<String>>(13)?
+            .and_then(|value| serde_json::from_str(&value).ok()),
+        fill_results: row
+            .get::<_, Option<String>>(14)?
+            .and_then(|value| serde_json::from_str(&value).ok()),
+        updated_at: row.get(15)?,
+    })
+}
+
+type RoleSummaryTuple = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    i64,
+    String,
+    String,
+    Option<String>,
+    String,
+    Option<String>,
+    String,
+    Option<i64>,
+    Option<String>,
+);
+
+fn role_summary_from_tuple(
+    result: Result<RoleSummaryTuple, rusqlite::Error>,
+) -> Result<RoleSummary, StoreError> {
+    let (
+        id,
+        company,
+        title,
+        location,
+        source,
+        source_count,
+        queue_group,
+        eligibility_summary,
+        uncertainty,
+        discovered_at,
+        application_url,
+        preparation_state,
+        canonical_tracker_id,
+        canonical_status,
+    ) = result?;
+    let parsed_group = QueueGroup::parse(&queue_group)
+        .ok_or_else(|| StoreError::InvalidQueueGroup(queue_group.clone()))?;
+    Ok(RoleSummary {
+        id,
+        company,
+        title,
+        location,
+        source,
+        source_count,
+        queue_group: parsed_group,
+        eligibility_summary,
+        uncertainty,
+        discovered_at,
+        application_url,
+        preparation_state,
+        canonical_tracker_id,
+        canonical_status,
+    })
+}
+
+fn normalized_words(value: &str) -> Vec<String> {
+    value
+        .to_lowercase()
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|word| {
+            !word.is_empty()
+                && !matches!(
+                    *word,
+                    "remote"
+                        | "hybrid"
+                        | "onsite"
+                        | "barcelona"
+                        | "madrid"
+                        | "spain"
+                        | "eu"
+                        | "europe"
+                )
+        })
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn company_matches(discovered: &str, canonical: &str) -> bool {
+    let discovered = normalized_words(discovered).join(" ");
+    let canonical = normalized_words(canonical).join(" ");
+    discovered == canonical
+        || (discovered.len() >= 4 && canonical.contains(&discovered))
+        || (canonical.len() >= 4 && discovered.contains(&canonical))
+}
+
+fn title_matches(discovered: &str, canonical: &str) -> bool {
+    let discovered = normalized_words(discovered);
+    let canonical = normalized_words(canonical);
+    discovered == canonical
+        || (discovered.len() >= 3 && contains_word_sequence(&canonical, &discovered))
+        || (canonical.len() >= 3 && contains_word_sequence(&discovered, &canonical))
+}
+
+fn contains_word_sequence(haystack: &[String], needle: &[String]) -> bool {
+    needle.len() <= haystack.len()
+        && haystack
+            .windows(needle.len())
+            .any(|window| window == needle)
+}
+
+fn missed_nominal_times(
+    cursor: DateTime<Utc>,
+    now: DateTime<Utc>,
+    hours: &str,
+) -> Vec<DateTime<Utc>> {
+    let hours = hours
+        .split(',')
+        .filter_map(|value| value.parse::<u32>().ok())
+        .filter(|hour| *hour < 24)
+        .collect::<Vec<_>>();
+    let local_cursor = cursor.with_timezone(&Madrid);
+    let local_now = now.with_timezone(&Madrid);
+    let mut date = local_cursor.date_naive();
+    let mut due = Vec::new();
+    while date <= local_now.date_naive() && due.len() < 64 {
+        for hour in &hours {
+            let Some(time) = NaiveTime::from_hms_opt(*hour, 0, 0) else {
+                continue;
+            };
+            let local = date.and_time(time);
+            if let Some(nominal) = Madrid.from_local_datetime(&local).single() {
+                let nominal = nominal.with_timezone(&Utc);
+                if nominal > cursor && nominal <= now {
+                    due.push(nominal);
+                }
+            }
+        }
+        date = match date.succ_opt() {
+            Some(next) => next,
+            None => break,
+        };
+    }
+    due.sort_unstable();
+    due
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Store;
+
+    const DATASET: &str = r#"{
+      "schemaVersion": 1,
+      "generatedAt": "2026-08-30T12:00:00+02:00",
+      "findings": [
+        {
+          "sourceId": "source-a",
+          "source": "Example source",
+          "sourceRoleId": "role-1",
+          "company": "Northstar Tools",
+          "title": "Frontend Engineer",
+          "location": "Remote, Europe",
+          "discoveredAt": "2026-08-30T09:00:00+02:00",
+          "applicationUrl": "https://example.test/jobs/1",
+          "normalizedKey": "northstar-tools/frontend-engineer",
+          "queueGroup": "needs_decision",
+          "eligibilitySummary": "Remote scope appears compatible but authorization is not verified.",
+          "uncertainty": "Confirm whether Spain is an eligible hiring location."
+        }
+      ]
+    }"#;
+
+    #[test]
+    fn importing_the_same_snapshot_is_idempotent() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+
+        let first = store.import_dataset(DATASET).unwrap();
+        let second = store.import_dataset(DATASET).unwrap();
+
+        assert_eq!(first.imported, 1);
+        assert_eq!(second.unchanged, 1);
+        assert_eq!(store.dashboard().unwrap().roles.len(), 1);
+    }
+
+    #[test]
+    fn preparation_retries_the_same_work_and_persists_only_artifact_references() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+        store.import_dataset(DATASET).unwrap();
+        let role_id = store.dashboard().unwrap().roles[0].id.clone();
+
+        let first = store.begin_preparation(&role_id, "codex").unwrap();
+        store
+            .record_preparation_context(&first.id, &"a".repeat(64))
+            .unwrap();
+        store
+            .fail_preparation(&first.id, "provider_failed")
+            .unwrap();
+        let failed = store.dashboard().unwrap();
+        assert_eq!(failed.preparations[0].status, "action_required");
+        assert_eq!(
+            failed.preparations[0].error_class.as_deref(),
+            Some("provider_failed")
+        );
+
+        let retry = store.begin_preparation(&role_id, "codex").unwrap();
+        assert_eq!(retry.id, first.id);
+        store
+            .record_preparation_context(&retry.id, &"a".repeat(64))
+            .unwrap();
+        store
+            .complete_preparation(
+                &retry.id,
+                42,
+                "reports/042-example.md",
+                &"b".repeat(64),
+                "output/042-example/cv.pdf",
+                &"c".repeat(64),
+            )
+            .unwrap();
+        let completed = store.dashboard().unwrap();
+        assert!(completed.roles.is_empty());
+        assert_eq!(completed.preparations[0].status, "completed");
+        assert_eq!(completed.preparations[0].attempt, 2);
+        assert_eq!(
+            completed.preparations[0].cv_pdf_path.as_deref(),
+            Some("output/042-example/cv.pdf")
+        );
+    }
+
+    #[test]
+    fn cancelled_preparation_returns_role_to_not_started_without_artifacts() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+        store.import_dataset(DATASET).unwrap();
+        let role_id = store.dashboard().unwrap().roles[0].id.clone();
+        let work = store.begin_preparation(&role_id, "codex").unwrap();
+
+        store.cancel_preparation(&work.id).unwrap();
+
+        let dashboard = store.dashboard().unwrap();
+        assert_eq!(dashboard.roles[0].preparation_state, "not_started");
+        assert_eq!(dashboard.preparations[0].status, "cancelled");
+        assert!(dashboard.preparations[0].report_path.is_none());
+        let restarted = store.begin_preparation(&role_id, "claude").unwrap();
+        assert_ne!(restarted.id, work.id);
+    }
+
+    #[test]
+    fn background_setting_round_trips() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+
+        store.set_background_enabled(true).unwrap();
+
+        assert!(store.dashboard().unwrap().background_enabled);
+    }
+
+    #[test]
+    fn history_reconciliation_hides_only_deterministic_matches() {
+        use crate::domain::HistoryRecord;
+
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+        store.import_dataset(DATASET).unwrap();
+        let records = vec![HistoryRecord {
+            id: 42,
+            date: "2026-08-30".to_string(),
+            company: "Northstar Tools".to_string(),
+            role: "Frontend Engineer (Remote Europe)".to_string(),
+            score: "4.2/5".to_string(),
+            status: "Evaluated".to_string(),
+            pdf: "❌".to_string(),
+            report: "—".to_string(),
+            notes: String::new(),
+        }];
+
+        let result = store.reconcile_history(&records).unwrap();
+
+        assert_eq!(result.matched, 1);
+        assert_eq!(store.dashboard().unwrap().roles.len(), 0);
+        assert_eq!(store.dashboard().unwrap().handled_count, 1);
+    }
+
+    #[test]
+    fn history_reconciliation_accepts_a_technology_suffix() {
+        assert!(super::title_matches(
+            "Senior Product Engineer, Frontend",
+            "Senior Product Engineer, Frontend (React, TypeScript)"
+        ));
+    }
+
+    #[test]
+    fn canonical_dismiss_and_undo_keep_queue_visibility_recoverable() {
+        use crate::domain::HistoryRecord;
+
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+        store.import_dataset(DATASET).unwrap();
+        let role_id = store.dashboard().unwrap().roles[0].id.clone();
+        let discard = store.begin_discard_effect(&role_id).unwrap();
+        store
+            .complete_discard_effect(&role_id, &discard.idempotency_key, 42, "Discarded")
+            .unwrap();
+        let dismissed = store.dashboard().unwrap();
+        assert!(dismissed.roles.is_empty());
+        assert_eq!(dismissed.recently_dismissed.len(), 1);
+
+        let undo = store.begin_undo_discard_effect(&role_id).unwrap();
+        assert_eq!(
+            undo.parent_effect_key.as_deref(),
+            Some(discard.idempotency_key.as_str())
+        );
+        store
+            .complete_undo_discard_effect(&role_id, &undo.idempotency_key, 42, "Evaluated")
+            .unwrap();
+        assert_eq!(store.dashboard().unwrap().roles.len(), 1);
+
+        let mut canonical = HistoryRecord {
+            id: 42,
+            date: "2026-08-30".to_string(),
+            company: "Northstar Tools".to_string(),
+            role: "Frontend Engineer".to_string(),
+            score: "N/A".to_string(),
+            status: "Evaluated".to_string(),
+            pdf: "❌".to_string(),
+            report: "—".to_string(),
+            notes: String::new(),
+        };
+        store
+            .reconcile_history(std::slice::from_ref(&canonical))
+            .unwrap();
+        assert_eq!(store.dashboard().unwrap().roles.len(), 1);
+
+        canonical.status = "Applied".to_string();
+        store.reconcile_history(&[canonical]).unwrap();
+        assert!(store.dashboard().unwrap().roles.is_empty());
+    }
+
+    #[test]
+    fn missed_windows_consolidate_into_one_idempotent_run() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+        let now = chrono::DateTime::parse_from_rfc3339("2026-08-30T19:00:00+02:00")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+
+        let first = store.reconcile_due_runs(now).unwrap();
+        let second = store.reconcile_due_runs(now).unwrap();
+
+        assert_eq!(first.len(), 2);
+        assert!(second.is_empty());
+        let dashboard = store.dashboard().unwrap();
+        assert_eq!(dashboard.pending_run_count, 0);
+        assert_eq!(dashboard.action_required_run_count, 2);
+        assert!(
+            dashboard
+                .recent_runs
+                .iter()
+                .all(|run| run.error_class.as_deref() == Some("source_adapter_not_configured"))
+        );
+    }
+
+    #[test]
+    fn staged_source_refuses_manual_execution() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+
+        let error = store.queue_manual_run("frontend-role-scan").unwrap_err();
+
+        assert!(error.to_string().contains("existing external workflow"));
+    }
+
+    #[test]
+    fn active_run_leases_steps_and_advances_cursor_only_after_completion() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+        store
+            .set_source_execution_mode("frontend-role-scan", "active")
+            .unwrap();
+        let run = store.queue_manual_run("frontend-role-scan").unwrap();
+        let now = chrono::DateTime::parse_from_rfc3339("2026-08-30T12:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+
+        for expected_step in ["discover", "reconcile", "notify"] {
+            let lease = store
+                .claim_next_run(now, chrono::Duration::minutes(5))
+                .unwrap()
+                .unwrap();
+            assert_eq!(lease.id, run.id);
+            assert_eq!(lease.step_name, expected_step);
+            store
+                .complete_run_step(
+                    &run.id,
+                    expected_step,
+                    Some("input-hash"),
+                    Some("output-hash"),
+                    now,
+                )
+                .unwrap();
+        }
+        store.complete_run(&run.id, 2, now).unwrap();
+
+        let dashboard = store.dashboard().unwrap();
+        assert_eq!(dashboard.pending_run_count, 0);
+        assert_eq!(dashboard.recent_runs[0].status, "completed");
+        let pending_notifications: i64 = store
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM notification_outbox WHERE status = 'pending'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(pending_notifications, 1);
+    }
+
+    #[test]
+    fn retryable_step_stops_after_three_attempts() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+        store
+            .set_source_execution_mode("frontend-role-scan", "active")
+            .unwrap();
+        let run = store.queue_manual_run("frontend-role-scan").unwrap();
+        let now = chrono::Utc::now();
+
+        for expected_class in ["retryable", "retryable", "permanent"] {
+            let lease = store
+                .claim_next_run(now, chrono::Duration::minutes(5))
+                .unwrap()
+                .unwrap();
+            let effective = store
+                .fail_run_step(&run.id, &lease.step_name, "retryable", now)
+                .unwrap();
+            assert_eq!(effective, expected_class);
+        }
+
+        assert!(
+            store
+                .claim_next_run(now, chrono::Duration::minutes(5))
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            store.dashboard().unwrap().recent_runs[0].status,
+            "permanent"
+        );
+    }
+
+    #[test]
+    fn browser_connection_check_inspects_then_releases_without_a_fill_command() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+        store
+            .configure_browser(
+                "abcdefghijklmnopabcdefghijklmnop",
+                "019d0000-0000-7000-8000-000000000001",
+                "Profile 1",
+            )
+            .unwrap();
+
+        let queued = store.queue_browser_connection_check().unwrap();
+        assert_eq!(queued.status, "waiting_for_extension");
+        let inspect = store
+            .claim_browser_command(chrono::Utc::now(), chrono::Duration::seconds(30))
+            .unwrap()
+            .unwrap();
+        assert_eq!(inspect.command_type, "inspect_request");
+        let fields = serde_json::json!([
+            { "id": "email", "classification": "safe_verified" },
+            { "id": "auth", "classification": "sensitive" }
+        ]);
+        let inspection = crate::domain::BrowserInspection {
+            ats: "ashby".to_string(),
+            page_title: "Example role".to_string(),
+            page_url: "https://jobs.ashbyhq.com/acme/role".to_string(),
+            snapshot_fingerprint: "a".repeat(64),
+            fields,
+            safe_field_count: 1,
+            needs_user_count: 1,
+        };
+        let inspected = store
+            .complete_browser_inspection(&inspect.command_id, &inspection)
+            .unwrap();
+        assert_eq!(inspected.status, "releasing");
+
+        let release = store
+            .claim_browser_command(chrono::Utc::now(), chrono::Duration::seconds(30))
+            .unwrap()
+            .unwrap();
+        assert_eq!(release.command_type, "release_for_review");
+        assert_eq!(release.payload["expectedUrl"], inspection.page_url);
+        let verified = store.complete_browser_release(&release.command_id).unwrap();
+        assert_eq!(verified.status, "connection_verified");
+        assert_eq!(verified.field_count, 2);
+        let fill_commands: i64 = store
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM browser_commands WHERE command_type = 'fill_plan'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(fill_commands, 0);
+    }
+
+    #[test]
+    fn application_session_drafts_after_live_inspection_and_releases_after_verified_fill() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+        let dataset = DATASET.replace(
+            "https://example.test/jobs/1",
+            "https://jobs.ashbyhq.com/northstar/frontend",
+        );
+        store.import_dataset(&dataset).unwrap();
+        let role_id = store.dashboard().unwrap().roles[0].id.clone();
+        let preparation = store.begin_preparation(&role_id, "codex").unwrap();
+        store
+            .complete_preparation(
+                &preparation.id,
+                42,
+                "reports/042-example.md",
+                &"b".repeat(64),
+                "output/042-example/cv.pdf",
+                &"c".repeat(64),
+            )
+            .unwrap();
+        store
+            .configure_browser(
+                "abcdefghijklmnopabcdefghijklmnop",
+                "019d0000-0000-7000-8000-000000000001",
+                "Profile 1",
+            )
+            .unwrap();
+
+        let session = store.queue_application_session(&preparation.id).unwrap();
+        assert_eq!(session.status, "waiting_for_extension");
+        let inspect = store
+            .claim_browser_command(chrono::Utc::now(), chrono::Duration::seconds(30))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            inspect.payload["expectedUrl"],
+            "https://jobs.ashbyhq.com/northstar/frontend/application"
+        );
+        let inspection = crate::domain::BrowserInspection {
+            ats: "ashby".to_string(),
+            page_title: "Frontend Engineer".to_string(),
+            page_url: "https://jobs.ashbyhq.com/northstar/frontend/application".to_string(),
+            snapshot_fingerprint: "d".repeat(64),
+            fields: serde_json::json!([{
+                "id": "email", "label": "Email", "control": "input", "inputType": "email",
+                "required": true, "options": [], "classification": "safe_verified", "reason": "verified"
+            }]),
+            safe_field_count: 1,
+            needs_user_count: 0,
+        };
+        let inspected = store
+            .complete_browser_inspection(&inspect.command_id, &inspection)
+            .unwrap();
+        assert_eq!(inspected.status, "drafting_answers");
+        assert!(
+            store
+                .claim_browser_command(chrono::Utc::now(), chrono::Duration::seconds(30))
+                .unwrap()
+                .is_none()
+        );
+
+        let work = store.claim_answer_work().unwrap().unwrap();
+        assert_eq!(work.snapshot_fingerprint, "d".repeat(64));
+        let fill_plan = serde_json::json!({
+            "protocolVersion": 1,
+            "snapshotFingerprint": "d".repeat(64),
+            "instructions": [{ "fieldId": "email", "value": "verified@example.test", "classification": "safe_verified" }]
+        });
+        let review_items = serde_json::json!([{
+            "fieldId": "email", "label": "Email", "decision": "fill", "answer": "verified@example.test", "provenance": ["config/profile.yml:email"]
+        }]);
+        store
+            .complete_answer_work(&session.id, &"e".repeat(64), &fill_plan, &review_items)
+            .unwrap();
+        let fill = store
+            .claim_browser_command(chrono::Utc::now(), chrono::Duration::seconds(30))
+            .unwrap()
+            .unwrap();
+        assert_eq!(fill.command_type, "fill_plan");
+        store
+            .complete_browser_fill(
+                &fill.command_id,
+                &serde_json::json!([{
+                    "fieldId": "email", "status": "verified", "reason": null
+                }]),
+            )
+            .unwrap();
+        assert_eq!(
+            store.browser_session(&session.id).unwrap().status,
+            "persisting_answers"
+        );
+        assert!(
+            store
+                .claim_browser_command(chrono::Utc::now(), chrono::Duration::seconds(30))
+                .unwrap()
+                .is_none()
+        );
+        let commit_work = store.claim_answer_commit_work().unwrap().unwrap();
+        assert_eq!(commit_work.preparation_id, preparation.id);
+        assert_eq!(commit_work.report_path, "reports/042-example.md");
+        assert_eq!(commit_work.cv_pdf_path, "output/042-example/cv.pdf");
+        assert_eq!(commit_work.review_items[0]["decision"], "fill");
+        assert_eq!(commit_work.fill_results[0]["status"], "verified");
+        store
+            .fail_answer_commit(&session.id, "answer_persistence_failed")
+            .unwrap();
+        assert_eq!(
+            store.retry_browser_session(&session.id).unwrap().status,
+            "persisting_answers"
+        );
+        let retried_commit = store.claim_answer_commit_work().unwrap().unwrap();
+        assert_eq!(retried_commit.context_hash, "e".repeat(64));
+        store
+            .complete_answer_commit(&session.id, &"e".repeat(64), &"f".repeat(64))
+            .unwrap();
+        let release = store
+            .claim_browser_command(chrono::Utc::now(), chrono::Duration::seconds(30))
+            .unwrap()
+            .unwrap();
+        assert_eq!(release.command_type, "release_for_review");
+        assert_eq!(
+            release.payload["expectedUrl"],
+            "https://jobs.ashbyhq.com/northstar/frontend/application"
+        );
+        let review = store.complete_browser_release(&release.command_id).unwrap();
+        assert_eq!(review.status, "review_required");
+        assert_eq!(review.fill_results.unwrap()[0]["status"], "verified");
+        let refill = store.queue_application_session(&preparation.id).unwrap();
+        assert_ne!(refill.id, session.id);
+        assert_eq!(refill.status, "waiting_for_extension");
+        store.mark_submitted_tracking_pending(&session.id).unwrap();
+        assert_eq!(
+            store.browser_session(&session.id).unwrap().status,
+            "submitted_tracking_pending"
+        );
+        let (role_id, effect) = store.begin_applied_effect_for_session(&session.id).unwrap();
+        assert_eq!(effect.tracker_id, Some(42));
+        store
+            .complete_applied_effect(
+                &session.id,
+                &role_id,
+                &effect.idempotency_key,
+                42,
+                "Applied",
+            )
+            .unwrap();
+        assert_eq!(
+            store.browser_session(&session.id).unwrap().status,
+            "applied_recorded"
+        );
+        let forbidden: i64 = store.connection.query_row(
+            "SELECT COUNT(*) FROM browser_commands WHERE command_type NOT IN ('inspect_request', 'fill_plan', 'release_for_review')",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(forbidden, 0);
+    }
+
+    #[test]
+    fn failed_browser_command_can_be_retried_without_duplicate_sessions() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+        store
+            .configure_browser(
+                "abcdefghijklmnopabcdefghijklmnop",
+                "019d0000-0000-7000-8000-000000000001",
+                "Profile 1",
+            )
+            .unwrap();
+        let session = store.queue_browser_connection_check().unwrap();
+        let command = store
+            .claim_browser_command(chrono::Utc::now(), chrono::Duration::seconds(30))
+            .unwrap()
+            .unwrap();
+        let failed = store
+            .fail_browser_command(&command.command_id, "no_active_ats_tab")
+            .unwrap();
+        assert_eq!(failed.status, "action_required");
+
+        let retried = store.retry_browser_session(&session.id).unwrap();
+        assert_eq!(retried.status, "waiting_for_extension");
+        assert_eq!(store.browser_sessions().unwrap().len(), 1);
+        let retry_command = store
+            .claim_browser_command(chrono::Utc::now(), chrono::Duration::seconds(30))
+            .unwrap()
+            .unwrap();
+        assert_eq!(retry_command.command_type, "inspect_request");
+    }
+
+    #[test]
+    fn diagnostics_omit_browser_page_and_field_data() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+        store
+            .configure_browser(
+                "abcdefghijklmnopabcdefghijklmnop",
+                "019d0000-0000-7000-8000-000000000001",
+                "Private Profile",
+            )
+            .unwrap();
+        store.queue_browser_connection_check().unwrap();
+        let command = store
+            .claim_browser_command(chrono::Utc::now(), chrono::Duration::seconds(30))
+            .unwrap()
+            .unwrap();
+        let inspection = crate::domain::BrowserInspection {
+            ats: "ashby".to_string(),
+            page_title: "Secret Employer Role".to_string(),
+            page_url: "https://jobs.ashbyhq.com/private/secret-role".to_string(),
+            snapshot_fingerprint: "b".repeat(64),
+            fields: serde_json::json!([{
+                "id": "private-answer",
+                "label": "Private question",
+                "classification": "sensitive"
+            }]),
+            safe_field_count: 0,
+            needs_user_count: 1,
+        };
+        store
+            .complete_browser_inspection(&command.command_id, &inspection)
+            .unwrap();
+
+        let diagnostics = store.redacted_diagnostics().unwrap().to_string();
+        assert!(diagnostics.contains("\"sessionCount\":1"));
+        assert!(!diagnostics.contains("Secret Employer"));
+        assert!(!diagnostics.contains("secret-role"));
+        assert!(!diagnostics.contains("Private question"));
+        assert!(!diagnostics.contains("Private Profile"));
+    }
+
+    #[test]
+    fn migration_creates_a_pre_migration_backup() {
+        let directory = tempfile::tempdir().unwrap();
+        let database_path = directory.path().join("test.sqlite3");
+        {
+            let connection = rusqlite::Connection::open(&database_path).unwrap();
+            connection
+                .execute_batch(
+                    "CREATE TABLE schema_meta(version INTEGER NOT NULL);
+                     INSERT INTO schema_meta(version) VALUES (3);
+                     CREATE TABLE source_schedules(
+                       source_id TEXT PRIMARY KEY, display_name TEXT NOT NULL,
+                       timezone TEXT NOT NULL, schedule_hours TEXT NOT NULL,
+                       last_successful_at TEXT, enabled INTEGER NOT NULL DEFAULT 1
+                     );
+                     CREATE TABLE runs(
+                       id TEXT PRIMARY KEY, source_id TEXT NOT NULL, kind TEXT NOT NULL,
+                       coverage_start TEXT NOT NULL, coverage_end TEXT NOT NULL,
+                       status TEXT NOT NULL, attempt INTEGER NOT NULL DEFAULT 0,
+                       lease_expires_at TEXT, error_class TEXT, created_at TEXT NOT NULL,
+                       updated_at TEXT NOT NULL, dedupe_key TEXT NOT NULL UNIQUE
+                     );
+                     CREATE TABLE run_steps(
+                       id TEXT PRIMARY KEY, run_id TEXT NOT NULL, name TEXT NOT NULL,
+                       status TEXT NOT NULL, attempt INTEGER NOT NULL DEFAULT 0,
+                       input_hash TEXT, output_hash TEXT, error_class TEXT,
+                       updated_at TEXT NOT NULL, UNIQUE(run_id, name)
+                     );
+                     CREATE TABLE notification_outbox(
+                       id TEXT PRIMARY KEY, dedupe_key TEXT NOT NULL UNIQUE,
+                       title TEXT NOT NULL, body TEXT NOT NULL,
+                       status TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0,
+                       next_attempt_at TEXT NOT NULL, created_at TEXT NOT NULL
+                     );",
+                )
+                .unwrap();
+        }
+
+        let _store = Store::open(&database_path).unwrap();
+
+        let backup_count = std::fs::read_dir(directory.path().join("migration-backups"))
+            .unwrap()
+            .count();
+        assert_eq!(backup_count, 1);
+    }
+}

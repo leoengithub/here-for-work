@@ -1,0 +1,5 @@
+{
+  "name": "@here-for-work/extension",
+  "private": true,
+  "type": "module"
+}

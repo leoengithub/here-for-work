@@ -1,0 +1,51 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "productName": "HereForWork",
+  "version": "0.1.0",
+  "identifier": "com.hereforwork.desktop",
+  "build": {
+    "beforeDevCommand": "pnpm dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "pnpm build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "HereForWork",
+        "width": 1180,
+        "height": 760,
+        "minWidth": 760,
+        "minHeight": 560,
+        "center": true,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost; img-src 'self' asset: http://asset.localhost data:; style-src 'self' 'unsafe-inline'; font-src 'self'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["app"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns"
+    ],
+    "resources": {
+      "../packages/career-ops-adapter/adapter.mjs": "career-ops-adapter/adapter.mjs",
+      "../contracts/provider-probe.schema.json": "contracts/provider-probe.schema.json",
+      "../contracts/preparation-result.schema.json": "contracts/preparation-result.schema.json",
+      "../contracts/answer-draft.schema.json": "contracts/answer-draft.schema.json",
+      "../contracts/browser-bridge.schema.json": "contracts/browser-bridge.schema.json",
+      "../packages/extension/dist": "extension"
+    },
+    "macOS": {
+      "minimumSystemVersion": "13.0",
+      "signingIdentity": "-"
+    }
+  }
+}

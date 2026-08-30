@@ -1,0 +1,104 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hereforwork.local/contracts/browser-bridge.schema.json",
+  "title": "HereForWork browser bridge protocol",
+  "oneOf": [
+    { "$ref": "#/$defs/extensionMessage" },
+    { "$ref": "#/$defs/appResponse" }
+  ],
+  "$defs": {
+    "extensionId": {
+      "type": "string",
+      "pattern": "^[a-p]{32}$"
+    },
+    "baseExtensionMessage": {
+      "type": "object",
+      "required": ["protocolVersion", "type", "extensionId"],
+      "properties": {
+        "protocolVersion": { "const": 1 },
+        "type": { "type": "string" },
+        "extensionId": { "$ref": "#/$defs/extensionId" }
+      }
+    },
+    "extensionMessage": {
+      "oneOf": [
+        {
+          "allOf": [
+            { "$ref": "#/$defs/baseExtensionMessage" },
+            {
+              "properties": { "type": { "const": "hello" } },
+              "unevaluatedProperties": false
+            }
+          ]
+        },
+        {
+          "allOf": [
+            { "$ref": "#/$defs/baseExtensionMessage" },
+            {
+              "properties": { "type": { "const": "poll" } },
+              "unevaluatedProperties": false
+            }
+          ]
+        },
+        {
+          "type": "object",
+          "required": ["protocolVersion", "type", "extensionId", "commandId", "sessionId", "commandType", "status"],
+          "properties": {
+            "protocolVersion": { "const": 1 },
+            "type": { "const": "command_result" },
+            "extensionId": { "$ref": "#/$defs/extensionId" },
+            "commandId": { "type": "string", "format": "uuid" },
+            "sessionId": { "type": "string", "format": "uuid" },
+            "commandType": { "$ref": "#/$defs/commandType" },
+            "status": { "enum": ["completed", "failed"] },
+            "result": { "type": "object" },
+            "error": { "type": "string", "maxLength": 4000 }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "commandType": {
+      "enum": ["inspect_request", "fill_plan", "release_for_review"]
+    },
+    "appResponse": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["protocolVersion", "ok", "type"],
+          "properties": {
+            "protocolVersion": { "const": 1 },
+            "ok": { "const": true },
+            "type": { "enum": ["hello_ack", "idle", "result_ack"] }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["protocolVersion", "ok", "type", "commandId", "sessionId", "commandType", "payload"],
+          "properties": {
+            "protocolVersion": { "const": 1 },
+            "ok": { "const": true },
+            "type": { "const": "command" },
+            "commandId": { "type": "string", "format": "uuid" },
+            "sessionId": { "type": "string", "format": "uuid" },
+            "commandType": { "$ref": "#/$defs/commandType" },
+            "payload": { "type": "object" }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["protocolVersion", "ok"],
+          "properties": {
+            "protocolVersion": { "const": 1 },
+            "ok": { "const": false },
+            "type": { "type": "string" },
+            "error": { "type": "string" }
+          },
+          "additionalProperties": false
+        }
+      ]
+    }
+  }
+}

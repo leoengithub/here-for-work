@@ -1,0 +1,418 @@
+use std::fs;
+use std::io::{Read, Write};
+use std::os::unix::fs::PermissionsExt;
+use std::os::unix::net::UnixListener;
+use std::path::{Path, PathBuf};
+use std::thread;
+
+use chrono::{Duration, Utc};
+use serde::Deserialize;
+use serde_json::{Value, json};
+use tauri::Manager;
+use tauri_plugin_notification::NotificationExt;
+
+use crate::AppState;
+use crate::domain::BrowserInspection;
+
+const MAX_MESSAGE_BYTES: u64 = 1_048_576;
+
+pub fn start(app: tauri::AppHandle, socket_path: PathBuf) -> Result<(), String> {
+    if socket_path.exists() {
+        fs::remove_file(&socket_path).map_err(|error| error.to_string())?;
+    }
+    let listener = UnixListener::bind(&socket_path).map_err(|error| error.to_string())?;
+    fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o600))
+        .map_err(|error| error.to_string())?;
+    thread::Builder::new()
+        .name("here-for-work-browser-bridge".to_string())
+        .spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let mut bytes = Vec::new();
+                let read_result = (&mut stream)
+                    .take(MAX_MESSAGE_BYTES + 1)
+                    .read_to_end(&mut bytes);
+                let response = match read_result {
+                    Ok(_) if bytes.len() as u64 <= MAX_MESSAGE_BYTES => {
+                        handle_message(&app, &bytes)
+                    }
+                    Ok(_) => {
+                        json!({ "protocolVersion": 1, "ok": false, "error": "message_too_large" })
+                    }
+                    Err(_) => json!({ "protocolVersion": 1, "ok": false, "error": "read_failed" }),
+                };
+                let _ = stream.write_all(response.to_string().as_bytes());
+            }
+        })
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn handle_message(app: &tauri::AppHandle, bytes: &[u8]) -> Value {
+    let Ok(message) = serde_json::from_slice::<Value>(bytes) else {
+        return json!({ "protocolVersion": 1, "ok": false, "error": "invalid_json" });
+    };
+    if message.get("protocolVersion").and_then(Value::as_u64) != Some(1) {
+        return json!({ "protocolVersion": 1, "ok": false, "error": "unsupported_protocol" });
+    }
+    let Some(extension_id) = message.get("extensionId").and_then(Value::as_str) else {
+        return json!({ "protocolVersion": 1, "ok": false, "error": "missing_extension_id" });
+    };
+    let Some(installation_id) = message.get("installationId").and_then(Value::as_str) else {
+        return json!({ "protocolVersion": 1, "ok": false, "error": "missing_installation_id" });
+    };
+    if uuid::Uuid::parse_str(installation_id).is_err() {
+        return json!({ "protocolVersion": 1, "ok": false, "error": "invalid_installation_id" });
+    }
+    if extension_id.len() != 32 || !extension_id.bytes().all(|byte| matches!(byte, b'a'..=b'p')) {
+        return json!({ "protocolVersion": 1, "ok": false, "error": "invalid_extension_id" });
+    }
+    let state = app.state::<AppState>();
+    let Ok(mut store) = state.store.lock() else {
+        return json!({ "protocolVersion": 1, "ok": false, "error": "store_unavailable" });
+    };
+    let approved = match (
+        store.approved_extension_id(),
+        store.approved_installation_id(),
+    ) {
+        (Ok(Some(approved_extension)), Ok(Some(approved_installation)))
+            if approved_extension == extension_id && approved_installation == installation_id =>
+        {
+            true
+        }
+        (Ok(_), Ok(_)) => false,
+        (Err(_), _) | (_, Err(_)) => {
+            return json!({ "protocolVersion": 1, "ok": false, "error": "store_unavailable" });
+        }
+    };
+    if !approved {
+        if message.get("type").and_then(Value::as_str) == Some("hello") {
+            let _ = store.set_pending_browser_identity(extension_id, installation_id);
+            return json!({ "protocolVersion": 1, "ok": false, "type": "pairing_required" });
+        }
+        return json!({ "protocolVersion": 1, "ok": false, "error": "extension_not_approved" });
+    }
+    let _ = store.record_browser_connected();
+    match message.get("type").and_then(Value::as_str) {
+        Some("hello") => json!({ "protocolVersion": 1, "ok": true, "type": "hello_ack" }),
+        Some("poll") => match store.claim_browser_command(Utc::now(), Duration::seconds(30)) {
+            Ok(Some(command)) => json!({
+                "protocolVersion": 1,
+                "ok": true,
+                "type": "command",
+                "commandId": command.command_id,
+                "sessionId": command.session_id,
+                "commandType": command.command_type,
+                "payload": command.payload,
+            }),
+            Ok(None) => json!({ "protocolVersion": 1, "ok": true, "type": "idle" }),
+            Err(_) => json!({ "protocolVersion": 1, "ok": false, "error": "store_unavailable" }),
+        },
+        Some("command_result") => handle_command_result(app, &mut store, &message),
+        _ => json!({ "protocolVersion": 1, "ok": false, "error": "unsupported_message" }),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct FormSnapshot {
+    protocol_version: u32,
+    ats: String,
+    url: String,
+    title: String,
+    fields: Vec<FormField>,
+    fingerprint: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct FormField {
+    id: String,
+    label: String,
+    control: String,
+    input_type: String,
+    required: bool,
+    options: Vec<String>,
+    classification: String,
+    reason: String,
+}
+
+fn handle_command_result(
+    app: &tauri::AppHandle,
+    store: &mut crate::store::Store,
+    message: &Value,
+) -> Value {
+    let Some(command_id) = message.get("commandId").and_then(Value::as_str) else {
+        return json!({ "protocolVersion": 1, "ok": false, "error": "missing_command_id" });
+    };
+    let status = message.get("status").and_then(Value::as_str);
+    if status == Some("failed") {
+        let error_code = message
+            .get("error")
+            .and_then(Value::as_str)
+            .map(normalize_error_code)
+            .unwrap_or_else(|| "extension_command_failed".to_string());
+        return match store.fail_browser_command(command_id, &error_code) {
+            Ok(_) => json!({ "protocolVersion": 1, "ok": true, "type": "result_ack" }),
+            Err(_) => {
+                json!({ "protocolVersion": 1, "ok": false, "error": "invalid_command_state" })
+            }
+        };
+    }
+    if status != Some("completed") {
+        return json!({ "protocolVersion": 1, "ok": false, "error": "invalid_command_status" });
+    }
+    let command_type = message.get("commandType").and_then(Value::as_str);
+    let result = message.get("result").cloned().unwrap_or_else(|| json!({}));
+    match command_type {
+        Some("inspect_request") => {
+            if result.get("ok").and_then(Value::as_bool) != Some(true) {
+                let error = result
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .map(normalize_error_code)
+                    .unwrap_or_else(|| "inspection_failed".to_string());
+                return match store.fail_browser_command(command_id, &error) {
+                    Ok(_) => json!({ "protocolVersion": 1, "ok": true, "type": "result_ack" }),
+                    Err(_) => {
+                        json!({ "protocolVersion": 1, "ok": false, "error": "invalid_command_state" })
+                    }
+                };
+            }
+            let Some(snapshot_value) = result.get("snapshot").cloned() else {
+                return json!({ "protocolVersion": 1, "ok": false, "error": "missing_form_snapshot" });
+            };
+            let snapshot = match validate_form_snapshot(snapshot_value.clone()) {
+                Ok(snapshot) => snapshot,
+                Err(error) => {
+                    let _ = store.fail_browser_command(command_id, error);
+                    return json!({ "protocolVersion": 1, "ok": false, "error": error });
+                }
+            };
+            let safe_field_count = snapshot
+                .fields
+                .iter()
+                .filter(|field| field.classification == "safe_verified")
+                .count();
+            let needs_user_count = snapshot.fields.len().saturating_sub(safe_field_count);
+            let inspection = BrowserInspection {
+                ats: snapshot.ats,
+                page_title: snapshot.title,
+                page_url: snapshot.url,
+                snapshot_fingerprint: snapshot.fingerprint,
+                fields: snapshot_value["fields"].clone(),
+                safe_field_count,
+                needs_user_count,
+            };
+            match store.complete_browser_inspection(command_id, &inspection) {
+                Ok(_) => json!({ "protocolVersion": 1, "ok": true, "type": "result_ack" }),
+                Err(_) => {
+                    json!({ "protocolVersion": 1, "ok": false, "error": "invalid_command_state" })
+                }
+            }
+        }
+        Some("release_for_review") => {
+            if result.get("ok").and_then(Value::as_bool) != Some(true) {
+                return match store.fail_browser_command(command_id, "release_failed") {
+                    Ok(_) => json!({ "protocolVersion": 1, "ok": true, "type": "result_ack" }),
+                    Err(_) => {
+                        json!({ "protocolVersion": 1, "ok": false, "error": "invalid_command_state" })
+                    }
+                };
+            }
+            match store.complete_browser_release(command_id) {
+                Ok(session) => {
+                    if session.purpose == "application" {
+                        let _ = app.notification().builder()
+                            .title("Application ready for review")
+                            .body("Verified fields are filled. Review the form in Chrome; only you can submit it.")
+                            .show();
+                    }
+                    json!({ "protocolVersion": 1, "ok": true, "type": "result_ack" })
+                }
+                Err(_) => {
+                    json!({ "protocolVersion": 1, "ok": false, "error": "invalid_command_state" })
+                }
+            }
+        }
+        Some("fill_plan") => {
+            if result.get("ok").and_then(Value::as_bool) != Some(true) {
+                return match store.fail_browser_command(command_id, "fill_failed") {
+                    Ok(_) => json!({ "protocolVersion": 1, "ok": true, "type": "result_ack" }),
+                    Err(_) => {
+                        json!({ "protocolVersion": 1, "ok": false, "error": "invalid_command_state" })
+                    }
+                };
+            }
+            let Some(results) = result.get("results") else {
+                return json!({ "protocolVersion": 1, "ok": false, "error": "missing_fill_results" });
+            };
+            if !valid_fill_results(results) {
+                let _ = store.fail_browser_command(command_id, "invalid_fill_results");
+                return json!({ "protocolVersion": 1, "ok": false, "error": "invalid_fill_results" });
+            }
+            match store.complete_browser_fill(command_id, results) {
+                Ok(_) => json!({ "protocolVersion": 1, "ok": true, "type": "result_ack" }),
+                Err(_) => {
+                    json!({ "protocolVersion": 1, "ok": false, "error": "invalid_command_state" })
+                }
+            }
+        }
+        _ => json!({ "protocolVersion": 1, "ok": false, "error": "unsupported_command_result" }),
+    }
+}
+
+fn valid_fill_results(value: &Value) -> bool {
+    let Some(items) = value.as_array() else {
+        return false;
+    };
+    if items.len() > 300 {
+        return false;
+    }
+    items.iter().all(|item| {
+        let Some(object) = item.as_object() else {
+            return false;
+        };
+        let valid_reason = match object.get("reason") {
+            Some(Value::Null) => true,
+            Some(Value::String(value)) => value.len() <= 1_000,
+            _ => false,
+        };
+        object.len() == 3
+            && object
+                .get("fieldId")
+                .and_then(Value::as_str)
+                .is_some_and(|value| !value.is_empty() && value.len() <= 500)
+            && object
+                .get("status")
+                .and_then(Value::as_str)
+                .is_some_and(|value| matches!(value, "verified" | "skipped" | "failed"))
+            && valid_reason
+    })
+}
+
+fn validate_form_snapshot(value: Value) -> Result<FormSnapshot, &'static str> {
+    let snapshot: FormSnapshot =
+        serde_json::from_value(value).map_err(|_| "invalid_form_snapshot")?;
+    if snapshot.protocol_version != 1
+        || !matches!(snapshot.ats.as_str(), "ashby" | "greenhouse" | "lever")
+        || !allowed_ats_url(&snapshot.url, &snapshot.ats)
+        || snapshot.title.len() > 500
+        || snapshot.fields.is_empty()
+        || snapshot.fields.len() > 300
+        || snapshot.fingerprint.len() != 64
+        || !snapshot
+            .fingerprint
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return Err("invalid_form_snapshot");
+    }
+    for field in &snapshot.fields {
+        if field.id.is_empty()
+            || field.id.len() > 500
+            || field.label.len() > 2_000
+            || field.input_type.len() > 100
+            || field.reason.len() > 1_000
+            || field.options.len() > 200
+            || field.options.iter().any(|option| option.len() > 1_000)
+            || !matches!(field.control.as_str(), "input" | "textarea" | "select")
+            || !matches!(
+                field.classification.as_str(),
+                "safe_verified" | "sensitive" | "unknown" | "unsupported" | "unverifiable"
+            )
+        {
+            return Err("invalid_form_snapshot");
+        }
+        let _ = field.required;
+    }
+    Ok(snapshot)
+}
+
+fn allowed_ats_url(url: &str, ats: &str) -> bool {
+    let Some(rest) = url.strip_prefix("https://") else {
+        return false;
+    };
+    let host = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    match ats {
+        "ashby" => host == "jobs.ashbyhq.com",
+        "greenhouse" => matches!(host, "boards.greenhouse.io" | "job-boards.greenhouse.io"),
+        "lever" => matches!(host, "jobs.lever.co" | "jobs.eu.lever.co"),
+        _ => false,
+    }
+}
+
+fn normalize_error_code(error: &str) -> String {
+    let normalized = error.to_lowercase();
+    if normalized.contains("automation control") || normalized.contains("webdriver") {
+        return "automation_marked_session".to_string();
+    }
+    if normalized.contains("no active") {
+        return "no_active_ats_tab".to_string();
+    }
+    if normalized.contains("receiving end does not exist")
+        || normalized.contains("could not establish connection")
+        || normalized.contains("not a supported ats")
+        || normalized.contains("no longer available")
+    {
+        return "unsupported_or_unavailable_page".to_string();
+    }
+    if normalized.contains("message port closed") {
+        return "extension_message_interrupted".to_string();
+    }
+    "extension_command_failed".to_string()
+}
+
+pub fn socket_path(app_data_dir: &Path) -> PathBuf {
+    app_data_dir.join("browser-bridge.sock")
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    #[test]
+    fn form_snapshot_accepts_only_reviewed_hosts_and_closed_classifications() {
+        let valid = json!({
+            "protocolVersion": 1,
+            "ats": "ashby",
+            "url": "https://jobs.ashbyhq.com/acme/role",
+            "title": "Frontend Engineer",
+            "fields": [{
+                "id": "email",
+                "label": "Email",
+                "control": "input",
+                "inputType": "email",
+                "required": true,
+                "options": [],
+                "classification": "safe_verified",
+                "reason": "Verified profile fact."
+            }],
+            "fingerprint": "a".repeat(64)
+        });
+        assert!(super::validate_form_snapshot(valid.clone()).is_ok());
+
+        let mut wrong_host = valid.clone();
+        wrong_host["url"] = json!("https://careers.example.com/acme/role");
+        assert!(super::validate_form_snapshot(wrong_host).is_err());
+
+        let mut empty_form = valid.clone();
+        empty_form["fields"] = json!([]);
+        assert!(super::validate_form_snapshot(empty_form).is_err());
+
+        let mut unknown_classification = valid;
+        unknown_classification["fields"][0]["classification"] = json!("auto_submit");
+        assert!(super::validate_form_snapshot(unknown_classification).is_err());
+    }
+
+    #[test]
+    fn bridge_error_codes_are_bounded_and_non_sensitive() {
+        assert_eq!(
+            super::normalize_error_code("No active ATS tab."),
+            "no_active_ats_tab"
+        );
+        assert_eq!(
+            super::normalize_error_code("https://private.example.test/sensitive"),
+            "extension_command_failed"
+        );
+    }
+}

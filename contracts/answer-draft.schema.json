@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hereforwork.local/contracts/answer-draft.v1.schema.json",
+  "title": "HereForWork grounded application answer draft",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contractVersion", "contextHash", "answers"],
+  "properties": {
+    "contractVersion": { "type": "integer", "const": 1 },
+    "contextHash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "answers": {
+      "type": "array",
+      "maxItems": 300,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["fieldId", "answer", "provenance"],
+        "properties": {
+          "fieldId": { "type": "string", "minLength": 1, "maxLength": 500 },
+          "answer": {
+            "anyOf": [
+              { "type": "string", "maxLength": 12000 },
+              { "type": "null" }
+            ]
+          },
+          "provenance": {
+            "type": "array",
+            "maxItems": 12,
+            "items": { "type": "string", "minLength": 1, "maxLength": 500 }
+          }
+        }
+      }
+    }
+  }
+}
