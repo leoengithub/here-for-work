@@ -1,6 +1,6 @@
 export const PROTOCOL_VERSION = 1 as const;
 
-export type AtsFamily = "ashby" | "greenhouse" | "lever";
+export type AtsFamily = "ashby" | "greenhouse" | "lever" | "generic";
 export type FieldClassification =
   | "safe_verified"
   | "sensitive"

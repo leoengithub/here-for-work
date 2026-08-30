@@ -24,8 +24,9 @@ The MVP includes:
 - Automatic continuation into the user-selected ordinary Chrome profile after preparation.
 - Live-form inspection before grounded application answers are drafted.
 - Safe-field filling and verification while sensitive, unknown, unsupported, and unverifiable fields are skipped.
-- Extension coverage for Greenhouse, Lever, and Ashby, subject to evidence from the real proof-of-concept dataset.
-- Manual browser completion for unsupported portals.
+- Best-effort application-link resolution from any public HTTPS source or application URL.
+- Generic live-form inspection and safe autofill on any public HTTPS application site, with ATS-specific adapters improving reliability where evidence supports them.
+- Field-level fallback on unknown sites: safe fields continue while sensitive, unknown, unsupported, or unverifiable controls stay with the user.
 - Explicit user confirmation before career-ops records Applied.
 - Canonical Discarded status, Undo, and optional non-blocking dismissal context.
 - Dependency-aware concurrency and recoverable step-level retries.
@@ -36,7 +37,7 @@ The MVP excludes:
 - Phone or remote web access.
 - Guaranteed execution while the Mac is asleep or offline. Always-available scheduling is later functionality.
 - Email-receipt matching.
-- Universal ATS support, with Workday and custom portals initially using manual completion unless real usage changes the priority.
+- Guaranteed complete autofill for every portal, custom control, sign-in wall, CAPTCHA, iframe, or anti-automation mechanism. These degrade visibly to user completion without making the URL unsupported.
 - A second profile, scoring system, CV generator, answer engine, or application tracker.
 - Ranking changes based on dismissal feedback unless career-ops later defines a supported contract.
 - Mass preparation, arbitrary daily caps, streaks, or application-volume optimization.
@@ -148,11 +149,11 @@ The adapter exposes typed, idempotent operations for discovery, normalized role 
 
 ## Extension Boundary
 
-The extension may inspect visible fields on approved ATS hosts, return structured field definitions, fill an explicit prepared payload, verify values, and report skipped or failed fields.
+The extension has the user-approved permanent all-sites Chrome permission so it can operate on employer and ATS domains that are not known in advance. Its content script is inert until a typed HereForWork command targets an expected public HTTPS application URL. It may inspect visible fields, return structured field definitions, fill an explicit prepared payload, verify values, and report skipped or failed fields.
 
-It may not generate answers independently, infer sensitive facts, update canonical tracking, click Submit, call `form.submit()`, simulate submission, or expand permissions without a separate decision.
+It may not generate answers independently, infer sensitive facts, update canonical tracking, click Submit, call `form.submit()`, or simulate submission. Page content cannot create privileged commands. Broad host access does not grant arbitrary navigation or page-driven control.
 
-The main app flow is built before extension coverage, but the MVP is not accepted until at least one real review-before-submit application completes through the integrated browser workflow. Initial planned coverage is Greenhouse, Lever, and Ashby. The proof-of-concept dataset may change the order or replace a low-value family with a more frequent one.
+Every public HTTPS application URL enters the generic path. Greenhouse, Lever, and Ashby remain named reliability tracks because their observed structures can receive dedicated detection, fixtures, and live no-finalization evidence. A drifted or unknown variant falls back at the individual-field level instead of rejecting the application.
 
 ## Notifications
 

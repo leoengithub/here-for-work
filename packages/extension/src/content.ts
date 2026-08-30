@@ -29,7 +29,10 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
     void waitForNonEmptyForm(
       () => inspectForm(),
       () => new Promise((resolve) => setTimeout(resolve, 250)),
-    ).then((snapshot) => {
+    ).catch((error) => {
+      if (message.allowEmpty === true) return inspectForm();
+      throw error;
+    }).then((snapshot) => {
       activeFingerprint = snapshot.fingerprint;
       respond({ ok: true, snapshot });
     }).catch((error) => {

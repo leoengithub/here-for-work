@@ -22,11 +22,11 @@ describe("ATS trust boundary", () => {
     const schema = JSON.parse(readFileSync(resolve(import.meta.dirname, "../../../contracts/browser-bridge.schema.json"), "utf8"));
     expect(schema.$defs.commandType.enum).toEqual(BROWSER_COMMAND_TYPES);
   });
-  it("recognizes only reviewed ATS hosts", () => {
+  it("uses optimized families for known ATS hosts and a generic family everywhere else", () => {
     expect(detectAts("jobs.ashbyhq.com")).toBe("ashby");
     expect(detectAts("job-boards.greenhouse.io")).toBe("greenhouse");
     expect(detectAts("jobs.lever.co")).toBe("lever");
-    expect(detectAts("careers.example.com")).toBeNull();
+    expect(detectAts("careers.example.com")).toBe("generic");
   });
 
   it("keeps declarations and phone out of safe fill", () => {
@@ -34,6 +34,8 @@ describe("ATS trust boundary", () => {
     expect(classifyField("Will you require sponsorship?", "select").classification).toBe("sensitive");
     expect(classifyField("Name", "text").classification).toBe("safe_verified");
     expect(classifyField("Email", "email").classification).toBe("safe_verified");
+    expect(classifyField("", "email").classification).toBe("safe_verified");
+    expect(classifyField("", "text", "given-name").classification).toBe("safe_verified");
     expect(classifyField("LinkedIn URL", "url").classification).toBe("unknown");
     expect(classifyField("Tell us something", "textarea").classification).toBe("unknown");
   });
@@ -50,6 +52,29 @@ describe("ATS trust boundary", () => {
       expect(snapshot.fields.some((field) => field.inputType === "submit")).toBe(false);
     });
   }
+
+  it("inspects an unknown application site and degrades at individual fields", async () => {
+    const snapshot = await inspectForm(fixture("generic"), new URL("https://careers.example.com/apply/42"));
+
+    expect(snapshot.ats).toBe("generic");
+    expect(snapshot.fields.map((field) => field.id)).toEqual([
+      "full-name", "contact", "declaration", "motivation", "answer",
+    ]);
+    expect(snapshot.fields.map((field) => field.classification)).toEqual([
+      "safe_verified", "safe_verified", "unverifiable", "unknown", "unknown",
+    ]);
+    expect(snapshot.fields.some((field) => field.inputType === "submit")).toBe(false);
+  });
+
+  it("assigns unique field ids when a generic form repeats names", async () => {
+    const doc = new DOMParser().parseFromString(
+      "<form><input name='item'><input name='item'><button type='submit'>Submit</button></form>",
+      "text/html",
+    );
+    const snapshot = await inspectForm(doc, new URL("https://apply.example.com/form"));
+
+    expect(snapshot.fields.map((field) => field.id)).toEqual(["item", "item--2"]);
+  });
 
   it("continues safe fields while skipping a non-safe instruction", async () => {
     const doc = fixture("greenhouse");

@@ -159,7 +159,7 @@ export interface BrowserSessionSummary {
   roleId: string | null;
   preparationId: string | null;
   status: BrowserSessionStatus;
-  ats: "ashby" | "greenhouse" | "lever" | null;
+  ats: "ashby" | "greenhouse" | "lever" | "generic" | null;
   pageTitle: string | null;
   pageUrl: string | null;
   snapshotFingerprint: string | null;

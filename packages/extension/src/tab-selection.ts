@@ -7,6 +7,8 @@ export interface TabCandidate {
 function comparableUrl(value: string): string {
   const url = new URL(value);
   url.hash = "";
+  url.search = "";
+  url.pathname = url.pathname.replace(/\/$/, "") || "/";
   return url.toString();
 }
 

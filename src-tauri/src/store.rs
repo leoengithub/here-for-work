@@ -15,7 +15,7 @@ use crate::domain::{
     ScheduledRun, SourceScheduleSummary,
 };
 
-const SCHEMA_VERSION: i64 = 9;
+const SCHEMA_VERSION: i64 = 10;
 const MAX_RUN_ATTEMPTS: i64 = 3;
 const MAX_BROWSER_COMMAND_ATTEMPTS: i64 = 3;
 const RUN_STEPS: [&str; 3] = ["discover", "reconcile", "notify"];
@@ -359,6 +359,15 @@ impl Store {
             )?;
             version = 9;
         }
+        if version < 10 {
+            self.connection.execute_batch(
+                "BEGIN IMMEDIATE;
+                 ALTER TABLE preparation_jobs ADD COLUMN resolved_application_url TEXT;
+                 UPDATE schema_meta SET version = 10;
+                 COMMIT;",
+            )?;
+            version = 10;
+        }
         if version != SCHEMA_VERSION {
             return Err(StoreError::Database(rusqlite::Error::InvalidQuery));
         }
@@ -599,7 +608,7 @@ impl Store {
         )?;
         transaction.execute(
             "INSERT INTO activity(id, kind, message, occurred_at)
-             VALUES (?1, 'browser', 'Waiting for the selected Chrome extension to inspect the active supported ATS page.', ?2)",
+             VALUES (?1, 'browser', 'Waiting for the selected Chrome extension to inspect the active HTTPS application page.', ?2)",
             params![Uuid::new_v4().to_string(), now],
         )?;
         transaction.commit()?;
@@ -618,7 +627,8 @@ impl Store {
         let preparation = self
             .connection
             .query_row(
-                "SELECT p.role_id, p.provider, p.report_path, r.application_url
+                "SELECT p.role_id, p.provider, p.report_path,
+                        COALESCE(p.resolved_application_url, r.application_url)
                FROM preparation_jobs p JOIN roles r ON r.id = p.role_id
               WHERE p.id = ?1 AND p.status = 'completed'",
                 [preparation_id],
@@ -789,15 +799,19 @@ impl Store {
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
         )?;
         if purpose == "application"
-            && expected_url.as_deref().is_none_or(|expected| {
-                expected.split('#').next() != inspection.page_url.split('#').next()
-            })
+            && expected_url
+                .as_deref()
+                .is_none_or(|expected| !application_pages_match(expected, &inspection.page_url))
         {
             return Err(StoreError::InvalidBrowserTransition(
                 "inspected page does not match the prepared role".to_string(),
             ));
         }
-        let next_status = if purpose == "application" {
+        let no_compatible_fields = inspection
+            .fields
+            .as_array()
+            .is_some_and(|fields| fields.is_empty());
+        let next_status = if purpose == "application" && !no_compatible_fields {
             "drafting_answers"
         } else {
             "releasing"
@@ -823,7 +837,7 @@ impl Store {
                 session_id
             ],
         )?;
-        if purpose == "connection_check" {
+        if purpose == "connection_check" || no_compatible_fields {
             insert_browser_command(
                 &transaction,
                 &session_id,
@@ -1146,7 +1160,7 @@ impl Store {
         if purpose == "connection_check" {
             transaction.execute(
                 "INSERT INTO activity(id, kind, message, occurred_at)
-                 VALUES (?1, 'browser', 'The extension inspected a supported ATS page and released it without filling or finalizing anything.', ?2)",
+                 VALUES (?1, 'browser', 'The extension inspected an HTTPS application page and released it without filling or finalizing anything.', ?2)",
                 params![Uuid::new_v4().to_string(), now],
             )?;
         }
@@ -1601,12 +1615,20 @@ impl Store {
         &mut self,
         preparation_id: &str,
         context_hash: &str,
+        resolved_application_url: &str,
     ) -> Result<(), StoreError> {
+        let resolved_application_url = application_form_url(resolved_application_url)?;
         let changed = self.connection.execute(
             "UPDATE preparation_jobs
-                SET context_hash = ?1, step = 'preparing_cv', updated_at = ?2
-              WHERE id = ?3 AND status = 'preparing'",
-            params![context_hash, Utc::now().to_rfc3339(), preparation_id],
+                SET context_hash = ?1, resolved_application_url = ?2,
+                    step = 'preparing_cv', updated_at = ?3
+              WHERE id = ?4 AND status = 'preparing'",
+            params![
+                context_hash,
+                resolved_application_url,
+                Utc::now().to_rfc3339(),
+                preparation_id
+            ],
         )?;
         if changed != 1 {
             return Err(StoreError::InvalidPreparation(
@@ -2644,9 +2666,14 @@ fn application_form_url(value: &str) -> Result<String, StoreError> {
     let mut url = url::Url::parse(value).map_err(|_| {
         StoreError::InvalidBrowserTransition("the role application URL is invalid".to_string())
     })?;
-    if url.scheme() != "https" {
+    if url.scheme() != "https"
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || !is_public_application_host(&url)
+    {
         return Err(StoreError::InvalidBrowserTransition(
-            "the role application URL must use HTTPS".to_string(),
+            "the role application URL must use public HTTPS without embedded credentials"
+                .to_string(),
         ));
     }
     url.set_fragment(None);
@@ -2657,6 +2684,51 @@ fn application_form_url(value: &str) -> Result<String, StoreError> {
         }
     }
     Ok(url.to_string())
+}
+
+fn is_public_application_host(url: &url::Url) -> bool {
+    let Some(hostname) = url.host_str().map(str::to_ascii_lowercase) else {
+        return false;
+    };
+    if hostname == "localhost" || hostname.ends_with(".localhost") || hostname.ends_with(".local") {
+        return false;
+    }
+    match url.host() {
+        Some(url::Host::Ipv4(ip)) => {
+            !ip.is_private()
+                && !ip.is_loopback()
+                && !ip.is_link_local()
+                && !ip.is_unspecified()
+                && !ip.is_multicast()
+        }
+        Some(url::Host::Ipv6(ip)) => {
+            !ip.is_loopback()
+                && !ip.is_unique_local()
+                && !ip.is_unicast_link_local()
+                && !ip.is_unspecified()
+                && !ip.is_multicast()
+        }
+        Some(url::Host::Domain(_)) => true,
+        None => false,
+    }
+}
+
+fn application_pages_match(expected: &str, inspected: &str) -> bool {
+    let (Ok(mut expected), Ok(mut inspected)) =
+        (url::Url::parse(expected), url::Url::parse(inspected))
+    else {
+        return false;
+    };
+    expected.set_fragment(None);
+    expected.set_query(None);
+    inspected.set_fragment(None);
+    inspected.set_query(None);
+    let expected_path = expected.path().trim_end_matches('/');
+    let inspected_path = inspected.path().trim_end_matches('/');
+    expected.scheme() == inspected.scheme()
+        && expected.host_str() == inspected.host_str()
+        && expected.port_or_known_default() == inspected.port_or_known_default()
+        && expected_path == inspected_path
 }
 
 fn backup_before_migration(connection: &Connection, path: &Path) -> Result<(), StoreError> {
@@ -3038,7 +3110,11 @@ mod tests {
 
         let first = store.begin_preparation(&role_id, "codex").unwrap();
         store
-            .record_preparation_context(&first.id, &"a".repeat(64))
+            .record_preparation_context(
+                &first.id,
+                &"a".repeat(64),
+                "https://apply.example.test/application/1",
+            )
             .unwrap();
         store
             .fail_preparation(&first.id, "provider_failed")
@@ -3053,7 +3129,11 @@ mod tests {
         let retry = store.begin_preparation(&role_id, "codex").unwrap();
         assert_eq!(retry.id, first.id);
         store
-            .record_preparation_context(&retry.id, &"a".repeat(64))
+            .record_preparation_context(
+                &retry.id,
+                &"a".repeat(64),
+                "https://apply.example.test/application/1",
+            )
             .unwrap();
         store
             .complete_preparation(
@@ -3354,6 +3434,74 @@ mod tests {
     }
 
     #[test]
+    fn application_session_with_no_compatible_fields_releases_for_manual_review() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+        store.import_dataset(DATASET).unwrap();
+        let role_id = store.dashboard().unwrap().roles[0].id.clone();
+        let preparation = store.begin_preparation(&role_id, "codex").unwrap();
+        store
+            .record_preparation_context(
+                &preparation.id,
+                &"a".repeat(64),
+                "https://example.test/jobs/1",
+            )
+            .unwrap();
+        store
+            .complete_preparation(
+                &preparation.id,
+                42,
+                "reports/042-example.md",
+                &"b".repeat(64),
+                "output/042-example/cv.pdf",
+                &"c".repeat(64),
+            )
+            .unwrap();
+        store
+            .configure_browser(
+                "abcdefghijklmnopabcdefghijklmnop",
+                "019d0000-0000-7000-8000-000000000001",
+                "Profile 1",
+            )
+            .unwrap();
+
+        store.queue_application_session(&preparation.id).unwrap();
+        let inspect = store
+            .claim_browser_command(chrono::Utc::now(), chrono::Duration::seconds(30))
+            .unwrap()
+            .unwrap();
+        let inspected = store
+            .complete_browser_inspection(
+                &inspect.command_id,
+                &crate::domain::BrowserInspection {
+                    ats: "generic".to_string(),
+                    page_title: "Custom application".to_string(),
+                    page_url: "https://example.test/jobs/1".to_string(),
+                    snapshot_fingerprint: "f".repeat(64),
+                    fields: serde_json::json!([]),
+                    safe_field_count: 0,
+                    needs_user_count: 0,
+                },
+            )
+            .unwrap();
+        assert_eq!(inspected.status, "releasing");
+
+        let release = store
+            .claim_browser_command(chrono::Utc::now(), chrono::Duration::seconds(30))
+            .unwrap()
+            .unwrap();
+        assert_eq!(release.command_type, "release_for_review");
+        assert_eq!(
+            store
+                .complete_browser_release(&release.command_id)
+                .unwrap()
+                .status,
+            "review_required"
+        );
+        assert!(store.claim_answer_work().unwrap().is_none());
+    }
+
+    #[test]
     fn application_session_drafts_after_live_inspection_and_releases_after_verified_fill() {
         let directory = tempfile::tempdir().unwrap();
         let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
@@ -3364,6 +3512,13 @@ mod tests {
         store.import_dataset(&dataset).unwrap();
         let role_id = store.dashboard().unwrap().roles[0].id.clone();
         let preparation = store.begin_preparation(&role_id, "codex").unwrap();
+        store
+            .record_preparation_context(
+                &preparation.id,
+                &"a".repeat(64),
+                "https://jobs.ashbyhq.com/northstar/frontend/application",
+            )
+            .unwrap();
         store
             .complete_preparation(
                 &preparation.id,
@@ -3529,7 +3684,7 @@ mod tests {
             .unwrap()
             .unwrap();
         let failed = store
-            .fail_browser_command(&command.command_id, "no_active_ats_tab")
+            .fail_browser_command(&command.command_id, "no_active_application_page")
             .unwrap();
         assert_eq!(failed.status, "action_required");
 

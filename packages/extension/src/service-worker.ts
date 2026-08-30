@@ -86,21 +86,13 @@ function schedulePoll(): void {
 
 async function activeTabId(): Promise<number> {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (!tab?.id) throw new Error("No active ATS tab.");
+  if (!tab?.id) throw new Error("No active application page.");
   return tab.id;
 }
 
 async function expectedTabId(expectedUrl: string): Promise<number> {
   for (let attempt = 0; attempt < 20; attempt += 1) {
-    const tabs = await chrome.tabs.query({
-      url: [
-        "https://jobs.ashbyhq.com/*",
-        "https://boards.greenhouse.io/*",
-        "https://job-boards.greenhouse.io/*",
-        "https://jobs.lever.co/*",
-        "https://jobs.eu.lever.co/*",
-      ],
-    });
+    const tabs = await chrome.tabs.query({ url: ["https://*/*"] });
     const match = selectExpectedTab(tabs, expectedUrl);
     if (match?.id) return match.id;
     await new Promise((resolve) => setTimeout(resolve, 250));
@@ -125,7 +117,7 @@ async function executeCommand(command: BrowserCommand): Promise<unknown> {
     const expectedUrl = command.payload.expectedUrl;
     const tabId = typeof expectedUrl === "string" ? await expectedTabId(expectedUrl) : await activeTabId();
     const result = await retryMessage(
-      () => chrome.tabs.sendMessage(tabId, { type: "inspect" }),
+      () => chrome.tabs.sendMessage(tabId, { type: "inspect", allowEmpty: typeof expectedUrl === "string" }),
       () => new Promise((resolve) => setTimeout(resolve, 250)),
     );
     if (result?.ok) await chrome.storage.session.set({ [sessionTabKey(command.sessionId)]: tabId });

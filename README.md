@@ -15,11 +15,11 @@ The last verified Apple Silicon package is built at:
 src-tauri/target/release/bundle/macos/HereForWork.app
 ```
 
-It includes the local React/Tauri queue, schema-v9 SQLite migrations, real private proof
+It includes the local React/Tauri queue, schema-v10 SQLite migrations, real private proof
 import, canonical-history reconciliation, scheduling/catch-up records, Codex and Claude
 CLI conformance, provider-neutral report/CV preparation, grounded live-form answers,
-login launch, notifications, backup/export, a native messaging host, and the unpacked
-Ashby/Greenhouse/Lever extension. The extension is paired with the selected ordinary
+login launch, notifications, backup/export, a native messaging host, and an unpacked
+all-sites extension with generic form support plus Ashby/Greenhouse/Lever detection. The extension is paired with the selected ordinary
 Chrome profile on this Mac; a new installation still requires that one manual step.
 
 The browser flow does not release an inspected form for manual review until verified
@@ -46,6 +46,8 @@ The first integration will use career-ops as the engine for verified profile dat
 - Every viable role remains available without an arbitrary daily cap.
 - The desktop-first queue is a direct list without a lightweight detail pane.
 - The browser extension is a focused form-inspection, filling, and verification companion, not the primary interface.
+- Any public HTTPS application URL is accepted; source listings receive best-effort application-link resolution and unknown sites use conservative generic inspection.
+- ATS-specific adapters improve reliability but never act as a support allowlist.
 - Sensitive, unknown, unsupported, or unverifiable fields are skipped while safe fields continue.
 - HereForWork never submits an application or sends a message for the user.
 

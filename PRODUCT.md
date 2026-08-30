@@ -45,7 +45,7 @@ The approved interaction and workflow contract is documented in [MVP_SHAPE.md](M
 
 The MVP is desktop-first for macOS. Its primary surface is a direct list of viable roles, ordered as strong matches, other new roles, and roles needing a decision. Selecting **Prepare application** starts one continuous workflow from career-ops report and CV generation through browser opening, live-form inspection, grounded answer drafting, safe-field filling, verification, and notification that the form is ready for human review.
 
-The browser companion initially targets Greenhouse, Lever, and Ashby. Unsupported portals retain a manual browser workflow. Detailed visual-system decisions and phone access remain later work.
+The browser companion accepts any public HTTPS application URL. It first attempts to resolve source listings to their application form, then inspects every site through a conservative generic adapter. Greenhouse, Lever, Ashby, and future ATS-specific adapters improve reliability but never define which sites are supported. Unknown or unverifiable controls are skipped individually while safe fields continue. Detailed visual-system decisions and phone access remain later work.
 
 ## Accessibility & Inclusion
 

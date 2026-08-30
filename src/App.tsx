@@ -70,16 +70,16 @@ const formatRelative = (iso: string): string => {
 };
 
 const atsLabel = (applicationUrl: string | null): string => {
-  if (!applicationUrl) return "Portal";
+  if (!applicationUrl) return "Web form";
   try {
     const hostname = new URL(applicationUrl).hostname;
     if (hostname.includes("ashbyhq.com")) return "Ashby";
     if (hostname.includes("greenhouse.io")) return "Greenhouse";
     if (hostname.includes("lever.co")) return "Lever";
   } catch {
-    return "Portal";
+    return "Web form";
   }
-  return "Portal";
+  return "Web form";
 };
 
 function RoleRow({
@@ -199,7 +199,7 @@ export function BrowserSessions({
   if (sessions.length === 0) {
     return (
       <p className="browser-session-empty">
-        No browser session yet. Pair the extension, open a supported ATS page, then run the connection check from System.
+        No browser session yet. Pair the extension, open an HTTPS application form, then run the connection check from System.
       </p>
     );
   }
@@ -221,8 +221,8 @@ export function BrowserSessions({
         <li key={session.id}>
           <div className="browser-session-list__heading">
             <div>
-              <strong>{session.pageTitle ?? "Active ATS page"}</strong>
-              <span>{session.ats ? session.ats.toUpperCase() : "Waiting for a supported page"}</span>
+              <strong>{session.pageTitle ?? "Active application page"}</strong>
+              <span>{session.ats === "generic" ? "WEB FORM" : session.ats ? session.ats.toUpperCase() : "Waiting for an application page"}</span>
             </div>
             <span className="state-pill">{browserStatusLabel[session.status]}</span>
           </div>
@@ -234,6 +234,9 @@ export function BrowserSessions({
           {session.status === "review_required" ? (
             <div>
               <p>The page is released for your review. HereForWork cannot submit it.</p>
+              {session.fieldCount === 0 ? (
+                <p>No compatible fields were found after the inspection window. Complete this form manually; the application itself remains available.</p>
+              ) : null}
               {session.reviewItems?.length ? (
                 <ul>
                   {session.reviewItems.map((item) => (
@@ -448,10 +451,10 @@ function SystemPanel({
         <div className="browser-check">
           <div>
             <h4>Live boundary check</h4>
-            <p>In the selected ordinary Chrome profile, open an Ashby, Greenhouse, or Lever application page. This check inspects field definitions, then releases the page. It never fills or finalizes.</p>
+            <p>In the selected ordinary Chrome profile, open any HTTPS application form. This check inspects field definitions, then releases the page. It never fills or finalizes.</p>
           </div>
           <button className="button button--quiet" type="button" onClick={onCheckBrowser} disabled={busy || !browserSetup?.approvedExtensionId}>
-            Inspect active ATS page
+            Inspect active application page
           </button>
         </div>
         <BrowserSessions sessions={browserSessions.slice(0, 1)} busy={busy} onRetry={onRetryBrowser} />

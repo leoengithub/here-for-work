@@ -36,8 +36,11 @@ HereForWork.
 
 The extension keeps provider execution separate from canonical writes:
 
-1. `preparation.context.get` validates the role and returns a bounded context,
-   output schema, source hashes, and fixed career-ops instructions.
+1. `preparation.context.get` validates any public HTTPS role/application URL,
+   attempts bounded source-to-form resolution, and returns the resolved URL with a
+   bounded context, output schema, source hashes, and fixed career-ops instructions.
+   Known ATS providers are optimizations; fetch, login, or parsing failures preserve
+   a conservative generic context instead of rejecting the role.
 2. HereForWork invokes the selected Codex or Claude subscription CLI in an
    ephemeral, tool-free working directory.
 3. `preparation.result.commit` rejects a stale context or invalid result, runs

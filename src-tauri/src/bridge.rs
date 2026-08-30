@@ -294,10 +294,12 @@ fn validate_form_snapshot(value: Value) -> Result<FormSnapshot, &'static str> {
     let snapshot: FormSnapshot =
         serde_json::from_value(value).map_err(|_| "invalid_form_snapshot")?;
     if snapshot.protocol_version != 1
-        || !matches!(snapshot.ats.as_str(), "ashby" | "greenhouse" | "lever")
-        || !allowed_ats_url(&snapshot.url, &snapshot.ats)
+        || !matches!(
+            snapshot.ats.as_str(),
+            "ashby" | "greenhouse" | "lever" | "generic"
+        )
+        || !allowed_form_url(&snapshot.url, &snapshot.ats)
         || snapshot.title.len() > 500
-        || snapshot.fields.is_empty()
         || snapshot.fields.len() > 300
         || snapshot.fingerprint.len() != 64
         || !snapshot
@@ -328,15 +330,48 @@ fn validate_form_snapshot(value: Value) -> Result<FormSnapshot, &'static str> {
     Ok(snapshot)
 }
 
-fn allowed_ats_url(url: &str, ats: &str) -> bool {
-    let Some(rest) = url.strip_prefix("https://") else {
+fn allowed_form_url(value: &str, family: &str) -> bool {
+    let Ok(url) = url::Url::parse(value) else {
         return false;
     };
-    let host = rest.split(['/', '?', '#']).next().unwrap_or_default();
-    match ats {
+    if url.scheme() != "https" || !url.username().is_empty() || url.password().is_some() {
+        return false;
+    }
+    let Some(host) = url.host_str().map(str::to_ascii_lowercase) else {
+        return false;
+    };
+    if host == "localhost" || host.ends_with(".localhost") || host.ends_with(".local") {
+        return false;
+    }
+    let is_public_host = match url.host() {
+        Some(url::Host::Ipv4(ip)) => {
+            !ip.is_private()
+                && !ip.is_loopback()
+                && !ip.is_link_local()
+                && !ip.is_unspecified()
+                && !ip.is_multicast()
+        }
+        Some(url::Host::Ipv6(ip)) => {
+            !ip.is_loopback()
+                && !ip.is_unique_local()
+                && !ip.is_unicast_link_local()
+                && !ip.is_unspecified()
+                && !ip.is_multicast()
+        }
+        Some(url::Host::Domain(_)) => true,
+        None => false,
+    };
+    if !is_public_host {
+        return false;
+    }
+    match family {
         "ashby" => host == "jobs.ashbyhq.com",
-        "greenhouse" => matches!(host, "boards.greenhouse.io" | "job-boards.greenhouse.io"),
-        "lever" => matches!(host, "jobs.lever.co" | "jobs.eu.lever.co"),
+        "greenhouse" => matches!(
+            host.as_str(),
+            "boards.greenhouse.io" | "job-boards.greenhouse.io" | "job-boards.eu.greenhouse.io"
+        ),
+        "lever" => matches!(host.as_str(), "jobs.lever.co" | "jobs.eu.lever.co"),
+        "generic" => true,
         _ => false,
     }
 }
@@ -347,11 +382,10 @@ fn normalize_error_code(error: &str) -> String {
         return "automation_marked_session".to_string();
     }
     if normalized.contains("no active") {
-        return "no_active_ats_tab".to_string();
+        return "no_active_application_page".to_string();
     }
     if normalized.contains("receiving end does not exist")
         || normalized.contains("could not establish connection")
-        || normalized.contains("not a supported ats")
         || normalized.contains("no longer available")
     {
         return "unsupported_or_unavailable_page".to_string();
@@ -371,7 +405,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn form_snapshot_accepts_only_reviewed_hosts_and_closed_classifications() {
+    fn form_snapshot_accepts_known_and_generic_public_https_hosts() {
         let valid = json!({
             "protocolVersion": 1,
             "ats": "ashby",
@@ -395,9 +429,16 @@ mod tests {
         wrong_host["url"] = json!("https://careers.example.com/acme/role");
         assert!(super::validate_form_snapshot(wrong_host).is_err());
 
+        let mut generic = valid.clone();
+        generic["ats"] = json!("generic");
+        generic["url"] = json!("https://careers.example.com/acme/role");
+        assert!(super::validate_form_snapshot(generic.clone()).is_ok());
+        generic["url"] = json!("https://localhost/application");
+        assert!(super::validate_form_snapshot(generic).is_err());
+
         let mut empty_form = valid.clone();
         empty_form["fields"] = json!([]);
-        assert!(super::validate_form_snapshot(empty_form).is_err());
+        assert!(super::validate_form_snapshot(empty_form).is_ok());
 
         let mut unknown_classification = valid;
         unknown_classification["fields"][0]["classification"] = json!("auto_submit");
@@ -407,8 +448,8 @@ mod tests {
     #[test]
     fn bridge_error_codes_are_bounded_and_non_sensitive() {
         assert_eq!(
-            super::normalize_error_code("No active ATS tab."),
-            "no_active_ats_tab"
+            super::normalize_error_code("No active application page."),
+            "no_active_application_page"
         );
         assert_eq!(
             super::normalize_error_code("https://private.example.test/sensitive"),

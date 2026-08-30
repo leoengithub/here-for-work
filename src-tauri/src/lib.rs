@@ -233,13 +233,18 @@ async fn prepare_role(
         }
         return Err("career-ops returned an invalid preparation context".to_string());
     }
+    let resolved_application_url = context
+        .job
+        .get("url")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "career-ops returned no resolved application URL".to_string())?;
     {
         let mut store = state
             .store
             .lock()
             .map_err(|_| "Operational store lock was poisoned".to_string())?;
         store
-            .record_preparation_context(&work.id, &context.context_hash)
+            .record_preparation_context(&work.id, &context.context_hash, resolved_application_url)
             .map_err(|error| error.to_string())?;
     }
     if cancellation.load(Ordering::Relaxed) {

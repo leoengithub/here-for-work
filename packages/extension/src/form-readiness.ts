@@ -8,5 +8,5 @@ export async function waitForNonEmptyForm<T extends { fields: unknown[] }>(
     if (snapshot.fields.length > 0) return snapshot;
     if (attempt < attempts - 1) await delay();
   }
-  throw new Error("No application fields appeared on the selected ATS page.");
+  throw new Error("No application fields appeared on the selected application page.");
 }

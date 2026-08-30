@@ -1,7 +1,7 @@
 # Implementation status
 
 Date: 2026-08-30
-Stage: Ashby personal proof complete; Greenhouse and Lever live observations remain
+Stage: generic public-HTTPS path implemented; unknown-site, Greenhouse, and Lever live observations remain
 
 ## Verified implementation evidence
 
@@ -64,7 +64,9 @@ Stage: Ashby personal proof complete; Greenhouse and Lever live observations rem
   reload, duplicate identical ATS tabs selecting an older content script, and a new tab
   exposing its URL before its content script or dynamic form was ready. Selection now
   prefers the active matching tab, transport and form readiness have bounded retries,
-  and a zero-field snapshot is rejected on both sides of the native boundary.
+  and application inspection waits through the bounded dynamic-mount window. If no
+  compatible fields appear, the application is released for manual review with zero fills
+  instead of being rejected; the connection diagnostic still reports an empty page as a failure.
 - The packaged app completed a real Codex preparation for that role. career-ops owns
   report `reports/103-ashby-2026-08-30.md`, a two-page A4 verified PDF, canonical
   Evaluated tracker row 103, and matching SHA-256 references in HereForWork.
@@ -78,18 +80,19 @@ Stage: Ashby personal proof complete; Greenhouse and Lever live observations rem
 ## Current validation
 
 - React and extension TypeScript checks pass.
-- Twenty-five Vitest app/extension tests and six adapter tests pass.
-- Thirty Rust core/native-host tests pass across all targets: 26 library tests and
+- Twenty-eight extension-focused Vitest tests and nine adapter tests pass in the generic-form change set; the full suite is re-run before packaging.
+- Thirty-one Rust core/native-host tests pass across all targets: 27 library tests and
   four native-host tests.
 - Rust formatting and Clippy with warnings denied pass.
-- The extension and ad-hoc-signed Apple Silicon app build successfully.
+- The all-sites extension and ad-hoc-signed Apple Silicon app build successfully.
 - The current package passes strict code-signature verification and contains the answer,
   preparation, browser, and provider schemas plus the rebuilt extension.
 
 ## Extension evidence
 
-- Exact host permissions cover Ashby, Greenhouse, and Lever only.
-- Synthetic fixtures for all three families pass inspection tests.
+- The user-approved permanent all-sites host permission covers application domains that are not knowable in advance; the content script runs only on HTTPS pages and remains inert until a typed command targets the expected URL.
+- Synthetic fixtures for Ashby, Greenhouse, Lever, and a custom generic form pass inspection tests.
+- Any public HTTPS application URL is accepted. The adapter attempts source-to-form resolution and persists the resolved URL; inaccessible or login-gated sources retain the original URL without blocking preparation.
 - Terminal controls are excluded from snapshots.
 - Only `safe_verified` instructions can be filled; other fields skip independently.
 - Read-back verification is required.
@@ -103,9 +106,9 @@ Stage: Ashby personal proof complete; Greenhouse and Lever live observations rem
 - Concurrent popup/service-worker startup coalesces Installation ID creation into one
   stable profile-local value.
 - Opening the popup actively refreshes the native hello when Chrome retained a stale
-  port across an app/package restart, restoring the polling loop without broad browser
-  permissions or automation control.
-- Duplicate matching ATS URLs prefer the selected Chrome tab, then the newest match.
+  port across an app/package restart, restoring the polling loop without automation
+  control or a page-originated command path.
+- Duplicate matching application URLs prefer the selected Chrome tab, then the newest match; tracking query parameters do not break matching.
   Inspection waits for both the content-script receiver and a non-empty dynamically
   mounted form; neither wait can introduce a finalization command.
 - Recovery attempts remain visible for audit, but only the newest browser session for a
@@ -145,8 +148,9 @@ before transmitting personal data.
 
 ## Remaining proof boundary
 
-The typed writable adapter runs only fixed career-ops entry points. The next checkpoints
-are observed Greenhouse and Lever variants, each ending at review without submission.
+The typed writable adapter runs only fixed career-ops entry points. The generic public-HTTPS
+path is implemented with per-field fallback. The next checkpoints are one unknown-site live
+observation plus observed Greenhouse and Lever variants, each ending at review without submission.
 Scheduled workflows, Gmail, credentials, and career-ops profile facts remain outside
 automated test mutation.
 

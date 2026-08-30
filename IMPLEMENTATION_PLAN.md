@@ -211,7 +211,7 @@ Gate:
 - The user-selected ordinary Chrome profile reconnects after restart.
 - The app cannot communicate with an unapproved extension ID or a different profile installation.
 - A malicious page message cannot invoke a privileged operation.
-- No WebDriver, CDP, remote-debugging port, localhost server, broad host permission, or arbitrary browser command exists.
+- No WebDriver, CDP, remote-debugging port, localhost server, or arbitrary browser command exists. The user-approved permanent all-sites permission is isolated behind typed native commands for one expected public HTTPS application URL.
 
 User intervention:
 
@@ -245,28 +245,29 @@ Gate:
 
 Vault decision: real-form observations containing personal answers stay private. Selector and behavior conclusions are distilled into redacted fixtures and repository documentation.
 
-## Iteration 8 — Greenhouse and Lever
+## Iteration 8 — Generic web forms, then Greenhouse and Lever hardening
 
-Objective: add ATS coverage through evidence, not nominal selectors.
+Objective: make generic public-HTTPS inspection the baseline, then improve known ATS reliability through evidence rather than nominal support gates.
 
 Sequence:
 
-1. Greenhouse, supported by observed proof data.
-2. Lever, retained by the approved MVP contract despite no initial observed role.
+1. Generic unknown-host fixtures and best-effort source-to-application URL resolution.
+2. Greenhouse, supported by observed proof data.
+3. Lever, retained as a named reliability track despite no initial observed role.
 
 Deliverables per ATS:
 
 - Detector, inspector, filler, verifier, and fixtures.
-- Host-permission review.
+- Permanent all-sites permission review, with inspection remaining inert until a typed expected-URL command.
 - Accessibility and keyboard checks.
 - Live no-finalization evidence.
-- Manual fallback for unsupported variants and custom employer domains.
+- Per-field fallback for drifted variants, custom employer domains, and controls that cannot be verified safely.
 
 Gate per ATS:
 
 - At least one real form reaches verified Review required without page finalization.
 - Unsupported controls are reported, not guessed.
-- ATS drift fails closed.
+- ATS drift falls back to generic inspection; each unsafe or unsupported field fails closed independently.
 
 Vault decision: preserve private live URLs and personal observations outside Git; commit only generalized adapter evidence.
 
@@ -304,7 +305,7 @@ Deferred until the personal proof is accepted:
 - Signed diagnostics and support workflow.
 - Auto-update evaluation.
 
-Phone access, execution while the Mac is offline, email-receipt matching, universal ATS coverage, and detailed visual design remain deferred.
+Phone access, execution while the Mac is offline, email-receipt matching, guaranteed complete autofill across every web control, and detailed visual design remain deferred.
 
 ## Test matrix
 

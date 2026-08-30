@@ -7,6 +7,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 const adapter = fileURLToPath(new URL("./adapter.mjs", import.meta.url));
+const { fetchJob } = await import("./adapter.mjs");
 
 function request(payload, env = {}) {
   return new Promise((resolve, reject) => {
@@ -39,6 +40,90 @@ test("capabilities expose the fixed safety boundary", async () => {
     "browser.command",
   ]);
   assert.equal(response.result.sourceOfTruth.applicationHistory, "career-ops");
+});
+
+test("generic discovery resolves a source listing to its application form", async (context) => {
+  const requested = [];
+  context.mock.method(globalThis, "fetch", async (input) => {
+    const url = String(input);
+    requested.push(url);
+    if (url === "https://listing.example.test/jobs/42") {
+      return new Response(`<!doctype html><html><body>
+        <h1>Frontend Engineer</h1>
+        <a href="https://apply.example.test/forms/42?source=listing">Apply now</a>
+      </body></html>`, { status: 200, headers: { "content-type": "text/html" } });
+    }
+    return new Response(`<!doctype html><html><head>
+      <script type="application/ld+json">${JSON.stringify({
+        "@type": "JobPosting",
+        title: "Senior Frontend Engineer",
+        description: "Build accessible React and TypeScript product interfaces, collaborate with design and backend partners, improve automated testing, and own reliable delivery for a distributed product team across Europe.",
+        hiringOrganization: { name: "Example Co" },
+        jobLocation: { address: { addressLocality: "Madrid", addressCountry: "Spain" } },
+        datePosted: "2026-08-30",
+      })}</script>
+      </head><body><form><input name="name"><input name="email"><button type="submit">Submit</button></form></body></html>`, {
+      status: 200,
+      headers: { "content-type": "text/html" },
+    });
+  });
+
+  const job = await fetchJob({
+    company: "Example Co",
+    title: "Frontend Engineer",
+    location: "Remote",
+    url: "https://listing.example.test/jobs/42",
+  });
+
+  assert.deepEqual(requested, [
+    "https://listing.example.test/jobs/42",
+    "https://apply.example.test/forms/42?source=listing",
+  ]);
+  assert.equal(job.provider, "generic");
+  assert.equal(job.url, "https://apply.example.test/forms/42?source=listing");
+  assert.equal(job.sourceUrl, "https://listing.example.test/jobs/42");
+  assert.equal(job.title, "Senior Frontend Engineer");
+  assert.equal(job.descriptionAvailable, true);
+});
+
+test("generic discovery preserves the requested application URL when a page cannot be fetched", async (context) => {
+  context.mock.method(globalThis, "fetch", async () => {
+    throw new Error("login required");
+  });
+
+  const job = await fetchJob({
+    company: "Private Co",
+    title: "Product Engineer",
+    location: "Remote",
+    url: "https://careers.example.test/private-role",
+  });
+
+  assert.equal(job.provider, "generic");
+  assert.equal(job.url, "https://careers.example.test/private-role");
+  assert.equal(job.descriptionAvailable, false);
+  assert.match(job.description, /could not retrieve a complete job description/);
+});
+
+test("generic discovery does not follow redirects to a local target", async (context) => {
+  let calls = 0;
+  context.mock.method(globalThis, "fetch", async () => {
+    calls += 1;
+    return new Response(null, {
+      status: 302,
+      headers: { location: "https://localhost/private" },
+    });
+  });
+
+  const job = await fetchJob({
+    company: "Example Co",
+    title: "Engineer",
+    location: "Remote",
+    url: "https://careers.example.test/role",
+  });
+
+  assert.equal(calls, 1);
+  assert.equal(job.url, "https://careers.example.test/role");
+  assert.equal(job.descriptionAvailable, false);
 });
 
 async function fakeCareerOps() {

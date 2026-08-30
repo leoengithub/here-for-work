@@ -1,0 +1,20 @@
+<!doctype html>
+<html>
+  <head><title>Example Careers application</title></head>
+  <body>
+    <form>
+      <fieldset>
+        <legend>Applicant details</legend>
+        <label for="full-name">Full name</label>
+        <input id="full-name" name="name" required>
+        <span id="email-label">Email address</span>
+        <input name="contact" aria-labelledby="email-label" type="email" required>
+        <label><input name="declaration" type="checkbox"> I certify this application is accurate</label>
+        <label for="motivation">Why do you want to work here?</label>
+        <textarea id="motivation" name="answer"></textarea>
+        <input name="answer" aria-label="Additional information">
+        <button type="submit">Send application</button>
+      </fieldset>
+    </form>
+  </body>
+</html>
