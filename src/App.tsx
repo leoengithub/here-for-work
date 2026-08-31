@@ -1,5 +1,34 @@
 import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
+import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { Alert, AlertAction, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { Checkbox } from "@/components/ui/checkbox";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
+import {
+  Empty,
+  EmptyContent,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+} from "@/components/ui/empty";
+import { Field, FieldLabel } from "@/components/ui/field";
+import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Textarea } from "@/components/ui/textarea";
 import {
   checkIntegrations,
   configureBrowserBridge,
@@ -121,26 +150,26 @@ function RoleRow({
         <span>{atsLabel(role.applicationUrl)}</span>
         {role.sourceCount > 1 ? <span>{role.sourceCount} source occurrences</span> : null}
       </span>
-      <span className="state-pill">{role.preparationState.replaceAll("_", " ")}</span>
+      <Badge variant="outline">{role.preparationState.replaceAll("_", " ")}</Badge>
       <span className="role-row__actions">
-        <button
-          className="button button--primary"
+        <Button
+
           type="button"
           disabled={preparing ? false : !canPrepare || busy}
           aria-describedby="queue-action-status"
           onClick={() => preparing ? onCancel(role.id) : onPrepare(role.id)}
         >
           {preparing ? "Cancel preparation" : "Prepare"}
-        </button>
-        <button
-          className="button button--quiet"
+        </Button>
+        <Button
+          variant="outline"
           type="button"
           disabled={!canDismiss || busy}
           aria-describedby="queue-action-status"
           onClick={() => onDismiss(role.id)}
         >
           Dismiss
-        </button>
+        </Button>
       </span>
     </article>
   );
@@ -148,27 +177,33 @@ function RoleRow({
 
 function HandledQueue() {
   return (
-    <section className="empty-state" aria-labelledby="handled-empty-title">
-      <div className="empty-state__mark" aria-hidden="true">H</div>
-      <h2 id="handled-empty-title">No new roles are waiting.</h2>
-      <p>Prepared and dismissed roles remain visible in Applications and canonical career-ops history.</p>
-    </section>
+    <Empty className="empty-state" role="region" aria-labelledby="handled-empty-title">
+      <EmptyHeader>
+        <EmptyMedia className="empty-state__mark" aria-hidden="true">H</EmptyMedia>
+        <EmptyTitle><h2 id="handled-empty-title">No new roles are waiting.</h2></EmptyTitle>
+        <EmptyDescription>Prepared and dismissed roles remain visible in Applications and canonical career-ops history.</EmptyDescription>
+      </EmptyHeader>
+    </Empty>
   );
 }
 
 function EmptyQueue({ onImport }: { onImport: () => void }) {
   return (
-    <section className="empty-state" aria-labelledby="empty-title">
-      <div className="empty-state__mark" aria-hidden="true">H</div>
-      <h2 id="empty-title">Your review queue is ready for its first run.</h2>
-      <p>
-        Import the two discovery snapshots to reconcile roles without changing career-ops, Gmail, or application history.
-      </p>
-      <button className="button button--primary" type="button" onClick={onImport}>
-        Import discovery snapshot
-      </button>
-      <p className="empty-state__hint">JSON stays on this Mac and is written only to HereForWork’s operational store.</p>
-    </section>
+    <Empty className="empty-state" role="region" aria-labelledby="empty-title">
+      <EmptyHeader>
+        <EmptyMedia className="empty-state__mark" aria-hidden="true">H</EmptyMedia>
+        <EmptyTitle><h2 id="empty-title">Your review queue is ready for its first run.</h2></EmptyTitle>
+        <EmptyDescription>
+          Import the two discovery snapshots to reconcile roles without changing career-ops, Gmail, or application history.
+        </EmptyDescription>
+      </EmptyHeader>
+      <EmptyContent>
+        <Button type="button" onClick={onImport}>
+          Import discovery snapshot
+        </Button>
+        <p className="empty-state__hint">JSON stays on this Mac and is written only to HereForWork’s operational store.</p>
+      </EmptyContent>
+    </Empty>
   );
 }
 
@@ -227,7 +262,7 @@ export function BrowserSessions({
               <strong>{session.pageTitle ?? "Active application page"}</strong>
               <span>{session.ats === "generic" ? "WEB FORM" : session.ats ? session.ats.toUpperCase() : "Waiting for an application page"}</span>
             </div>
-            <span className="state-pill">{browserStatusLabel[session.status]}</span>
+            <Badge variant="outline">{browserStatusLabel[session.status]}</Badge>
           </div>
           {session.status === "connection_verified" ? (
             <p>
@@ -241,9 +276,9 @@ export function BrowserSessions({
                 <p>No compatible fields were found after the inspection window. Complete this form manually; the application itself remains available.</p>
               ) : null}
               {session.purpose === "application" && onConfirmApplied && isLatestApplicationAttempt ? (
-                <button className="button button--primary" type="button" onClick={() => onConfirmApplied(session.id)} disabled={busy}>
+                <Button  type="button" onClick={() => onConfirmApplied(session.id)} disabled={busy}>
                   I submitted this application
-                </button>
+                </Button>
               ) : null}
               {session.purpose === "application" && !isLatestApplicationAttempt ? (
                 <p>This is an earlier browser attempt. Confirm an outcome only from the newest review session.</p>
@@ -254,16 +289,16 @@ export function BrowserSessions({
           {session.status === "submitted_tracking_pending" && onConfirmApplied && isLatestApplicationAttempt ? (
             <div>
               <p>The form is not touched again. Only the canonical career-ops tracking write will be retried.</p>
-              <button className="button button--primary" type="button" onClick={() => onConfirmApplied(session.id)} disabled={busy}>
+              <Button  type="button" onClick={() => onConfirmApplied(session.id)} disabled={busy}>
                 Retry tracking update
-              </button>
+              </Button>
             </div>
           ) : null}
           {session.errorCode ? <p className="browser-session-list__error">{session.errorCode.replaceAll("_", " ")}</p> : null}
           {session.status === "action_required" ? (
-            <button className="button button--quiet" type="button" onClick={() => onRetry(session.id)} disabled={busy}>
+            <Button variant="outline" type="button" onClick={() => onRetry(session.id)} disabled={busy}>
               Retry session
-            </button>
+            </Button>
           ) : null}
         </li>
         );
@@ -433,9 +468,9 @@ function SystemPanel({
           <h2 id="system-title">System status</h2>
           <p>HereForWork checks local tools without storing subscription credentials.</p>
         </div>
-        <button className="button button--quiet" type="button" onClick={onRefresh} disabled={busy}>
+        <Button variant="outline" type="button" onClick={onRefresh} disabled={busy}>
           {busy ? "Checking…" : "Check again"}
-        </button>
+        </Button>
       </div>
 
       {health ? (
@@ -463,14 +498,14 @@ function SystemPanel({
               : "Reconcile before preparing a role so prior applications never reappear as new."}
           </p>
         </div>
-        <button
-          className="button button--primary"
+        <Button
+
           type="button"
           onClick={onReconcile}
           disabled={busy || health?.careerOps.ready !== true}
         >
           Reconcile history
-        </button>
+        </Button>
       </div>
       <section className="queue-filter-settings" aria-labelledby="queue-filter-settings-title">
         <div className="queue-filter-settings__heading">
@@ -478,56 +513,59 @@ function SystemPanel({
             <h3 id="queue-filter-settings-title">Queue filters</h3>
             <p>Initialized from your verified career-ops profile. Changes apply to current unprepared roles and future imports.</p>
           </div>
-          <button className="button button--primary" type="button" onClick={onSaveQueueFilters} disabled={busy}>
+          <Button  type="button" onClick={onSaveQueueFilters} disabled={busy}>
             Save filters
-          </button>
+          </Button>
         </div>
         <div className="queue-filter-settings__fields">
-          <label>
-            Role families
-            <textarea
+          <Field>
+            <FieldLabel htmlFor="queue-role-families">Role families</FieldLabel>
+            <Textarea
+              id="queue-role-families"
               key={lineSeparated(queueFilters.roleFamilies)}
               defaultValue={lineSeparated(queueFilters.roleFamilies)}
               onBlur={(event) => onQueueFiltersChange({ ...queueFilters, roleFamilies: parseLineSeparated(event.target.value) })}
               rows={4}
             />
-          </label>
-          <label>
-            Seniority
-            <textarea
+          </Field>
+          <Field>
+            <FieldLabel htmlFor="queue-seniority">Seniority</FieldLabel>
+            <Textarea
+              id="queue-seniority"
               key={lineSeparated(queueFilters.seniority)}
               defaultValue={lineSeparated(queueFilters.seniority)}
               onBlur={(event) => onQueueFiltersChange({ ...queueFilters, seniority: parseLineSeparated(event.target.value) })}
               rows={4}
             />
-          </label>
-          <label>
-            Locations
-            <textarea
+          </Field>
+          <Field>
+            <FieldLabel htmlFor="queue-locations">Locations</FieldLabel>
+            <Textarea
+              id="queue-locations"
               key={lineSeparated(queueFilters.locations)}
               defaultValue={lineSeparated(queueFilters.locations)}
               onBlur={(event) => onQueueFiltersChange({ ...queueFilters, locations: parseLineSeparated(event.target.value) })}
               rows={4}
             />
-          </label>
+          </Field>
         </div>
         <div className="queue-filter-settings__checks">
-          <label>
-            <input
-              type="checkbox"
+          <Field orientation="horizontal">
+            <Checkbox
+              id="queue-remote-allowed"
               checked={queueFilters.remoteAllowed}
-              onChange={(event) => onQueueFiltersChange({ ...queueFilters, remoteAllowed: event.target.checked })}
+              onCheckedChange={(checked) => onQueueFiltersChange({ ...queueFilters, remoteAllowed: checked })}
             />
-            Include remote roles
-          </label>
-          <label>
-            <input
-              type="checkbox"
+            <FieldLabel htmlFor="queue-remote-allowed">Include remote roles</FieldLabel>
+          </Field>
+          <Field orientation="horizontal">
+            <Checkbox
+              id="queue-authorization-path"
               checked={queueFilters.requireAuthorizationPath}
-              onChange={(event) => onQueueFiltersChange({ ...queueFilters, requireAuthorizationPath: event.target.checked })}
+              onCheckedChange={(checked) => onQueueFiltersChange({ ...queueFilters, requireAuthorizationPath: checked })}
             />
-            Hide explicit authorization conflicts
-          </label>
+            <FieldLabel htmlFor="queue-authorization-path">Hide explicit authorization conflicts</FieldLabel>
+          </Field>
         </div>
       </section>
       <section className="browser-setup" aria-labelledby="browser-setup-title">
@@ -538,38 +576,44 @@ function SystemPanel({
           </p>
         </div>
         <div className="browser-setup__fields">
-          <label>
-            Chrome profile
-            <select value={profileId} onChange={(event) => onProfileIdChange(event.target.value)} disabled={busy}>
-              <option value="">Select a profile</option>
+          <Field>
+            <FieldLabel htmlFor="browser-profile">Chrome profile</FieldLabel>
+            <Select value={profileId || null} onValueChange={(value) => onProfileIdChange(value ?? "")} disabled={busy}>
+              <SelectTrigger id="browser-profile" className="w-full" aria-label="Chrome profile">
+                <SelectValue placeholder="Select a profile" />
+              </SelectTrigger>
+              <SelectContent alignItemWithTrigger={false}>
               {browserSetup?.profiles.map((profile) => (
-                <option key={profile.id} value={profile.id}>{profile.name} · {profile.id}</option>
+                  <SelectItem key={profile.id} value={profile.id}>{profile.name} · {profile.id}</SelectItem>
               ))}
-            </select>
-          </label>
-          <label>
-            Extension ID
-            <input
+              </SelectContent>
+            </Select>
+          </Field>
+          <Field>
+            <FieldLabel htmlFor="browser-extension-id">Extension ID</FieldLabel>
+            <Input
+              id="browser-extension-id"
               value={extensionId}
               onChange={(event) => onExtensionIdChange(event.target.value.trim().toLowerCase())}
               placeholder="32-letter Chrome extension ID"
               autoComplete="off"
               spellCheck={false}
             />
-          </label>
-          <label>
-            Installation ID
-            <input
+          </Field>
+          <Field>
+            <FieldLabel htmlFor="browser-installation-id">Installation ID</FieldLabel>
+            <Input
+              id="browser-installation-id"
               value={installationId}
               onChange={(event) => onInstallationIdChange(event.target.value.trim().toLowerCase())}
               placeholder="UUID shown in the extension popup"
               autoComplete="off"
               spellCheck={false}
             />
-          </label>
-          <button className="button button--primary" type="button" onClick={onConnectBrowser} disabled={busy || !profileId || extensionId.length !== 32 || installationId.length !== 36}>
+          </Field>
+          <Button  type="button" onClick={onConnectBrowser} disabled={busy || !profileId || extensionId.length !== 32 || installationId.length !== 36}>
             Connect selected profile
-          </button>
+          </Button>
         </div>
         {browserSetup?.approvedExtensionId ? (
           <p className="browser-setup__status">
@@ -582,9 +626,9 @@ function SystemPanel({
             <h4>Live boundary check</h4>
             <p>In the selected ordinary Chrome profile, open any HTTPS application form. This check inspects field definitions, then releases the page. It never fills or finalizes.</p>
           </div>
-          <button className="button button--quiet" type="button" onClick={onCheckBrowser} disabled={busy || !browserSetup?.approvedExtensionId}>
+          <Button variant="outline" type="button" onClick={onCheckBrowser} disabled={busy || !browserSetup?.approvedExtensionId}>
             Inspect active application page
-          </button>
+          </Button>
         </div>
         <BrowserSessions sessions={browserSessions.filter((session) => session.purpose === "connection_check").slice(0, 1)} busy={busy} onRetry={onRetryBrowser} />
       </section>
@@ -596,7 +640,7 @@ function SystemPanel({
             Europe/Madrid windows are preserved and consolidated per source. The existing scheduled workflows still own execution during the parallel proof.
           </p>
         </div>
-        <span className="state-pill">Staged</span>
+        <Badge variant="outline">Staged</Badge>
       </div>
       <dl className="source-list">
         {dashboard.sources.map((source) => (
@@ -611,18 +655,20 @@ function SystemPanel({
         ))}
       </dl>
       {dashboard.recentRuns.length > 0 ? (
-        <details className="run-details">
-          <summary>Recent run state</summary>
-          <ol>
-            {dashboard.recentRuns.map((run) => (
-              <li key={run.id}>
-                <span>{run.sourceId}</span>
-                <span>{run.kind.replaceAll("_", " ")}</span>
-                <strong>{run.status.replaceAll("_", " ")}</strong>
-              </li>
-            ))}
-          </ol>
-        </details>
+        <Collapsible className="run-details">
+          <CollapsibleTrigger className="run-details__trigger">Recent run state</CollapsibleTrigger>
+          <CollapsibleContent>
+            <ol>
+              {dashboard.recentRuns.map((run) => (
+                <li key={run.id}>
+                  <span>{run.sourceId}</span>
+                  <span>{run.kind.replaceAll("_", " ")}</span>
+                  <strong>{run.status.replaceAll("_", " ")}</strong>
+                </li>
+              ))}
+            </ol>
+          </CollapsibleContent>
+        </Collapsible>
       ) : null}
       <div className="history-control">
         <div>
@@ -634,12 +680,12 @@ function SystemPanel({
           </p>
         </div>
         <div className="button-cluster">
-          <button className="button button--quiet" type="button" onClick={() => onProbeProvider("codex")} disabled={busy || health?.codex.ready !== true}>
+          <Button variant="outline" type="button" onClick={() => onProbeProvider("codex")} disabled={busy || health?.codex.ready !== true}>
             Test Codex
-          </button>
-          <button className="button button--quiet" type="button" onClick={() => onProbeProvider("claude")} disabled={busy || health?.claude.ready !== true}>
+          </Button>
+          <Button variant="outline" type="button" onClick={() => onProbeProvider("claude")} disabled={busy || health?.claude.ready !== true}>
             Test Claude
-          </button>
+          </Button>
         </div>
       </div>
 
@@ -652,14 +698,14 @@ function SystemPanel({
               : "Permission is requested only when you choose to enable alerts."}
           </p>
         </div>
-        <button
-          className="button button--quiet"
+        <Button
+          variant="outline"
           type="button"
           onClick={notificationsReady ? onTestNotification : onEnableNotifications}
           disabled={busy}
         >
           {notificationsReady ? "Send test alert" : "Enable alerts"}
-        </button>
+        </Button>
       </div>
 
       <div className="history-control">
@@ -668,10 +714,10 @@ function SystemPanel({
           <p>{maintenanceCopy}</p>
         </div>
         <div className="button-cluster">
-          <button className="button button--quiet" type="button" onClick={onBackup} disabled={busy}>Create backup</button>
-          <button className="button button--quiet" type="button" onClick={onExport} disabled={busy}>Export summary</button>
-          <button className="button button--quiet" type="button" onClick={onDiagnostics} disabled={busy}>Export diagnostics</button>
-          <button className="button button--quiet" type="button" onClick={onPreflight} disabled={busy}>Check latest backup</button>
+          <Button variant="outline" type="button" onClick={onBackup} disabled={busy}>Create backup</Button>
+          <Button variant="outline" type="button" onClick={onExport} disabled={busy}>Export summary</Button>
+          <Button variant="outline" type="button" onClick={onDiagnostics} disabled={busy}>Export diagnostics</Button>
+          <Button variant="outline" type="button" onClick={onPreflight} disabled={busy}>Check latest backup</Button>
         </div>
       </div>
       <div className="history-control">
@@ -679,7 +725,7 @@ function SystemPanel({
           <h3>Application lifecycle</h3>
           <p>Closing the window keeps enabled background work available. Quit stops the local core completely.</p>
         </div>
-        <button className="button button--quiet" type="button" onClick={onQuit} disabled={busy}>Quit HereForWork</button>
+        <Button variant="outline" type="button" onClick={onQuit} disabled={busy}>Quit HereForWork</Button>
       </div>
     </section>
   );
@@ -1129,44 +1175,44 @@ export function App() {
                   <strong>{item.title}</strong>
                   <span>{item.company} · {item.provider}</span>
                 </div>
-                <span className="state-pill">{status}</span>
+                <Badge variant="outline">{status}</Badge>
                 {item.status === "completed" ? (
                   <div className="preparation-list__actions">
-                    <button className="button button--quiet" type="button" onClick={() => void showPreparationDetail(item.id)} disabled={busy}>
+                    <Button variant="outline" type="button" onClick={() => void showPreparationDetail(item.id)} disabled={busy}>
                       Details
-                    </button>
-                    <button className="button button--quiet" type="button" onClick={() => void openArtifact(item.id, "cv")} disabled={busy}>
+                    </Button>
+                    <Button variant="outline" type="button" onClick={() => void openArtifact(item.id, "cv")} disabled={busy}>
                       Open CV
-                    </button>
+                    </Button>
                     {!latestSession ? (
-                    <button
-                      className="button button--primary"
+                    <Button
+
                       type="button"
                       onClick={() => void continuePreparedRole(item.id)}
                       disabled={busy || !browserSetup?.approvedInstallationId}
                     >
                       Open in browser
-                    </button>
+                    </Button>
                     ) : null}
                     {latestSession?.status === "action_required" ? (
-                      <button className="button button--primary" type="button" onClick={() => void retryBrowser(latestSession.id)} disabled={busy}>
+                      <Button  type="button" onClick={() => void retryBrowser(latestSession.id)} disabled={busy}>
                         Retry browser
-                      </button>
+                      </Button>
                     ) : null}
                     {latestSession?.status === "review_required" ? (
-                      <button className="button button--primary" type="button" onClick={() => void confirmApplied(latestSession.id)} disabled={busy}>
+                      <Button  type="button" onClick={() => void confirmApplied(latestSession.id)} disabled={busy}>
                         I submitted this application
-                      </button>
+                      </Button>
                     ) : null}
                     {latestSession?.status === "submitted_tracking_pending" ? (
-                      <button className="button button--primary" type="button" onClick={() => void confirmApplied(latestSession.id)} disabled={busy}>
+                      <Button  type="button" onClick={() => void confirmApplied(latestSession.id)} disabled={busy}>
                         Retry tracking update
-                      </button>
+                      </Button>
                     ) : null}
                     {latestSession?.status !== "applied_recorded" ? (
-                      <button className="button button--quiet button--danger" type="button" onClick={() => setUndoPreparationId(item.id)} disabled={busy || Boolean(browserActive)}>
+                      <Button variant="destructive" type="button" onClick={() => setUndoPreparationId(item.id)} disabled={busy || Boolean(browserActive)}>
                         Undo preparation
-                      </button>
+                      </Button>
                     ) : null}
                   </div>
                 ) : null}
@@ -1175,12 +1221,12 @@ export function App() {
                   <div className="preparation-list__confirmation" role="alert">
                     <p>Discard this role and permanently delete its generated report and tailored CV files?</p>
                     <div className="button-cluster">
-                      <button className="button button--danger" type="button" onClick={() => void discardPreparation(item.id)} disabled={busy}>
+                      <Button variant="destructive" type="button" onClick={() => void discardPreparation(item.id)} disabled={busy}>
                         Discard preparation
-                      </button>
-                      <button className="button button--quiet" type="button" onClick={() => setUndoPreparationId(null)} disabled={busy}>
+                      </Button>
+                      <Button variant="outline" type="button" onClick={() => setUndoPreparationId(null)} disabled={busy}>
                         Keep preparation
-                      </button>
+                      </Button>
                     </div>
                   </div>
                 ) : null}
@@ -1189,26 +1235,31 @@ export function App() {
             })}
           </ol>
         ) : (
-          <section className="empty-state empty-state--compact" aria-labelledby="applications-empty-title">
-            <h3 id="applications-empty-title">No prepared applications yet.</h3>
-            <p>Prepare a suitable role from Queue. HereForWork will add it here only after career-ops creates the verified materials.</p>
-          </section>
+          <Empty className="empty-state empty-state--compact" role="region" aria-labelledby="applications-empty-title">
+            <EmptyHeader>
+              <EmptyTitle><h3 id="applications-empty-title">No prepared applications yet.</h3></EmptyTitle>
+              <EmptyDescription>Prepare a suitable role from Queue. HereForWork will add it here only after career-ops creates the verified materials.</EmptyDescription>
+            </EmptyHeader>
+          </Empty>
         )}
         {preparationDetail ? (
-          <aside className="preparation-detail" aria-labelledby="preparation-detail-title">
-            <div className="preparation-detail__heading">
+          <Sheet open onOpenChange={(open) => {
+            if (!open) setPreparationDetail(null);
+          }}>
+            <SheetContent className="preparation-detail" aria-labelledby="preparation-detail-title">
+              <SheetHeader className="preparation-detail__heading">
               <div>
                 <p className="eyebrow">career-ops report</p>
-                <h3 id="preparation-detail-title">Preparation details</h3>
+                  <SheetTitle id="preparation-detail-title">Preparation details</SheetTitle>
               </div>
-              <button className="button button--quiet" type="button" onClick={() => setPreparationDetail(null)} aria-label="Close preparation details">Close</button>
-            </div>
-            <div className="preparation-detail__actions">
-              <button className="button button--quiet" type="button" onClick={() => void openArtifact(preparationDetail.preparationId, "report")}>Open original report</button>
-              <button className="button button--quiet" type="button" onClick={() => void openArtifact(preparationDetail.preparationId, "cv")}>Open verified CV</button>
-            </div>
-            <MarkdownPreview markdown={preparationDetail.reportMarkdown} />
-          </aside>
+              </SheetHeader>
+              <div className="preparation-detail__actions">
+                <Button variant="outline" type="button" onClick={() => void openArtifact(preparationDetail.preparationId, "report")}>Open original report</Button>
+                <Button variant="outline" type="button" onClick={() => void openArtifact(preparationDetail.preparationId, "cv")}>Open verified CV</Button>
+              </div>
+              <MarkdownPreview markdown={preparationDetail.reportMarkdown} />
+            </SheetContent>
+          </Sheet>
         ) : null}
       </main>
     );
@@ -1222,18 +1273,29 @@ export function App() {
               <h2 id="queue-title">Review queue</h2>
             </div>
             <div className="queue-heading__actions">
-              <label className="provider-select">
-                Preparation provider
-                <select value={selectedProvider} onChange={(event) => setSelectedProvider(event.target.value as "codex" | "claude")} disabled={busy}>
-                  <option value="codex">Codex</option>
-                  <option value="claude">Claude</option>
-                </select>
-              </label>
-              <button className="button button--quiet" type="button" onClick={() => fileInputRef.current?.click()} disabled={busy}>
+              <Field className="provider-select">
+                <FieldLabel htmlFor="preparation-provider">Preparation provider</FieldLabel>
+                <Select
+                  value={selectedProvider}
+                  onValueChange={(value) => {
+                    if (value === "codex" || value === "claude") setSelectedProvider(value);
+                  }}
+                  disabled={busy}
+                >
+                  <SelectTrigger id="preparation-provider" size="sm" aria-label="Preparation provider">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="codex">Codex</SelectItem>
+                    <SelectItem value="claude">Claude</SelectItem>
+                  </SelectContent>
+                </Select>
+              </Field>
+              <Button variant="outline" type="button" onClick={() => fileInputRef.current?.click()} disabled={busy}>
                 Import
-              </button>
+              </Button>
             </div>
-            <input
+            <Input
               ref={fileInputRef}
               className="visually-hidden"
               type="file"
@@ -1246,12 +1308,14 @@ export function App() {
           </div>
 
           {dashboard.recentlyDismissed[0] ? (
-            <aside className="undo-strip" aria-live="polite">
-              <span><strong>{dashboard.recentlyDismissed[0].title}</strong> was recorded as Discarded in career-ops.</span>
-              <button className="button button--quiet" type="button" onClick={() => void restoreDismissedRole(dashboard.recentlyDismissed[0].id)} disabled={busy}>
-                Undo
-              </button>
-            </aside>
+            <Alert className="undo-strip" role="status" aria-live="polite">
+              <AlertDescription><strong>{dashboard.recentlyDismissed[0].title}</strong> was recorded as Discarded in career-ops.</AlertDescription>
+              <AlertAction>
+                <Button variant="outline" type="button" onClick={() => void restoreDismissedRole(dashboard.recentlyDismissed[0].id)} disabled={busy}>
+                  Undo
+                </Button>
+              </AlertAction>
+            </Alert>
           ) : null}
           {dashboard.roles.length === 0 ? (
             emptyQueueContent
@@ -1299,7 +1363,13 @@ export function App() {
   }
 
   return (
-    <div className="app-shell">
+    <Tabs
+      className="app-shell gap-0"
+      value={view === "system" ? null : view}
+      onValueChange={(value) => {
+        if (value === "queue" || value === "applications") setView(value);
+      }}
+    >
       <header className="topbar">
         <div className="brand-lockup">
           <span className="brand-mark" aria-hidden="true">H</span>
@@ -1309,29 +1379,24 @@ export function App() {
           </div>
         </div>
         <nav className="primary-nav" aria-label="Primary">
-          {(["queue", "applications"] as const).map((destination) => (
-            <button
-              className="primary-nav__item"
-              type="button"
-              key={destination}
-              data-active={view === destination}
-              aria-current={view === destination ? "page" : undefined}
-              onClick={() => setView(destination)}
-            >
-              {destination}
-            </button>
-          ))}
+          <TabsList className="primary-nav__list" variant="line">
+            {(["queue", "applications"] as const).map((destination) => (
+              <TabsTrigger className="primary-nav__item" value={destination} key={destination}>
+                {destination}
+              </TabsTrigger>
+            ))}
+          </TabsList>
         </nav>
         <div className="topbar__actions">
           <span className="status-line">
             <span className="status-dot" data-active={dashboard.backgroundEnabled} aria-hidden="true" />
             {dashboard.backgroundEnabled ? "Background checks on" : "Background checks off"}
           </span>
-          <button className="button button--quiet" type="button" onClick={toggleBackground} disabled={busy}>
+          <Button variant="outline" type="button" onClick={toggleBackground} disabled={busy}>
             {dashboard.backgroundEnabled ? "Turn off" : "Turn on"}
-          </button>
-          <button
-            className="button button--quiet"
+          </Button>
+          <Button
+            variant="outline"
             type="button"
             aria-pressed={view === "system"}
             onClick={() => {
@@ -1340,26 +1405,34 @@ export function App() {
             }}
           >
             System
-          </button>
+          </Button>
         </div>
       </header>
 
       {error ? (
-        <div className="error-banner" role="alert">
-          <strong>That didn’t work.</strong>
-          <span>{error}</span>
-          <button type="button" onClick={() => setError(null)} aria-label="Dismiss error">×</button>
-        </div>
+        <Alert className="error-banner" variant="destructive">
+          <AlertTitle>That didn’t work.</AlertTitle>
+          <AlertDescription>{error}</AlertDescription>
+          <AlertAction>
+            <Button variant="ghost" size="icon-xs" type="button" onClick={() => setError(null)} aria-label="Dismiss error">×</Button>
+          </AlertAction>
+        </Alert>
       ) : null}
 
       {notice ? (
-        <div className="notice-banner" role="status">
-          <span>{notice}</span>
-          <button type="button" onClick={() => setNotice(null)} aria-label="Dismiss notice">×</button>
-        </div>
+        <Alert className="notice-banner" role="status">
+          <AlertDescription>{notice}</AlertDescription>
+          <AlertAction>
+            <Button variant="ghost" size="icon-xs" type="button" onClick={() => setNotice(null)} aria-label="Dismiss notice">×</Button>
+          </AlertAction>
+        </Alert>
       ) : null}
 
-      {mainContent}
-    </div>
+      {view === "system" ? mainContent : (
+        <TabsContent className="contents" value={view}>
+          {mainContent}
+        </TabsContent>
+      )}
+    </Tabs>
   );
 }
