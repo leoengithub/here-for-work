@@ -191,6 +191,28 @@ select:focus-visible {
   font-size: 1.25rem;
 }
 
+.notice-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.75rem 1.5rem;
+  color: var(--text);
+  background: color-mix(in oklch, var(--accent-soft) 72%, var(--surface));
+  border-bottom: 1px solid var(--line);
+  font-size: 0.82rem;
+}
+
+.notice-banner button {
+  min-width: 2.25rem;
+  min-height: 2.25rem;
+  border: 0;
+  color: var(--text-muted);
+  background: transparent;
+  cursor: pointer;
+  font-size: 1.2rem;
+}
+
 .system-workspace,
 .status-workspace,
 .activity-workspace {
@@ -236,6 +258,80 @@ select:focus-visible {
   align-items: flex-start;
   justify-content: space-between;
   gap: 2rem;
+}
+
+.queue-filter-settings {
+  padding: 1.5rem 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.queue-filter-settings__heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 2rem;
+}
+
+.queue-filter-settings h3,
+.queue-filter-settings p {
+  margin: 0;
+}
+
+.queue-filter-settings p {
+  max-width: 66ch;
+  margin-top: 0.35rem;
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  line-height: 1.5;
+}
+
+.queue-filter-settings__fields {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.75rem;
+  margin-top: 1rem;
+}
+
+.queue-filter-settings__fields label {
+  display: grid;
+  gap: 0.35rem;
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  font-weight: 650;
+}
+
+.queue-filter-settings__fields textarea {
+  min-width: 0;
+  min-height: 6.5rem;
+  padding: 0.55rem 0.65rem;
+  border: 1px solid var(--line-strong);
+  border-radius: 0.55rem;
+  color: var(--text);
+  background: var(--surface);
+  font: inherit;
+  line-height: 1.45;
+  resize: vertical;
+}
+
+.queue-filter-settings__checks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem 1.5rem;
+  margin-top: 0.9rem;
+}
+
+.queue-filter-settings__checks label {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-height: 2.75rem;
+  color: var(--text);
+  font-size: 0.78rem;
+}
+
+.queue-filter-settings__checks input {
+  width: 1.1rem;
+  height: 1.1rem;
 }
 
 .system-panel__heading h2,
@@ -768,6 +864,17 @@ a.role-row__title:hover {
   background: transparent;
 }
 
+.button--danger {
+  border-color: color-mix(in oklch, var(--danger) 65%, var(--line));
+  color: var(--danger);
+  background: transparent;
+}
+
+.button--danger:hover:not(:disabled) {
+  border-color: var(--danger);
+  background: color-mix(in oklch, var(--danger) 8%, var(--surface));
+}
+
 .role-detail {
   max-width: 48rem;
   margin: 0 auto;
@@ -830,12 +937,13 @@ a.role-row__title:hover {
 .preparation-list > li {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
-  gap: 0.45rem 1rem;
-  padding: 1rem 0;
+  align-items: center;
+  gap: 0.75rem 1rem;
+  padding: 1rem 0.25rem;
   border-bottom: 1px solid var(--line);
 }
 
-.preparation-list > li > div {
+.preparation-list__identity {
   display: grid;
   gap: 0.2rem;
 }
@@ -850,12 +958,39 @@ a.role-row__title:hover {
   font-size: 0.74rem;
 }
 
+.preparation-list__actions {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.preparation-list__confirmation {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.8rem;
+  border: 1px solid color-mix(in oklch, var(--danger) 45%, var(--line));
+  border-radius: 0.65rem;
+  background: color-mix(in oklch, var(--danger) 6%, var(--surface));
+}
+
+.preparation-list__confirmation .button-cluster {
+  flex: none;
+}
+
 .preparation-detail {
-  margin-top: 1.25rem;
-  padding: 1.25rem;
-  border: 1px solid var(--line);
-  border-radius: 0.8rem;
+  position: fixed;
+  inset: 0 0 0 auto;
+  z-index: 300;
+  width: min(46rem, 82vw);
+  padding: 1.5rem;
+  overflow: auto;
+  border-left: 1px solid var(--line);
   background: var(--surface);
+  box-shadow: -1rem 0 3rem color-mix(in oklch, var(--text) 12%, transparent);
 }
 
 .preparation-detail__heading {
@@ -870,20 +1005,77 @@ a.role-row__title:hover {
   margin: 0;
 }
 
-.preparation-detail p {
-  margin-top: 0.5rem;
-  color: var(--text-muted);
+.preparation-detail h3 {
+  margin-top: 0.25rem;
+  font-size: 1.35rem;
+  letter-spacing: -0.025em;
 }
 
-.preparation-detail pre {
-  max-height: 34rem;
-  margin: 1rem 0 0;
+.preparation-detail__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin: 1rem 0 1.5rem;
+  padding-bottom: 1rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.markdown-preview {
+  max-width: 72ch;
+  padding-bottom: 4rem;
+  color: var(--text);
+  font-size: 0.88rem;
+  line-height: 1.65;
+}
+
+.markdown-preview h2,
+.markdown-preview h3,
+.markdown-preview h4 {
+  margin: 1.8rem 0 0.6rem;
+  line-height: 1.25;
+  text-wrap: balance;
+}
+
+.markdown-preview h2 {
+  font-size: 1.25rem;
+}
+
+.markdown-preview h3 {
+  font-size: 1.05rem;
+}
+
+.markdown-preview h4 {
+  font-size: 0.95rem;
+}
+
+.markdown-preview p,
+.markdown-preview ul,
+.markdown-preview ol {
+  margin: 0.65rem 0;
+}
+
+.markdown-preview li + li {
+  margin-top: 0.3rem;
+}
+
+.markdown-preview pre {
+  margin: 1rem 0;
   padding: 1rem;
   overflow: auto;
   border-radius: 0.6rem;
   background: var(--surface-muted);
   font: 0.78rem/1.55 ui-monospace, SFMono-Regular, Menlo, monospace;
   white-space: pre-wrap;
+}
+
+.markdown-preview code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.markdown-preview hr {
+  margin: 1.5rem 0;
+  border: 0;
+  border-top: 1px solid var(--line);
 }
 
 .browser-session-list li small {
@@ -896,6 +1088,10 @@ a.role-row__title:hover {
   grid-column: 1 / -1;
   margin: 0;
   line-height: 1.5;
+}
+
+.empty-state--compact {
+  margin: 4rem auto;
 }
 
 .role-detail__actions {
@@ -979,6 +1175,20 @@ a.role-row__title:hover {
 
   .browser-setup__fields {
     grid-template-columns: 1fr;
+  }
+
+  .queue-filter-settings__heading,
+  .preparation-list__confirmation {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .queue-filter-settings__fields {
+    grid-template-columns: 1fr;
+  }
+
+  .preparation-detail {
+    width: 100vw;
   }
 
   .browser-check {

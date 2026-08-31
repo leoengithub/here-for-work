@@ -1,4 +1,5 @@
 import type { FillPlan } from "./contracts";
+import { isControlVisible } from "./ats";
 
 function writeValue(element: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement, value: string): void {
   if (element instanceof HTMLSelectElement) {
@@ -28,7 +29,7 @@ export async function applyFillPlan(plan: FillPlan, activeFingerprint: string | 
     const element = Array.from(
       doc.querySelectorAll<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>("[data-hfw-field-id]"),
     ).find((candidate) => candidate.dataset.hfwFieldId === instruction.fieldId);
-    if (!element || element instanceof HTMLInputElement && element.type === "file") {
+    if (!element || !isControlVisible(element) || element instanceof HTMLInputElement && element.type === "file") {
       results.push({ fieldId: instruction.fieldId, status: "skipped", reason: "Control is unavailable or unsupported." });
       continue;
     }

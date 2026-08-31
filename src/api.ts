@@ -11,6 +11,8 @@ import type {
   RestorePreflight,
   BrowserSessionSummary,
   PreparationDetail,
+  PrepareRoleOutcome,
+  QueueFilters,
 } from "./types";
 
 const isTauri = (): boolean => "__TAURI_INTERNALS__" in window;
@@ -27,6 +29,13 @@ const browserFallback: DashboardState = {
       occurredAt: new Date().toISOString(),
     },
   ],
+  queueFilters: {
+    roleFamilies: [],
+    seniority: [],
+    locations: [],
+    remoteAllowed: true,
+    requireAuthorizationPath: true,
+  },
   lastSuccessfulDiscoveryAt: null,
   backgroundEnabled: false,
   adapterStatus: "not_configured",
@@ -78,9 +87,19 @@ export async function runProviderProbe(provider: "codex" | "claude"): Promise<Pr
   return invoke<ProviderProbeResult>("run_provider_probe", { provider });
 }
 
-export async function prepareRole(roleId: string, provider: "codex" | "claude"): Promise<DashboardState> {
+export async function prepareRole(roleId: string, provider: "codex" | "claude"): Promise<PrepareRoleOutcome> {
   if (!isTauri()) throw new Error("Application preparation is available in the desktop app.");
-  return invoke<DashboardState>("prepare_role", { roleId, provider });
+  return invoke<PrepareRoleOutcome>("prepare_role", { roleId, provider });
+}
+
+export async function saveQueueFilters(filters: QueueFilters): Promise<DashboardState> {
+  if (!isTauri()) throw new Error("Queue filters are available in the desktop app.");
+  return invoke<DashboardState>("save_queue_filters", { filters });
+}
+
+export async function undoPreparation(preparationId: string): Promise<DashboardState> {
+  if (!isTauri()) throw new Error("Preparation cleanup is available in the desktop app.");
+  return invoke<DashboardState>("undo_preparation", { preparationId });
 }
 
 export async function cancelPreparation(roleId: string): Promise<boolean> {

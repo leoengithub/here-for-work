@@ -47,6 +47,10 @@ The MVP is desktop-first for macOS. Its primary surface is a direct list of viab
 
 The browser companion accepts any public HTTPS application URL. It first attempts to resolve source listings to their application form, then inspects every site through a conservative generic adapter. Greenhouse, Lever, Ashby, and future ATS-specific adapters improve reliability but never define which sites are supported. Unknown or unverifiable controls are skipped individually while safe fields continue. Detailed visual-system decisions and phone access remain later work.
 
+Primary navigation contains Queue and Applications only. Queue filters live in the secondary System surface, begin with verified career-ops preferences, and apply to current unprepared roles and future imports. Applications presents one current state per role; a Details action opens the formatted career-ops report rather than a question-answer log.
+
+Prepare is gated by the typed career-ops evaluation before report/CV artifacts are committed. Viable matches continue automatically into a new tab in the selected ordinary Chrome profile. A confirmed authorization or legitimacy incompatibility stops preparation; missing or inconclusive authorization evidence remains visible but does not block preparation. Other material fit or legitimacy uncertainty returns to Needs decision. Undo preparation means the role is unsuitable: record Discarded, remove only its generated preparation artifacts, and clear the local preparation/browser state.
+
 ## Accessibility & Inclusion
 
 - Target WCAG 2.2 AA.

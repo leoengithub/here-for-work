@@ -11,14 +11,14 @@ use serde_json::{Value, json};
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::domain::HistoryRecord;
+use crate::domain::{HistoryRecord, QueueFilters};
 
 #[derive(Debug, Clone)]
 pub struct AdapterConfig {
     pub node_path: PathBuf,
     pub script_path: PathBuf,
     pub career_ops_root: PathBuf,
-    pub mirror_index_path: PathBuf,
+    pub tracker_index_path: PathBuf,
     pub staging_path: PathBuf,
 }
 
@@ -178,7 +178,7 @@ impl AdapterConfig {
             .arg(&self.script_path)
             .current_dir(&self.career_ops_root)
             .env("HFW_CAREER_OPS_ROOT", &self.career_ops_root)
-            .env("HFW_CAREER_OPS_INDEX", &self.mirror_index_path)
+            .env("HFW_CAREER_OPS_INDEX", &self.tracker_index_path)
             .env("HFW_CAREER_OPS_STAGING", &self.staging_path)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -263,6 +263,11 @@ impl AdapterConfig {
         Ok(snapshot.records)
     }
 
+    pub fn queue_filter_defaults(&self) -> Result<QueueFilters, AdapterError> {
+        let result = self.request("profile.queue_filters.get", json!({}))?;
+        serde_json::from_value(result).map_err(|error| AdapterError::InvalidData(error.to_string()))
+    }
+
     pub fn preparation_context(
         &self,
         input: &PreparationRoleInput,
@@ -319,6 +324,28 @@ impl AdapterConfig {
                 "recovered preparation result has an invalid outcome".to_string(),
             )),
         }
+    }
+
+    pub fn delete_preparation_artifacts(
+        &self,
+        preparation_id: &str,
+        report_path: &str,
+        cv_pdf_path: &str,
+    ) -> Result<(), AdapterError> {
+        let result = self.request(
+            "preparation.artifacts.delete",
+            json!({
+                "preparationId": preparation_id,
+                "reportPath": report_path,
+                "cvPdfPath": cv_pdf_path,
+            }),
+        )?;
+        if result.get("outcome").and_then(Value::as_str) != Some("completed") {
+            return Err(AdapterError::InvalidData(
+                "artifact cleanup result is incomplete".to_string(),
+            ));
+        }
+        Ok(())
     }
 
     pub fn answer_context(

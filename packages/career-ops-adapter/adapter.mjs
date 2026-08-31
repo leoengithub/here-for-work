@@ -8,7 +8,7 @@
  * paths from callers. External job data is returned as data only.
  */
 
-import { access, constants, mkdir, readFile, writeFile } from "node:fs/promises";
+import { access, constants, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -17,16 +17,18 @@ import { pathToFileURL } from "node:url";
 
 const PROTOCOL_VERSION = 1;
 const root = process.env.HFW_CAREER_OPS_ROOT;
-const mirrorDb = process.env.HFW_CAREER_OPS_INDEX;
+const trackerDb = process.env.HFW_CAREER_OPS_INDEX;
 const stagingRoot = process.env.HFW_CAREER_OPS_STAGING;
 
 const operations = Object.freeze([
   "capabilities.get",
   "health.check",
   "history.snapshot",
+  "profile.queue_filters.get",
   "preparation.context.get",
   "preparation.result.recover",
   "preparation.result.commit",
+  "preparation.artifacts.delete",
   "answers.context.get",
   "answers.result.validate",
   "answers.result.commit",
@@ -88,12 +90,12 @@ async function playwrightChromiumReady() {
 
 async function runTracker(args) {
   return runCareerOpsScript("tracker.mjs", args, {
-    CAREER_OPS_TRACKER_DB: mirrorDb,
+    CAREER_OPS_TRACKER_DB: trackerDb,
   });
 }
 
 async function runCareerOpsScript(scriptName, args, extraEnv = {}) {
-  if (!root || !mirrorDb) {
+  if (!root || !trackerDb) {
     throw new Error("Adapter paths are not configured.");
   }
   const script = resolve(root, scriptName);
@@ -130,6 +132,17 @@ async function runCareerOpsScript(scriptName, args, extraEnv = {}) {
 
 function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
+}
+
+function canonicalJson(value) {
+  if (Array.isArray(value)) return value.map(canonicalJson);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.keys(value)
+      .sort()
+      .filter((key) => value[key] !== undefined)
+      .map((key) => [key, canonicalJson(value[key])]),
+  );
 }
 
 function normalizeUrl(value) {
@@ -484,13 +497,13 @@ export async function fetchJob(role) {
   }
 }
 
-function contextHash(role, job, sources) {
-  return sha256(JSON.stringify({
+export function contextHash(role, job, sources) {
+  return sha256(JSON.stringify(canonicalJson({
     protocolVersion: PROTOCOL_VERSION,
     role,
     job: { ...job, description: undefined, descriptionHash: sha256(job.description) },
     sourceHashes: sources.map(({ relativePath, sha256: digest }) => [relativePath, digest]),
-  }));
+  })));
 }
 
 function buildPreparationPrompt(role, job, sources, hash) {
@@ -521,7 +534,13 @@ function assertPreparationResult(result, expectedHash) {
   if (!result || typeof result !== "object" || Array.isArray(result)) throw new Error("Provider result must be an object.");
   const allowed = ["contractVersion", "contextHash", "score", "legitimacy", "authorizationConfidence", "reportBodyMarkdown", "cvPayload", "cvChangesMarkdown"];
   if (Object.keys(result).some((key) => !allowed.includes(key))) throw new Error("Provider result contains an unknown field.");
-  if (result.contractVersion !== 1 || result.contextHash !== expectedHash) throw new Error("Provider result is stale or has the wrong contract version.");
+  if (result.contractVersion !== 1) {
+    throw new Error(`Provider result uses contract version ${String(result.contractVersion)} instead of 1.`);
+  }
+  if (result.contextHash !== expectedHash) {
+    const received = typeof result.contextHash === "string" ? result.contextHash.slice(0, 12) : typeof result.contextHash;
+    throw new Error(`Provider result context does not match this preparation (expected ${expectedHash.slice(0, 12)}, received ${received}).`);
+  }
   if (typeof result.score !== "number" || result.score < 1 || result.score > 5) throw new Error("Provider result score must be from 1 to 5.");
   if (!["High Confidence", "Proceed with Caution", "Suspicious"].includes(result.legitimacy)) throw new Error("Provider result has an invalid legitimacy value.");
   if (!["excellent", "interesting", "investigate", "problem"].includes(result.authorizationConfidence)) throw new Error("Provider result has an invalid authorization confidence.");
@@ -547,6 +566,45 @@ function reportHeader(role, result, eventDate, reportNum, pdfPath) {
     problem: "🔴 Problema",
   }[result.authorizationConfidence];
   return `# Evaluation: ${role.company} — ${role.title}\n\n**Date:** ${eventDate}\n**URL:** ${role.url}\n**Via:** —\n**Archetype:** See report body\n**Score:** ${result.score.toFixed(1)}/5\n**Legitimacy:** ${result.legitimacy}\n**Authorization confidence:** ${authorizationLabel}\n**Work Auth:** ⚠️ Unstated\n**PDF:** ${pdfPath}\n\n---\n\n${result.reportBodyMarkdown.trim()}\n\n## H) Draft Application Answers\n\nDeferred until HereForWork inspects the live application form.\n`;
+}
+
+function quotedYamlValue(raw, key) {
+  const match = raw.match(new RegExp(`^\\s*${key}:\\s*["']?([^"'\\n]+?)["']?\\s*$`, "m"));
+  return match ? match[1].trim() : "";
+}
+
+async function profileQueueFilters() {
+  const raw = await readFile(resolve(root, "config/profile.yml"), "utf8");
+  const targetBlock = raw.match(/^target_roles:\s*\n([\s\S]*?)(?=^[a-z_]+:\s*$)/m)?.[1] ?? "";
+  const roleFamilies = [...targetBlock.matchAll(/^\s*-\s*(?:name:\s*)?["']?([^"'\n]+?)["']?\s*$/gm)]
+    .map((match) => match[1].trim())
+    .filter((value) => value && !/^(primary|secondary|adjacent)$/i.test(value));
+  const experienced = /^\s*level:\s*["']?Experienced["']?\s*$/mi.test(targetBlock);
+  const candidateLocation = quotedYamlValue(raw, "location");
+  const locationBlock = raw.match(/^location:\s*\n([\s\S]*?)(?=^[a-z_]+:\s*$)/m)?.[1] ?? "";
+  const city = quotedYamlValue(locationBlock, "city");
+  const country = quotedYamlValue(locationBlock, "country");
+  const flexibility = quotedYamlValue(raw, "location_flexibility");
+  const geography = flexibility.match(/Target geography:\s*([^.]*)\./i)?.[1] ?? "";
+  const geographyValues = geography
+    .replace(/\bfirst\b|\bfollowed by\b/gi, ",")
+    .split(/,|\band\b/i)
+    .map((value) => value.trim())
+    .filter(Boolean);
+  return {
+    roleFamilies: [...new Set(roleFamilies)],
+    seniority: experienced ? ["Experienced", "Senior", "Staff", "Lead"] : [],
+    locations: [...new Set([candidateLocation, city, country, ...geographyValues, "Europe"].filter(Boolean))],
+    remoteAllowed: /remote roles are an active search lane/i.test(flexibility),
+    requireAuthorizationPath: /sponsorship|work-permit|authorization path/i.test(flexibility),
+  };
+}
+
+function safeGeneratedArtifactPath(value) {
+  if (typeof value !== "string" || !/^output\/[a-zA-Z0-9._-]+\/(?:cv\/tailored\/v\d{3}\/(?:cv-payload\.json|cv\.html|cv\.pdf|changes\.md)|jd\/current\.md)$/.test(value)) {
+    throw new Error("Generated artifact path is outside the HereForWork preparation layout.");
+  }
+  return value;
 }
 
 async function preparationManifest(preparationId, context, role, eventDate) {
@@ -708,7 +766,10 @@ function profileFacts(profileSource) {
     first_name: firstName ?? "",
     last_name: lastParts.join(" "),
     email: pick("email"),
+    phone: pick("phone"),
     location: pick("location"),
+    city: pick("city"),
+    country: pick("country"),
     linkedin: pick("linkedin"),
     portfolio_url: pick("portfolio_url"),
     github: pick("github"),
@@ -721,11 +782,24 @@ function verifiedValueForField(field, facts) {
   if (/last name|family name|surname/.test(label)) return [facts.last_name, "candidate.full_name"];
   if (/full name|your name|^name\b/.test(label)) return [facts.full_name, "candidate.full_name"];
   if (/e-?mail/.test(label)) return [facts.email, "candidate.email"];
+  if (/phone|mobile|telephone|\btel\b/.test(label)) return [facts.phone, "candidate.phone"];
   if (/linkedin/.test(label)) return [facts.linkedin, "candidate.linkedin"];
   if (/portfolio|website/.test(label)) return [facts.portfolio_url, "candidate.portfolio_url"];
   if (/github/.test(label)) return [facts.github, "candidate.github"];
-  if (/city|location/.test(label)) return [facts.location, "candidate.location"];
+  if (/\bcity\b/.test(label)) return [facts.city, "location.city"];
+  if (/\bcountry\b/.test(label)) return [facts.country, "location.country"];
+  if (/location/.test(label)) return [facts.location, "candidate.location"];
   return ["", ""];
+}
+
+function verifiedAnswerFromSources(answer, sources) {
+  if (!answer || !Array.isArray(answer.provenance) || answer.provenance.length === 0) return null;
+  const normalized = (value) => String(value ?? "").normalize("NFKC").replace(/\s+/g, " ").trim().toLowerCase();
+  const candidate = normalized(answer.answer);
+  if (!candidate) return null;
+  const source = sources.find((item) => answer.provenance.some((provenance) => provenance === item.relativePath || provenance.startsWith(`${item.relativePath}:`)));
+  if (!source || !normalized(source.value).includes(candidate)) return null;
+  return { value: answer.answer.trim(), provenance: answer.provenance };
 }
 
 function validateAnswerResult(result, expectedHash, snapshot, sources) {
@@ -756,6 +830,20 @@ function validateAnswerResult(result, expectedHash, snapshot, sources) {
       continue;
     }
     const suggested = typeof answer.answer === "string" && answer.answer.trim() ? answer.answer.trim() : null;
+    const verifiedSourceAnswer = field.classification === "safe_verified"
+      ? verifiedAnswerFromSources(answer, sources)
+      : null;
+    if (verifiedSourceAnswer) {
+      instructions.push({ fieldId: field.id, value: verifiedSourceAnswer.value, classification: "safe_verified" });
+      reviewItems.push({
+        fieldId: field.id,
+        label: field.label,
+        decision: "fill",
+        answer: verifiedSourceAnswer.value,
+        provenance: verifiedSourceAnswer.provenance,
+      });
+      continue;
+    }
     reviewItems.push({
       fieldId: field.id,
       label: field.label,
@@ -938,7 +1026,7 @@ async function ensureCanonicalRole(input, status, key, eventDate, canonical = {}
         if (error?.code !== "EEXIST") throw error;
       });
     await runCareerOpsScript("merge-tracker.mjs", [], {
-      CAREER_OPS_TRACKER_DB: mirrorDb,
+      CAREER_OPS_TRACKER_DB: trackerDb,
       CAREER_OPS_ADDITIONS: effectDirectory,
       CAREER_OPS_BATCH_STATE: resolve(stagingRoot, "empty-batch-state.tsv"),
     });
@@ -994,7 +1082,7 @@ async function execute(request) {
         playwrightChromium: await playwrightChromiumReady(),
         applicationAnswers: Boolean(root && (await canRead(resolve(root, "application-answers.mjs")))),
         applications: Boolean(root && (await canRead(resolve(root, "data/applications.md")))),
-        mirrorIndexConfigured: Boolean(mirrorDb),
+        trackerIndexConfigured: Boolean(trackerDb),
         writableStagingConfigured: Boolean(stagingRoot),
       };
       return { ready: Object.values(checks).every(Boolean), checks };
@@ -1017,6 +1105,10 @@ async function execute(request) {
       const records = JSON.parse(output);
       if (!Array.isArray(records)) throw new Error("career-ops returned an invalid history snapshot.");
       return { records, diagnostics: diagnostics || null };
+    }
+    case "profile.queue_filters.get": {
+      assertInputKeys(request.input, [], request.operation);
+      return profileQueueFilters();
     }
     case "preparation.context.get": {
       assertInputKeys(request.input, ["preparationId", "company", "title", "location", "url"], request.operation);
@@ -1116,6 +1208,35 @@ async function execute(request) {
           cvChanges: { path: manifest.cvChangesRelative, sha256: sha256(await readFile(absolute(manifest.cvChangesRelative))) },
         },
       };
+    }
+    case "preparation.artifacts.delete": {
+      assertInputKeys(request.input, ["preparationId", "reportPath", "cvPdfPath"], request.operation);
+      if (!stagingRoot) throw new Error("Writable adapter staging is not configured.");
+      const preparationId = requiredText(request.input, "preparationId", 36).toLowerCase();
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(preparationId)) {
+        throw new Error("preparationId must be a version-4 UUID.");
+      }
+      const expectedReport = safeReportPath(request.input?.reportPath);
+      const expectedCvPdf = safeGeneratedArtifactPath(request.input?.cvPdfPath);
+      const effectDirectory = resolve(stagingRoot, preparationId);
+      const manifest = JSON.parse(await readFile(resolve(effectDirectory, "preparation.json"), "utf8"));
+      if (manifest.preparationId !== preparationId
+          || manifest.reportRelative !== expectedReport
+          || manifest.cvPdfRelative !== expectedCvPdf) {
+        throw new Error("Preparation cleanup references do not match the committed manifest.");
+      }
+      const reportRelative = safeReportPath(manifest.reportRelative);
+      const generated = [
+        manifest.cvPayloadRelative,
+        manifest.cvHtmlRelative,
+        manifest.cvPdfRelative,
+        manifest.cvChangesRelative,
+        manifest.jobRelative,
+      ].map(safeGeneratedArtifactPath);
+      await rm(resolve(root, reportRelative), { force: true });
+      for (const relativePath of generated) await rm(resolve(root, relativePath), { force: true });
+      await rm(effectDirectory, { recursive: true, force: true });
+      return { outcome: "completed", preparationId };
     }
     case "answers.context.get": {
       assertInputKeys(request.input, ["preparationId", "reportPath", "snapshot"], request.operation);

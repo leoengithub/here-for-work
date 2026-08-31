@@ -62,6 +62,7 @@ pub struct DashboardState {
     pub recently_dismissed: Vec<RoleSummary>,
     pub preparations: Vec<PreparationSummary>,
     pub activity: Vec<ActivityEntry>,
+    pub queue_filters: QueueFilters,
     pub last_successful_discovery_at: Option<String>,
     pub background_enabled: bool,
     pub adapter_status: String,
@@ -72,10 +73,49 @@ pub struct DashboardState {
     pub recent_runs: Vec<RunSummary>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct QueueFilters {
+    pub role_families: Vec<String>,
+    pub seniority: Vec<String>,
+    pub locations: Vec<String>,
+    pub remote_allowed: bool,
+    pub require_authorization_path: bool,
+}
+
+impl Default for QueueFilters {
+    fn default() -> Self {
+        Self {
+            role_families: Vec::new(),
+            seniority: Vec::new(),
+            locations: Vec::new(),
+            remote_allowed: true,
+            require_authorization_path: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrepareRoleOutcome {
+    pub dashboard: DashboardState,
+    pub disposition: String,
+    pub message: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct PreparationWork {
     pub id: String,
     pub role: AdapterRoleContext,
+}
+
+#[derive(Debug, Clone)]
+pub struct PreparationCleanupWork {
+    pub preparation_id: String,
+    pub role_id: String,
+    pub report_path: String,
+    pub cv_pdf_path: String,
+    pub effect: AdapterEffectContext,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

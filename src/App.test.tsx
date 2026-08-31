@@ -12,19 +12,27 @@ describe("App", () => {
     expect(screen.getByRole("button", { name: "Import discovery snapshot" })).toBeEnabled();
   });
 
-  it("exposes the approved queue, applications, and activity navigation", async () => {
+  it("keeps primary navigation focused on queue and applications", async () => {
     render(<App />);
     await screen.findByRole("heading", { name: "Review queue" });
 
     fireEvent.click(screen.getByRole("button", { name: "applications" }));
     expect(screen.getByRole("heading", { name: "Applications" })).toBeInTheDocument();
-    expect(screen.getByText(/Discard and Undo are available/)).toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole("button", { name: "activity" }));
-    expect(screen.getByRole("heading", { name: "Activity" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "No prepared applications yet." })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "activity" })).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "queue" }));
     expect(screen.getByRole("heading", { name: "Review queue" })).toBeInTheDocument();
+  });
+
+  it("keeps queue filters in System instead of primary navigation", async () => {
+    render(<App />);
+    await screen.findByRole("heading", { name: "Review queue" });
+
+    fireEvent.click(screen.getByRole("button", { name: "System" }));
+
+    expect(screen.getByRole("heading", { name: "Queue filters" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "settings" })).not.toBeInTheDocument();
   });
 
   it("explains a verified inspection without implying a completed application", () => {

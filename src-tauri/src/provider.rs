@@ -1,3 +1,4 @@
+use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -116,15 +117,15 @@ pub fn invoke_structured_cancellable(
     command.args(&invocation.args);
     command
         .current_dir(working_directory)
+        .env("PATH", provider_search_path(executable))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let mut child = command.spawn().map_err(|error| error.to_string())?;
+    let mut stdin_error = None;
     if let Some(mut stdin) = child.stdin.take() {
         if let Some(payload) = invocation.stdin {
-            stdin
-                .write_all(payload.as_bytes())
-                .map_err(|error| error.to_string())?;
+            stdin_error = stdin.write_all(payload.as_bytes()).err();
         }
     }
     let stdout = child.stdout.take().expect("piped stdout is available");
@@ -162,7 +163,66 @@ pub fn invoke_structured_cancellable(
     if !status.success() {
         return Err(redact_provider_error(&String::from_utf8_lossy(&stderr)));
     }
+    if let Some(error) = stdin_error {
+        return Err(format!(
+            "Provider CLI closed before reading the prompt: {}",
+            redact_provider_error(&error.to_string())
+        ));
+    }
     parse_provider_output(kind, &String::from_utf8_lossy(&stdout))
+}
+
+pub fn bind_context_hash(mut result: Value, expected_hash: &str) -> Result<Value, String> {
+    if expected_hash.len() != 64
+        || !expected_hash
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err("Provider context binding received an invalid expected hash.".to_string());
+    }
+    let object = result
+        .as_object_mut()
+        .ok_or("Provider result must be an object before context binding.")?;
+    if object.get("contractVersion").and_then(Value::as_u64) != Some(1) {
+        return Err("Provider result has the wrong contract version.".to_string());
+    }
+    let returned_hash = object
+        .get("contextHash")
+        .and_then(Value::as_str)
+        .ok_or("Provider result omitted contextHash.")?;
+    if returned_hash.len() != 64
+        || !returned_hash
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err("Provider result returned an invalid contextHash.".to_string());
+    }
+    object.insert(
+        "contextHash".to_string(),
+        Value::String(expected_hash.to_string()),
+    );
+    Ok(result)
+}
+
+fn provider_search_path(executable: &Path) -> OsString {
+    let mut paths = Vec::new();
+    if let Some(parent) = executable.parent() {
+        paths.push(parent.to_path_buf());
+    }
+    for path in [
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+        "/usr/bin",
+        "/bin",
+        "/usr/sbin",
+        "/sbin",
+    ] {
+        let path = PathBuf::from(path);
+        if !paths.contains(&path) {
+            paths.push(path);
+        }
+    }
+    std::env::join_paths(paths).unwrap_or_else(|_| OsString::from("/usr/bin:/bin"))
 }
 
 fn build_invocation(
@@ -288,10 +348,14 @@ fn read_bounded(mut reader: impl Read, limit: usize) -> std::io::Result<Vec<u8>>
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
+    use std::os::unix::fs::PermissionsExt;
 
     use serde_json::json;
 
-    use super::{ProviderKind, build_invocation, parse_probe_output, parse_provider_output};
+    use super::{
+        ProviderKind, bind_context_hash, build_invocation, parse_probe_output,
+        parse_provider_output, provider_search_path,
+    };
 
     #[test]
     fn provider_kind_rejects_unknown_values() {
@@ -386,6 +450,46 @@ mod tests {
     }
 
     #[test]
+    fn application_binds_schema_valid_provider_hash_to_the_current_context() {
+        let expected = "a".repeat(64);
+        let generated = json!({
+            "contractVersion": 1,
+            "contextHash": "b".repeat(64),
+            "value": "kept",
+        });
+
+        let bound = bind_context_hash(generated, &expected).unwrap();
+
+        assert_eq!(
+            bound.get("contextHash").and_then(|value| value.as_str()),
+            Some(expected.as_str())
+        );
+        assert_eq!(
+            bound.get("value").and_then(|value| value.as_str()),
+            Some("kept")
+        );
+    }
+
+    #[test]
+    fn context_binding_does_not_hide_invalid_provider_contracts() {
+        let expected = "a".repeat(64);
+        assert!(
+            bind_context_hash(
+                json!({ "contractVersion": 2, "contextHash": "b".repeat(64) }),
+                &expected,
+            )
+            .is_err()
+        );
+        assert!(
+            bind_context_hash(
+                json!({ "contractVersion": 1, "contextHash": "not-a-hash" }),
+                &expected,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn structured_invocation_honors_cancellation_before_parsing_output() {
         use std::sync::atomic::AtomicBool;
 
@@ -406,6 +510,50 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(error, "Provider invocation cancelled.");
+    }
+
+    #[test]
+    fn provider_path_starts_with_the_launcher_directory_for_gui_app_launches() {
+        let path = provider_search_path(std::path::Path::new(
+            "/Users/example/.nvm/versions/node/v22/bin/codex",
+        ));
+        let entries = std::env::split_paths(&path).collect::<Vec<_>>();
+
+        assert_eq!(
+            entries.first().map(std::path::PathBuf::as_path),
+            Some(std::path::Path::new(
+                "/Users/example/.nvm/versions/node/v22/bin"
+            ))
+        );
+        assert!(entries.contains(&std::path::PathBuf::from("/usr/bin")));
+    }
+
+    #[test]
+    fn provider_startup_failure_preserves_stderr_when_prompt_pipe_closes() {
+        let directory = tempfile::tempdir().unwrap();
+        let schema = directory.path().join("schema.json");
+        let executable = directory.path().join("provider");
+        std::fs::write(&schema, r#"{"type":"object"}"#).unwrap();
+        std::fs::write(
+            &executable,
+            "#!/bin/sh\necho provider-startup-diagnostic >&2\nexit 1\n",
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&executable, permissions).unwrap();
+
+        let error = super::invoke_structured(
+            ProviderKind::Codex,
+            &executable,
+            &schema,
+            directory.path(),
+            &"prompt".repeat(100_000),
+            std::time::Duration::from_secs(2),
+        )
+        .unwrap_err();
+
+        assert_eq!(error, "provider-startup-diagnostic");
     }
 
     fn assert_codex_strict_schema(node: &serde_json::Value, path: &str) {

@@ -10,9 +10,10 @@ use uuid::Uuid;
 use crate::domain::{
     ActivityEntry, AdapterEffectContext, AdapterRoleContext, BrowserAnswerCommitWork,
     BrowserAnswerWork, BrowserCommand, BrowserInspection, BrowserSessionSummary, DashboardState,
-    DiscoveryDataset, DiscoveryFinding, HistoryRecord, ImportResult, LeasedRun, PreparationSummary,
-    PreparationWork, QueueGroup, ReconcileResult, RestorePreflight, RoleSummary, RunSummary,
-    ScheduledRun, SourceScheduleSummary,
+    DiscoveryDataset, DiscoveryFinding, HistoryRecord, ImportResult, LeasedRun,
+    PreparationCleanupWork, PreparationSummary, PreparationWork, QueueFilters, QueueGroup,
+    ReconcileResult, RestorePreflight, RoleSummary, RunSummary, ScheduledRun,
+    SourceScheduleSummary,
 };
 
 const SCHEMA_VERSION: i64 = 10;
@@ -462,6 +463,27 @@ impl Store {
         Ok(setting(&self.connection, "background_enabled")?.as_deref() == Some("true"))
     }
 
+    pub fn queue_filters(&self) -> Result<QueueFilters, StoreError> {
+        let Some(value) = setting(&self.connection, "queue_filters")? else {
+            return Ok(QueueFilters::default());
+        };
+        serde_json::from_str(&value).map_err(StoreError::InvalidDataset)
+    }
+
+    pub fn queue_filters_configured(&self) -> Result<bool, StoreError> {
+        Ok(setting(&self.connection, "queue_filters")?.is_some())
+    }
+
+    pub fn set_queue_filters(&mut self, filters: &QueueFilters) -> Result<(), StoreError> {
+        validate_queue_filters(filters)?;
+        self.connection.execute(
+            "INSERT INTO settings(key, value, updated_at) VALUES ('queue_filters', ?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+            params![serde_json::to_string(filters)?, Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
     pub fn set_adapter_ready(&mut self, ready: bool) -> Result<(), StoreError> {
         self.connection.execute(
             "INSERT INTO settings(key, value, updated_at) VALUES ('adapter_ready', ?1, ?2)
@@ -691,6 +713,32 @@ impl Store {
         )?;
         transaction.commit()?;
         self.browser_session(&session_id)
+    }
+
+    pub fn has_review_required_application_session(
+        &self,
+        preparation_id: &str,
+    ) -> Result<bool, StoreError> {
+        let count = self.connection.query_row(
+            "SELECT COUNT(*) FROM browser_sessions
+              WHERE preparation_id = ?1 AND purpose = 'application' AND status = 'review_required'",
+            [preparation_id],
+            |row| row.get::<_, i64>(0),
+        )?;
+        Ok(count > 0)
+    }
+
+    pub fn fail_browser_session_start(
+        &mut self,
+        session_id: &str,
+        error_code: &str,
+    ) -> Result<(), StoreError> {
+        self.connection.execute(
+            "UPDATE browser_sessions SET status = 'action_required', error_code = ?1,
+                    updated_at = ?2 WHERE id = ?3 AND status = 'waiting_for_extension'",
+            params![error_code, Utc::now().to_rfc3339(), session_id],
+        )?;
+        Ok(())
     }
 
     pub fn browser_sessions(&self) -> Result<Vec<BrowserSessionSummary>, StoreError> {
@@ -1694,6 +1742,158 @@ impl Store {
         Ok(())
     }
 
+    pub fn hold_preparation_for_decision(
+        &mut self,
+        preparation_id: &str,
+        reason: &str,
+    ) -> Result<(), StoreError> {
+        let now = Utc::now().to_rfc3339();
+        let transaction = self.connection.transaction()?;
+        let role_id = transaction
+            .query_row(
+                "SELECT role_id FROM preparation_jobs WHERE id = ?1 AND status = 'preparing'",
+                [preparation_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .ok_or_else(|| {
+                StoreError::InvalidPreparation(
+                    "preparation is missing or no longer active".to_string(),
+                )
+            })?;
+        transaction.execute(
+            "UPDATE preparation_jobs SET status = 'cancelled', step = 'needs_decision',
+                    error_class = ?1, updated_at = ?2 WHERE id = ?3",
+            params![reason, now, preparation_id],
+        )?;
+        transaction.execute(
+            "UPDATE roles SET preparation_state = 'not_started', queue_group = 'needs_decision',
+                    updated_at = ?1 WHERE id = ?2",
+            params![now, role_id],
+        )?;
+        transaction.execute(
+            "INSERT INTO activity(id, kind, message, occurred_at)
+             VALUES (?1, 'preparation', 'Preparation stopped before artifact generation because the role needs a decision.', ?2)",
+            params![Uuid::new_v4().to_string(), now],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn begin_preparation_cleanup(
+        &mut self,
+        preparation_id: &str,
+    ) -> Result<PreparationCleanupWork, StoreError> {
+        let (role_id, report_path, cv_pdf_path) = self
+            .connection
+            .query_row(
+                "SELECT role_id, report_path, cv_pdf_path FROM preparation_jobs
+                  WHERE id = ?1 AND status IN ('completed', 'action_required')
+                    AND report_path IS NOT NULL AND cv_pdf_path IS NOT NULL",
+                [preparation_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .optional()?
+            .ok_or_else(|| {
+                StoreError::InvalidPreparation(
+                    "completed preparation artifacts were not found".to_string(),
+                )
+            })?;
+        let applied_count = self.connection.query_row(
+            "SELECT COUNT(*) FROM browser_sessions
+              WHERE preparation_id = ?1 AND status = 'applied_recorded'",
+            [preparation_id],
+            |row| row.get::<_, i64>(0),
+        )?;
+        if applied_count > 0 {
+            return Err(StoreError::InvalidPreparation(
+                "an applied application cannot be undone as preparation".to_string(),
+            ));
+        }
+        let effect = self.begin_adapter_effect(&role_id, "role.discard", None, None)?;
+        Ok(PreparationCleanupWork {
+            preparation_id: preparation_id.to_string(),
+            role_id,
+            report_path,
+            cv_pdf_path,
+            effect,
+        })
+    }
+
+    pub fn fail_preparation_cleanup(
+        &mut self,
+        preparation_id: &str,
+        idempotency_key: &str,
+        error_class: &str,
+    ) -> Result<(), StoreError> {
+        self.fail_adapter_effect(idempotency_key, error_class)?;
+        self.connection.execute(
+            "UPDATE preparation_jobs SET status = 'action_required', step = 'undo_cleanup',
+                    error_class = ?1, updated_at = ?2 WHERE id = ?3",
+            params![error_class, Utc::now().to_rfc3339(), preparation_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn complete_preparation_cleanup(
+        &mut self,
+        work: &PreparationCleanupWork,
+        tracker_id: i64,
+        canonical_status: &str,
+    ) -> Result<(), StoreError> {
+        if canonical_status != "Discarded" {
+            return Err(StoreError::InvalidAdapterEffect(
+                "preparation cleanup returned a non-Discarded status".to_string(),
+            ));
+        }
+        let transaction = self.connection.transaction()?;
+        let now = Utc::now().to_rfc3339();
+        let changed = transaction.execute(
+            "UPDATE adapter_effects SET status = 'completed', tracker_id = ?1,
+                    error_class = NULL, updated_at = ?2
+              WHERE idempotency_key = ?3 AND role_id = ?4 AND status = 'pending'",
+            params![tracker_id, now, &work.effect.idempotency_key, &work.role_id],
+        )?;
+        if changed != 1 {
+            return Err(StoreError::InvalidAdapterEffect(
+                "preparation cleanup effect is missing or no longer pending".to_string(),
+            ));
+        }
+        transaction.execute(
+            "DELETE FROM browser_commands WHERE session_id IN (
+                SELECT id FROM browser_sessions WHERE preparation_id = ?1
+             )",
+            [&work.preparation_id],
+        )?;
+        transaction.execute(
+            "DELETE FROM browser_sessions WHERE preparation_id = ?1",
+            [&work.preparation_id],
+        )?;
+        transaction.execute(
+            "DELETE FROM preparation_jobs WHERE id = ?1",
+            [&work.preparation_id],
+        )?;
+        transaction.execute(
+            "UPDATE roles SET preparation_state = 'not_started', review_state = 'dismissed',
+                    canonical_tracker_id = ?1, canonical_status = 'Discarded',
+                    canonical_visibility_override = 0, updated_at = ?2 WHERE id = ?3",
+            params![tracker_id, now, &work.role_id],
+        )?;
+        transaction.execute(
+            "INSERT INTO activity(id, kind, message, occurred_at)
+             VALUES (?1, 'preparation', 'Preparation was discarded and its generated artifacts were deleted.', ?2)",
+            params![Uuid::new_v4().to_string(), now],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
     pub fn fail_preparation(
         &mut self,
         preparation_id: &str,
@@ -2456,6 +2656,7 @@ impl Store {
     }
 
     pub fn dashboard(&self) -> Result<DashboardState, StoreError> {
+        let queue_filters = self.queue_filters()?;
         let mut roles_statement = self.connection.prepare(
             "SELECT
                r.id, r.company, r.title, r.location,
@@ -2476,7 +2677,7 @@ impl Store {
                r.discovered_at DESC,
                r.company COLLATE NOCASE",
         )?;
-        let roles = roles_statement
+        let mut roles = roles_statement
             .query_map([], |row| {
                 let queue_group: String = row.get(6)?;
                 Ok((
@@ -2498,6 +2699,7 @@ impl Store {
             })?
             .map(role_summary_from_tuple)
             .collect::<Result<Vec<_>, StoreError>>()?;
+        roles.retain(|role| role_matches_queue_filters(role, &queue_filters));
 
         let mut dismissed_statement = self.connection.prepare(
             "SELECT
@@ -2540,6 +2742,12 @@ impl Store {
                     p.attempt, p.report_path, p.cv_pdf_path, p.error_class, p.updated_at
                FROM preparation_jobs p
                JOIN roles r ON r.id = p.role_id
+              WHERE p.status != 'cancelled'
+                AND p.id = (
+                  SELECT latest.id FROM preparation_jobs latest
+                   WHERE latest.role_id = p.role_id AND latest.status != 'cancelled'
+                   ORDER BY latest.updated_at DESC, latest.id DESC LIMIT 1
+                )
               ORDER BY p.updated_at DESC LIMIT 30",
         )?;
         let preparations = preparation_statement
@@ -2645,6 +2853,7 @@ impl Store {
             recently_dismissed,
             preparations,
             activity,
+            queue_filters,
             last_successful_discovery_at,
             background_enabled,
             adapter_status: if adapter_ready {
@@ -2982,6 +3191,155 @@ fn role_summary_from_tuple(
     })
 }
 
+fn validate_queue_filters(filters: &QueueFilters) -> Result<(), StoreError> {
+    for (label, values) in [
+        ("role families", &filters.role_families),
+        ("seniority", &filters.seniority),
+        ("locations", &filters.locations),
+    ] {
+        if values.len() > 24
+            || values
+                .iter()
+                .any(|value| value.trim().is_empty() || value.chars().count() > 120)
+        {
+            return Err(StoreError::InvalidPreparation(format!(
+                "queue filter {label} must contain at most 24 concise values"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn normalized_filter_value(value: &str) -> String {
+    value
+        .to_lowercase()
+        .chars()
+        .map(|character| {
+            if character.is_alphanumeric() {
+                character
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn contains_filter_phrase(haystack: &str, needle: &str) -> bool {
+    !needle.is_empty() && format!(" {haystack} ").contains(&format!(" {needle} "))
+}
+
+fn role_matches_queue_filters(role: &RoleSummary, filters: &QueueFilters) -> bool {
+    let title = normalized_filter_value(&role.title);
+    if !filters.role_families.is_empty() {
+        let ignored = ["engineer", "engineering", "developer", "software", "web"];
+        let matches_family = filters.role_families.iter().any(|family| {
+            let normalized = normalized_filter_value(family);
+            let distinctive = normalized
+                .split_whitespace()
+                .filter(|token| !ignored.contains(token))
+                .collect::<Vec<_>>();
+            distinctive.is_empty()
+                || distinctive
+                    .iter()
+                    .any(|token| contains_filter_phrase(&title, token))
+        });
+        if !matches_family {
+            return false;
+        }
+    }
+
+    let allowed_seniority = filters
+        .seniority
+        .iter()
+        .map(|value| normalized_filter_value(value))
+        .collect::<Vec<_>>();
+    let explicitly_disallowed = [
+        (
+            ["intern", "internship", "graduate", "junior", "entry level"].as_slice(),
+            ["intern", "graduate", "junior", "entry"].as_slice(),
+        ),
+        (
+            ["mid level", "middle", " l2 ", " l3 "].as_slice(),
+            ["mid", "middle", "l2", "l3"].as_slice(),
+        ),
+    ]
+    .iter()
+    .any(|(title_markers, allowed_markers)| {
+        title_markers
+            .iter()
+            .any(|marker| contains_filter_phrase(&title, marker))
+            && !allowed_seniority.iter().any(|allowed| {
+                allowed_markers
+                    .iter()
+                    .any(|marker| contains_filter_phrase(allowed, marker))
+            })
+    });
+    if explicitly_disallowed {
+        return false;
+    }
+
+    let location = normalized_filter_value(&role.location);
+    let is_remote = ["remote", "worldwide", "home based"]
+        .iter()
+        .any(|marker| contains_filter_phrase(&location, marker));
+    let remote_restricted_elsewhere = [
+        "us only",
+        "united states",
+        "usa only",
+        "canada only",
+        "north america only",
+        "latin america only",
+        "apac only",
+        "australia only",
+        "new zealand only",
+        "india only",
+    ]
+    .iter()
+    .any(|marker| contains_filter_phrase(&location, marker));
+    let matches_location = filters.locations.is_empty()
+        || filters
+            .locations
+            .iter()
+            .map(|value| normalized_filter_value(value))
+            .any(|allowed| contains_filter_phrase(&location, &allowed));
+    if !(matches_location || filters.remote_allowed && is_remote && !remote_restricted_elsewhere) {
+        return false;
+    }
+
+    if filters.require_authorization_path {
+        let evidence = normalized_filter_value(&format!(
+            "{} {}",
+            role.eligibility_summary,
+            role.uncertainty.as_deref().unwrap_or_default()
+        ));
+        if [
+            "no sponsorship",
+            "cannot sponsor",
+            "visa sponsorship is not available",
+            "must already be authorized",
+            "must be legally authorized",
+            "must be eligible to work",
+            "must have existing work authorization",
+            "without sponsorship",
+            "unable to sponsor",
+            "do not sponsor",
+            "valid work permit required",
+            "right to work required",
+            "us citizen",
+            "citizenship required",
+        ]
+        .iter()
+        .any(|marker| contains_filter_phrase(&evidence, marker))
+        {
+            return false;
+        }
+    }
+    true
+}
+
 fn normalized_words(value: &str) -> Vec<String> {
     value
         .to_lowercase()
@@ -3065,7 +3423,7 @@ fn missed_nominal_times(
 
 #[cfg(test)]
 mod tests {
-    use super::Store;
+    use super::{QueueFilters, Store};
 
     const DATASET: &str = r#"{
       "schemaVersion": 1,
@@ -3098,6 +3456,105 @@ mod tests {
 
         assert_eq!(first.imported, 1);
         assert_eq!(second.unchanged, 1);
+        assert_eq!(store.dashboard().unwrap().roles.len(), 1);
+    }
+
+    #[test]
+    fn queue_filters_apply_to_existing_roles_and_future_imports() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+        store.import_dataset(DATASET).unwrap();
+        store
+            .set_queue_filters(&QueueFilters {
+                role_families: vec!["Frontend".to_string()],
+                seniority: vec!["Senior".to_string()],
+                locations: vec!["Europe".to_string()],
+                remote_allowed: true,
+                require_authorization_path: true,
+            })
+            .unwrap();
+        assert_eq!(store.dashboard().unwrap().roles.len(), 1);
+
+        let future_backend = DATASET
+            .replace("role-1", "role-2")
+            .replace("Northstar Tools", "Backend Works")
+            .replace("Frontend Engineer", "Backend Engineer")
+            .replace(
+                "northstar-tools/frontend-engineer",
+                "backend-works/backend-engineer",
+            );
+        store.import_dataset(&future_backend).unwrap();
+        let dashboard = store.dashboard().unwrap();
+        assert_eq!(dashboard.roles.len(), 1);
+        assert_eq!(dashboard.roles[0].title, "Frontend Engineer");
+
+        store
+            .set_queue_filters(&QueueFilters {
+                role_families: vec!["Backend".to_string()],
+                seniority: vec!["Senior".to_string()],
+                locations: vec!["Europe".to_string()],
+                remote_allowed: true,
+                require_authorization_path: true,
+            })
+            .unwrap();
+        let dashboard = store.dashboard().unwrap();
+        assert_eq!(dashboard.roles.len(), 1);
+        assert_eq!(dashboard.roles[0].title, "Backend Engineer");
+    }
+
+    #[test]
+    fn queue_filters_hide_explicit_authorization_conflicts() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+        let conflict = DATASET.replace(
+            "Remote scope appears compatible but authorization is not verified.",
+            "Candidates must already be authorized; no sponsorship is available.",
+        );
+        store.import_dataset(&conflict).unwrap();
+        store
+            .set_queue_filters(&QueueFilters {
+                role_families: vec!["Frontend".to_string()],
+                seniority: vec!["Senior".to_string()],
+                locations: vec!["Europe".to_string()],
+                remote_allowed: true,
+                require_authorization_path: true,
+            })
+            .unwrap();
+
+        assert!(store.dashboard().unwrap().roles.is_empty());
+    }
+
+    #[test]
+    fn queue_filters_use_whole_phrases_and_reject_remote_only_regions() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+        let internationalization = DATASET
+            .replace("Frontend Engineer", "Internationalization Engineer")
+            .replace(
+                "northstar-tools/frontend-engineer",
+                "northstar-tools/internationalization-engineer",
+            );
+        store.import_dataset(&internationalization).unwrap();
+        store
+            .set_queue_filters(&QueueFilters {
+                role_families: Vec::new(),
+                seniority: vec!["Senior".to_string()],
+                locations: vec!["Europe".to_string()],
+                remote_allowed: true,
+                require_authorization_path: true,
+            })
+            .unwrap();
+        assert_eq!(store.dashboard().unwrap().roles.len(), 1);
+
+        let remote_us = DATASET
+            .replace("role-1", "role-2")
+            .replace("Northstar Tools", "US Remote Co")
+            .replace("Remote, Europe", "Remote, United States")
+            .replace(
+                "northstar-tools/frontend-engineer",
+                "us-remote-co/frontend-engineer",
+            );
+        store.import_dataset(&remote_us).unwrap();
         assert_eq!(store.dashboard().unwrap().roles.len(), 1);
     }
 
@@ -3167,8 +3624,7 @@ mod tests {
 
         let dashboard = store.dashboard().unwrap();
         assert_eq!(dashboard.roles[0].preparation_state, "not_started");
-        assert_eq!(dashboard.preparations[0].status, "cancelled");
-        assert!(dashboard.preparations[0].report_path.is_none());
+        assert!(dashboard.preparations.is_empty());
         let restarted = store.begin_preparation(&role_id, "claude").unwrap();
         assert_ne!(restarted.id, work.id);
     }
@@ -3636,6 +4092,11 @@ mod tests {
         let review = store.complete_browser_release(&release.command_id).unwrap();
         assert_eq!(review.status, "review_required");
         assert_eq!(review.fill_results.unwrap()[0]["status"], "verified");
+        assert!(
+            store
+                .has_review_required_application_session(&preparation.id)
+                .unwrap()
+        );
         let refill = store.queue_application_session(&preparation.id).unwrap();
         assert_ne!(refill.id, session.id);
         assert_eq!(refill.status, "waiting_for_extension");

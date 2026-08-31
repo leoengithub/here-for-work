@@ -24,8 +24,10 @@ import {
   quitApp,
   cancelPreparation,
   sendTestNotification,
+  saveQueueFilters,
   setBackgroundEnabled,
   startBrowserConnectionCheck,
+  undoPreparation,
   undoDismissal,
 } from "./api";
 import type {
@@ -39,6 +41,7 @@ import type {
   RoleSummary,
   BrowserSessionSummary,
   PreparationDetail,
+  QueueFilters,
 } from "./types";
 
 const groupOrder: QueueGroup[] = ["strong_match", "other_new", "needs_decision"];
@@ -237,18 +240,6 @@ export function BrowserSessions({
               {session.fieldCount === 0 ? (
                 <p>No compatible fields were found after the inspection window. Complete this form manually; the application itself remains available.</p>
               ) : null}
-              {session.reviewItems?.length ? (
-                <ul>
-                  {session.reviewItems.map((item) => (
-                    <li key={item.fieldId}>
-                      <strong>{item.label}</strong>: {item.decision.replaceAll("_", " ")}
-                      {item.answer ? <span> — {item.answer}</span> : null}
-                      {item.reason ? <span> — {item.reason}</span> : null}
-                      {item.provenance?.length ? <small>Sources: {item.provenance.join(", ")}</small> : null}
-                    </li>
-                  ))}
-                </ul>
-              ) : null}
               {session.purpose === "application" && onConfirmApplied && isLatestApplicationAttempt ? (
                 <button className="button button--primary" type="button" onClick={() => onConfirmApplied(session.id)} disabled={busy}>
                   I submitted this application
@@ -281,12 +272,89 @@ export function BrowserSessions({
   );
 }
 
+function markdownInline(value: string): ReactNode[] {
+  return value.split(/(\*\*[^*]+\*\*|`[^`]+`)/g).filter(Boolean).map((part, index) => {
+    if (part.startsWith("**") && part.endsWith("**")) return <strong key={index}>{part.slice(2, -2)}</strong>;
+    if (part.startsWith("`") && part.endsWith("`")) return <code key={index}>{part.slice(1, -1)}</code>;
+    return <span key={index}>{part}</span>;
+  });
+}
+
+function MarkdownPreview({ markdown }: { markdown: string }) {
+  const lines = markdown.replaceAll("\r\n", "\n").split("\n");
+  const blocks: ReactNode[] = [];
+  let index = 0;
+  while (index < lines.length) {
+    const line = lines[index].trimEnd();
+    if (!line.trim()) {
+      index += 1;
+      continue;
+    }
+    if (line.startsWith("```")) {
+      const code: string[] = [];
+      index += 1;
+      while (index < lines.length && !lines[index].trim().startsWith("```")) {
+        code.push(lines[index]);
+        index += 1;
+      }
+      index += 1;
+      blocks.push(<pre key={`code-${index}`} tabIndex={0}><code>{code.join("\n")}</code></pre>);
+      continue;
+    }
+    const heading = line.match(/^(#{1,4})\s+(.+)$/);
+    if (heading) {
+      const level = Math.min(4, heading[1].length + 1);
+      const Heading = `h${level}` as "h2" | "h3" | "h4";
+      blocks.push(<Heading key={`heading-${index}`}>{markdownInline(heading[2])}</Heading>);
+      index += 1;
+      continue;
+    }
+    if (/^[-*]\s+/.test(line)) {
+      const items: string[] = [];
+      while (index < lines.length && /^[-*]\s+/.test(lines[index].trim())) {
+        items.push(lines[index].trim().replace(/^[-*]\s+/, ""));
+        index += 1;
+      }
+      blocks.push(<ul key={`list-${index}`}>{items.map((item, itemIndex) => <li key={itemIndex}>{markdownInline(item)}</li>)}</ul>);
+      continue;
+    }
+    if (/^\d+\.\s+/.test(line)) {
+      const items: string[] = [];
+      while (index < lines.length && /^\d+\.\s+/.test(lines[index].trim())) {
+        items.push(lines[index].trim().replace(/^\d+\.\s+/, ""));
+        index += 1;
+      }
+      blocks.push(<ol key={`ordered-${index}`}>{items.map((item, itemIndex) => <li key={itemIndex}>{markdownInline(item)}</li>)}</ol>);
+      continue;
+    }
+    if (/^---+$/.test(line.trim())) {
+      blocks.push(<hr key={`rule-${index}`} />);
+      index += 1;
+      continue;
+    }
+    const paragraph = [line.trim()];
+    index += 1;
+    while (index < lines.length && lines[index].trim() && !/^(#{1,4})\s+|^```|^[-*]\s+|^\d+\.\s+|^---+$/.test(lines[index].trim())) {
+      paragraph.push(lines[index].trim());
+      index += 1;
+    }
+    blocks.push(<p key={`paragraph-${index}`}>{markdownInline(paragraph.join(" "))}</p>);
+  }
+  return <div className="markdown-preview">{blocks}</div>;
+}
+
+const lineSeparated = (values: string[]): string => values.join("\n");
+const parseLineSeparated = (value: string): string[] => [...new Set(value.split("\n").map((item) => item.trim()).filter(Boolean))];
+
 function SystemPanel({
   dashboard,
   health,
   busy,
   onRefresh,
   onReconcile,
+  queueFilters,
+  onQueueFiltersChange,
+  onSaveQueueFilters,
   notificationsReady,
   onEnableNotifications,
   onTestNotification,
@@ -316,6 +384,9 @@ function SystemPanel({
   busy: boolean;
   onRefresh: () => void;
   onReconcile: () => void;
+  queueFilters: QueueFilters;
+  onQueueFiltersChange: (filters: QueueFilters) => void;
+  onSaveQueueFilters: () => void;
   notificationsReady: boolean;
   onEnableNotifications: () => void;
   onTestNotification: () => void;
@@ -401,6 +472,64 @@ function SystemPanel({
           Reconcile history
         </button>
       </div>
+      <section className="queue-filter-settings" aria-labelledby="queue-filter-settings-title">
+        <div className="queue-filter-settings__heading">
+          <div>
+            <h3 id="queue-filter-settings-title">Queue filters</h3>
+            <p>Initialized from your verified career-ops profile. Changes apply to current unprepared roles and future imports.</p>
+          </div>
+          <button className="button button--primary" type="button" onClick={onSaveQueueFilters} disabled={busy}>
+            Save filters
+          </button>
+        </div>
+        <div className="queue-filter-settings__fields">
+          <label>
+            Role families
+            <textarea
+              key={lineSeparated(queueFilters.roleFamilies)}
+              defaultValue={lineSeparated(queueFilters.roleFamilies)}
+              onBlur={(event) => onQueueFiltersChange({ ...queueFilters, roleFamilies: parseLineSeparated(event.target.value) })}
+              rows={4}
+            />
+          </label>
+          <label>
+            Seniority
+            <textarea
+              key={lineSeparated(queueFilters.seniority)}
+              defaultValue={lineSeparated(queueFilters.seniority)}
+              onBlur={(event) => onQueueFiltersChange({ ...queueFilters, seniority: parseLineSeparated(event.target.value) })}
+              rows={4}
+            />
+          </label>
+          <label>
+            Locations
+            <textarea
+              key={lineSeparated(queueFilters.locations)}
+              defaultValue={lineSeparated(queueFilters.locations)}
+              onBlur={(event) => onQueueFiltersChange({ ...queueFilters, locations: parseLineSeparated(event.target.value) })}
+              rows={4}
+            />
+          </label>
+        </div>
+        <div className="queue-filter-settings__checks">
+          <label>
+            <input
+              type="checkbox"
+              checked={queueFilters.remoteAllowed}
+              onChange={(event) => onQueueFiltersChange({ ...queueFilters, remoteAllowed: event.target.checked })}
+            />
+            Include remote roles
+          </label>
+          <label>
+            <input
+              type="checkbox"
+              checked={queueFilters.requireAuthorizationPath}
+              onChange={(event) => onQueueFiltersChange({ ...queueFilters, requireAuthorizationPath: event.target.checked })}
+            />
+            Hide explicit authorization conflicts
+          </label>
+        </div>
+      </section>
       <section className="browser-setup" aria-labelledby="browser-setup-title">
         <div>
           <h3 id="browser-setup-title">Ordinary Chrome profile</h3>
@@ -457,7 +586,7 @@ function SystemPanel({
             Inspect active application page
           </button>
         </div>
-        <BrowserSessions sessions={browserSessions.slice(0, 1)} busy={busy} onRetry={onRetryBrowser} />
+        <BrowserSessions sessions={browserSessions.filter((session) => session.purpose === "connection_check").slice(0, 1)} busy={busy} onRetry={onRetryBrowser} />
       </section>
 
       <div className="history-control history-control--sources">
@@ -533,17 +662,6 @@ function SystemPanel({
         </button>
       </div>
 
-      <section className="activity-panel" aria-labelledby="activity-title">
-        <h3 id="activity-title">Recent activity</h3>
-        <ol>
-          {dashboard.activity.map((entry) => (
-            <li key={entry.id}>
-              <span>{entry.message}</span>
-              <time dateTime={entry.occurredAt}>{formatRelative(entry.occurredAt)}</time>
-            </li>
-          ))}
-        </ol>
-      </section>
       <div className="history-control">
         <div>
           <h3>Backup and export</h3>
@@ -570,8 +688,9 @@ function SystemPanel({
 export function App() {
   const [dashboard, setDashboard] = useState<DashboardState | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [view, setView] = useState<"queue" | "applications" | "activity" | "system">("queue");
+  const [view, setView] = useState<"queue" | "applications" | "system">("queue");
   const [health, setHealth] = useState<IntegrationHealth | null>(null);
   const [notificationsReady, setNotificationsReady] = useState(false);
   const [providerProbe, setProviderProbe] = useState<ProviderProbeResult | null>(null);
@@ -584,6 +703,8 @@ export function App() {
   const [maintenanceResult, setMaintenanceResult] = useState<MaintenanceResult | null>(null);
   const [restorePreflight, setRestorePreflight] = useState<RestorePreflight | null>(null);
   const [preparationDetail, setPreparationDetail] = useState<PreparationDetail | null>(null);
+  const [queueFiltersDraft, setQueueFiltersDraft] = useState<QueueFilters | null>(null);
+  const [undoPreparationId, setUndoPreparationId] = useState<string | null>(null);
   const [cancellationRequestedRoleId, setCancellationRequestedRoleId] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -593,6 +714,7 @@ export function App() {
       .then((state) => {
         if (!active) return;
         setDashboard(state);
+        setQueueFiltersDraft(state.queueFilters);
       })
       .catch((reason: unknown) => {
         if (active) setError(reason instanceof Error ? reason.message : String(reason));
@@ -643,6 +765,23 @@ export function App() {
     setBusy(true);
     try {
       setDashboard(await setBackgroundEnabled(!dashboard.backgroundEnabled));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const persistQueueFilters = async () => {
+    if (!queueFiltersDraft) return;
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const next = await saveQueueFilters(queueFiltersDraft);
+      setDashboard(next);
+      setQueueFiltersDraft(next.queueFilters);
+      setNotice("Queue filters saved. Current unprepared roles and future imports now use them.");
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
     } finally {
@@ -799,13 +938,21 @@ export function App() {
   const prepareQueueRole = async (roleId: string) => {
     setBusy(true);
     setError(null);
+    setNotice(null);
     setDashboard((current) => current ? {
       ...current,
       roles: current.roles.map((role) => role.id === roleId ? { ...role, preparationState: "preparing" } : role),
     } : current);
     try {
-      setDashboard(await prepareRole(roleId, selectedProvider));
-      setView("applications");
+      const outcome = await prepareRole(roleId, selectedProvider);
+      setDashboard(outcome.dashboard);
+      setQueueFiltersDraft(outcome.dashboard.queueFilters);
+      setNotice(outcome.message);
+      if (outcome.disposition === "browser_started" || outcome.disposition === "prepared_browser_action_required") {
+        setView("applications");
+      } else {
+        setView("queue");
+      }
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
       try {
@@ -889,6 +1036,24 @@ export function App() {
     }
   };
 
+  const discardPreparation = async (preparationId: string) => {
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const next = await undoPreparation(preparationId);
+      setDashboard(next);
+      setBrowserSessions(await getBrowserSessions());
+      setPreparationDetail((current) => current?.preparationId === preparationId ? null : current);
+      setUndoPreparationId(null);
+      setNotice("Preparation discarded. career-ops history was updated and generated files were deleted.");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const openArtifact = async (preparationId: string, artifact: "report" | "cv") => {
     try {
       await openPreparationArtifact(preparationId, artifact);
@@ -915,6 +1080,9 @@ export function App() {
           busy={busy}
           onRefresh={() => void refreshHealth()}
           onReconcile={() => void reconcileHistory()}
+          queueFilters={queueFiltersDraft ?? dashboard.queueFilters}
+          onQueueFiltersChange={setQueueFiltersDraft}
+          onSaveQueueFilters={() => void persistQueueFilters()}
           notificationsReady={notificationsReady}
           onEnableNotifications={() => void enableNotifications()}
           onTestNotification={() => void testNotification()}
@@ -946,88 +1114,102 @@ export function App() {
       <main className="status-workspace" aria-labelledby="applications-title">
         <p className="eyebrow">Application workflow</p>
         <h2 id="applications-title">Applications</h2>
-        <p>Prepared materials and browser work stay here through human review and outcome confirmation.</p>
-        <dl className="decision-facts">
-          <div><dt>Prepared materials</dt><dd>{dashboard.preparations.filter((item) => item.status === "completed").length} complete</dd></div>
-          <div><dt>Recoverable blockers</dt><dd>{dashboard.preparations.filter((item) => item.status === "action_required").length + browserSessions.filter((session) => session.status === "action_required").length} active</dd></div>
-          <div><dt>Canonical writes</dt><dd>Discard and Undo are available. Applied remains gated behind a completed form and your confirmation.</dd></div>
-        </dl>
+        <p>One current status per application. Open Details when you want the full career-ops report.</p>
         {dashboard.preparations.length > 0 ? (
           <ol className="preparation-list" aria-label="Application preparations">
             {dashboard.preparations.map((item) => {
-              const itemSessions = browserSessions.filter((session) => session.preparationId === item.id);
-              const canRefillForReview = itemSessions.length > 0 && itemSessions.every((session) => session.status === "review_required");
-              const browserFlowUnavailable = itemSessions.length > 0 && !canRefillForReview;
+              const latestSession = browserSessions
+                .filter((session) => session.purpose === "application" && session.preparationId === item.id)
+                .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0];
+              const status = latestSession ? browserStatusLabel[latestSession.status] : item.step.replaceAll("_", " ");
+              const browserActive = latestSession && !["review_required", "action_required", "submitted_tracking_pending", "applied_recorded"].includes(latestSession.status);
               return (
               <li key={item.id}>
-                <div>
+                <div className="preparation-list__identity">
                   <strong>{item.title}</strong>
                   <span>{item.company} · {item.provider}</span>
                 </div>
-                <span className="state-pill">{item.step.replaceAll("_", " ")}</span>
+                <span className="state-pill">{status}</span>
                 {item.status === "completed" ? (
-                  <div>
-                    <p>Report and verified CV are stored in career-ops. Continue in your selected ordinary Chrome profile.</p>
-                    <div className="button-cluster">
-                      <button className="button button--quiet" type="button" onClick={() => void showPreparationDetail(item.id)} disabled={busy}>
-                        View report
-                      </button>
-                      <button className="button button--quiet" type="button" onClick={() => void openArtifact(item.id, "cv")} disabled={busy}>
-                        Open verified CV
-                      </button>
-                    </div>
+                  <div className="preparation-list__actions">
+                    <button className="button button--quiet" type="button" onClick={() => void showPreparationDetail(item.id)} disabled={busy}>
+                      Details
+                    </button>
+                    <button className="button button--quiet" type="button" onClick={() => void openArtifact(item.id, "cv")} disabled={busy}>
+                      Open CV
+                    </button>
+                    {!latestSession ? (
                     <button
                       className="button button--primary"
                       type="button"
                       onClick={() => void continuePreparedRole(item.id)}
-                      disabled={busy || !browserSetup?.approvedInstallationId || browserFlowUnavailable}
+                      disabled={busy || !browserSetup?.approvedInstallationId}
                     >
-                      {canRefillForReview ? "Refill for review" : browserFlowUnavailable ? "Browser flow started" : "Continue in browser"}
+                      Open in browser
                     </button>
+                    ) : null}
+                    {latestSession?.status === "action_required" ? (
+                      <button className="button button--primary" type="button" onClick={() => void retryBrowser(latestSession.id)} disabled={busy}>
+                        Retry browser
+                      </button>
+                    ) : null}
+                    {latestSession?.status === "review_required" ? (
+                      <button className="button button--primary" type="button" onClick={() => void confirmApplied(latestSession.id)} disabled={busy}>
+                        I submitted this application
+                      </button>
+                    ) : null}
+                    {latestSession?.status === "submitted_tracking_pending" ? (
+                      <button className="button button--primary" type="button" onClick={() => void confirmApplied(latestSession.id)} disabled={busy}>
+                        Retry tracking update
+                      </button>
+                    ) : null}
+                    {latestSession?.status !== "applied_recorded" ? (
+                      <button className="button button--quiet button--danger" type="button" onClick={() => setUndoPreparationId(item.id)} disabled={busy || Boolean(browserActive)}>
+                        Undo preparation
+                      </button>
+                    ) : null}
                   </div>
                 ) : null}
                 {item.errorClass ? <p className="browser-session-list__error">{item.errorClass.replaceAll("_", " ")}</p> : null}
+                {undoPreparationId === item.id ? (
+                  <div className="preparation-list__confirmation" role="alert">
+                    <p>Discard this role and permanently delete its generated report and tailored CV files?</p>
+                    <div className="button-cluster">
+                      <button className="button button--danger" type="button" onClick={() => void discardPreparation(item.id)} disabled={busy}>
+                        Discard preparation
+                      </button>
+                      <button className="button button--quiet" type="button" onClick={() => setUndoPreparationId(null)} disabled={busy}>
+                        Keep preparation
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
               </li>
               );
             })}
           </ol>
-        ) : null}
-        {preparationDetail ? (
-          <section className="preparation-detail" aria-labelledby="preparation-detail-title">
-            <div className="preparation-detail__heading">
-              <h3 id="preparation-detail-title">career-ops report</h3>
-              <button className="button button--quiet" type="button" onClick={() => void openArtifact(preparationDetail.preparationId, "report")}>Open original</button>
-            </div>
-            <p><code>{preparationDetail.reportPath}</code></p>
-            <pre tabIndex={0}>{preparationDetail.reportMarkdown}</pre>
+        ) : (
+          <section className="empty-state empty-state--compact" aria-labelledby="applications-empty-title">
+            <h3 id="applications-empty-title">No prepared applications yet.</h3>
+            <p>Prepare a suitable role from Queue. HereForWork will add it here only after career-ops creates the verified materials.</p>
           </section>
+        )}
+        {preparationDetail ? (
+          <aside className="preparation-detail" aria-labelledby="preparation-detail-title">
+            <div className="preparation-detail__heading">
+              <div>
+                <p className="eyebrow">career-ops report</p>
+                <h3 id="preparation-detail-title">Preparation details</h3>
+              </div>
+              <button className="button button--quiet" type="button" onClick={() => setPreparationDetail(null)} aria-label="Close preparation details">Close</button>
+            </div>
+            <div className="preparation-detail__actions">
+              <button className="button button--quiet" type="button" onClick={() => void openArtifact(preparationDetail.preparationId, "report")}>Open original report</button>
+              <button className="button button--quiet" type="button" onClick={() => void openArtifact(preparationDetail.preparationId, "cv")}>Open verified CV</button>
+            </div>
+            <MarkdownPreview markdown={preparationDetail.reportMarkdown} />
+          </aside>
         ) : null}
-        <BrowserSessions
-          sessions={browserSessions}
-          busy={busy}
-          onRetry={(sessionId) => void retryBrowser(sessionId)}
-          onConfirmApplied={(sessionId) => void confirmApplied(sessionId)}
-        />
-      </main>
-    );
-  } else if (view === "activity") {
-    mainContent = (
-      <main className="activity-workspace">
-        <section className="activity-panel" aria-labelledby="activity-title">
-          <p className="eyebrow">Operational history</p>
-          <h2 id="activity-title">Activity</h2>
-          <p className="activity-summary">
-            {dashboard.actionRequiredRunCount} preserved discovery {dashboard.actionRequiredRunCount === 1 ? "window needs" : "windows need"} source-adapter cutover; {dashboard.pendingRunCount} executable runs are pending.
-          </p>
-          <ol>
-            {dashboard.activity.map((entry) => (
-              <li key={entry.id}>
-                <span>{entry.message}</span>
-                <time dateTime={entry.occurredAt}>{formatRelative(entry.occurredAt)}</time>
-              </li>
-            ))}
-          </ol>
-        </section>
       </main>
     );
   } else {
@@ -1127,7 +1309,7 @@ export function App() {
           </div>
         </div>
         <nav className="primary-nav" aria-label="Primary">
-          {(["queue", "applications", "activity"] as const).map((destination) => (
+          {(["queue", "applications"] as const).map((destination) => (
             <button
               className="primary-nav__item"
               type="button"
@@ -1167,6 +1349,13 @@ export function App() {
           <strong>That didn’t work.</strong>
           <span>{error}</span>
           <button type="button" onClick={() => setError(null)} aria-label="Dismiss error">×</button>
+        </div>
+      ) : null}
+
+      {notice ? (
+        <div className="notice-banner" role="status">
+          <span>{notice}</span>
+          <button type="button" onClick={() => setNotice(null)} aria-label="Dismiss notice">×</button>
         </div>
       ) : null}
 

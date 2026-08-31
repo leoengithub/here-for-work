@@ -29,14 +29,16 @@ describe("ATS trust boundary", () => {
     expect(detectAts("careers.example.com")).toBe("generic");
   });
 
-  it("keeps declarations and phone out of safe fill", () => {
-    expect(classifyField("Phone", "tel").classification).toBe("sensitive");
+  it("allows verified CV identity facts while keeping declarations sensitive", () => {
+    expect(classifyField("Phone", "tel").classification).toBe("safe_verified");
     expect(classifyField("Will you require sponsorship?", "select").classification).toBe("sensitive");
     expect(classifyField("Name", "text").classification).toBe("safe_verified");
     expect(classifyField("Email", "email").classification).toBe("safe_verified");
     expect(classifyField("", "email").classification).toBe("safe_verified");
     expect(classifyField("", "text", "given-name").classification).toBe("safe_verified");
-    expect(classifyField("LinkedIn URL", "url").classification).toBe("unknown");
+    expect(classifyField("LinkedIn URL", "url").classification).toBe("safe_verified");
+    expect(classifyField("GitHub URL", "url").classification).toBe("safe_verified");
+    expect(classifyField("Portfolio website", "url").classification).toBe("safe_verified");
     expect(classifyField("Tell us something", "textarea").classification).toBe("unknown");
   });
 
@@ -74,6 +76,46 @@ describe("ATS trust boundary", () => {
     const snapshot = await inspectForm(doc, new URL("https://apply.example.com/form"));
 
     expect(snapshot.fields.map((field) => field.id)).toEqual(["item", "item--2"]);
+  });
+
+  it("inspects only controls on the currently visible multi-step form panel", async () => {
+    const doc = new DOMParser().parseFromString(`
+      <form>
+        <section style="display: none">
+          <label for="first-name">First name</label>
+          <input id="first-name" autocomplete="given-name">
+        </section>
+        <section>
+          <label for="location">Current location</label>
+          <input id="location">
+        </section>
+      </form>
+    `, "text/html");
+
+    const snapshot = await inspectForm(doc, new URL("https://apply.example.com/form"));
+
+    expect(snapshot.fields.map((field) => field.id)).toEqual(["location"]);
+    expect(doc.querySelector<HTMLInputElement>("#first-name")?.dataset.hfwFieldId).toBeUndefined();
+    expect(doc.querySelector<HTMLInputElement>("#location")?.dataset.hfwFieldId).toBe("location");
+  });
+
+  it("does not fill a control that became hidden after inspection", async () => {
+    const doc = new DOMParser().parseFromString(`
+      <form><section><label for="email">Email</label><input id="email" type="email"></section></form>
+    `, "text/html");
+    const snapshot = await inspectForm(doc, new URL("https://apply.example.com/form"));
+    const section = doc.querySelector("section");
+    section?.setAttribute("hidden", "");
+    const plan = {
+      protocolVersion: 1,
+      snapshotFingerprint: snapshot.fingerprint,
+      instructions: [{ fieldId: "email", value: "verified@example.test", classification: "safe_verified" }],
+    } as unknown as FillPlan;
+
+    const result = await applyFillPlan(plan, snapshot.fingerprint, doc);
+
+    expect(result).toEqual([{ fieldId: "email", status: "skipped", reason: "Control is unavailable or unsupported." }]);
+    expect(doc.querySelector<HTMLInputElement>("#email")?.value).toBe("");
   });
 
   it("continues safe fields while skipping a non-safe instruction", async () => {

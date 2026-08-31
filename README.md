@@ -29,8 +29,8 @@ not inspect or fill the page again.
 
 The current package also contains run and browser-command leases with bounded retries,
 pre-migration backup, restore preflight, redacted diagnostics, provider/native-host
-boundary tests, and the approved full-width Queue / Applications / Activity information
-architecture. The rebuilt package passes automated checks and code-signature verification.
+boundary tests, and the approved full-width Queue / Applications information
+architecture with secondary System controls. The rebuilt package passes automated checks and code-signature verification.
 The real Ashby inspection, Codex preparation, career-ops answer persistence, and explicitly
 authorized fill/read-back/release paths now pass. Only verified Name and Email were filled;
 all other fields and the user-owned terminal action remained untouched. Greenhouse and
@@ -45,10 +45,13 @@ The first integration will use career-ops as the engine for verified profile dat
 - Application answers are drafted only after the live form has been inspected.
 - Every viable role remains available without an arbitrary daily cap.
 - The desktop-first queue is a direct list without a lightweight detail pane.
+- Queue filters live in System, start from verified career-ops profile preferences, and apply to current unprepared roles and future imports.
+- Applications keeps one current row per role; Details opens a formatted career-ops report preview instead of exposing a question-answer log.
+- Preparation artifacts are committed only after the typed evaluation gate passes. Unknown authorization remains visible and proceeds; only an explicit incompatibility blocks preparation. Undo preparation records Discarded and deletes only the generated report and tailored-CV artifacts.
 - The browser extension is a focused form-inspection, filling, and verification companion, not the primary interface.
 - Any public HTTPS application URL is accepted; source listings receive best-effort application-link resolution and unknown sites use conservative generic inspection.
 - ATS-specific adapters improve reliability but never act as a support allowlist.
-- Sensitive, unknown, unsupported, or unverifiable fields are skipped while safe fields continue.
+- Verified CV/profile facts including phone, LinkedIn, GitHub, portfolio, and location are safe when directly grounded; sensitive, unknown, unsupported, or unverifiable fields are skipped while safe fields continue.
 - HereForWork never submits an application or sends a message for the user.
 
 Read [PRODUCT.md](PRODUCT.md) before making product or interface decisions.

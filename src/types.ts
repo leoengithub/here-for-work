@@ -38,6 +38,7 @@ export interface DashboardState {
   recentlyDismissed: RoleSummary[];
   preparations: PreparationSummary[];
   activity: ActivityEntry[];
+  queueFilters: QueueFilters;
   lastSuccessfulDiscoveryAt: string | null;
   backgroundEnabled: boolean;
   adapterStatus: "not_configured" | "ready" | "action_required";
@@ -46,6 +47,20 @@ export interface DashboardState {
   actionRequiredRunCount: number;
   sources: SourceScheduleSummary[];
   recentRuns: RunSummary[];
+}
+
+export interface QueueFilters {
+  roleFamilies: string[];
+  seniority: string[];
+  locations: string[];
+  remoteAllowed: boolean;
+  requireAuthorizationPath: boolean;
+}
+
+export interface PrepareRoleOutcome {
+  dashboard: DashboardState;
+  disposition: "browser_started" | "prepared_browser_action_required" | "needs_decision" | "discarded";
+  message: string;
 }
 
 export interface PreparationSummary {

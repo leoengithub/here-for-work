@@ -21,9 +21,11 @@ The implemented read-only operations are:
 - `capabilities.get`: protocol version, operation allowlist, source ownership,
   and explicitly forbidden operations.
 - `health.check`: verifies the configured career-ops root, tracker, canonical
-  application history, and HereForWork-owned mirror-index path.
-- `history.snapshot`: asks career-ops' tracker to parse canonical history into a
-  HereForWork-owned derived index, then returns structured application records.
+  application history, pinned PDF browser, and writable adapter staging path.
+- `history.snapshot`: asks career-ops' tracker to return structured canonical
+  application records from its rebuildable SQLite index.
+- `profile.queue_filters.get`: derives editable queue-filter defaults from the
+  verified career-ops profile without exposing the profile contents to the renderer.
 
 There is deliberately no arbitrary command operation and no operation for
 submitting an application or sending a message.
@@ -43,21 +45,37 @@ The extension keeps provider execution separate from canonical writes:
    a conservative generic context instead of rejecting the role.
 2. HereForWork invokes the selected Codex or Claude subscription CLI in an
    ephemeral, tool-free working directory.
-3. `preparation.result.commit` rejects a stale context or invalid result, runs
+3. HereForWork evaluates the typed score, legitimacy, and authorization result before
+   artifact commit. A viable match continues when authorization is unknown or bounded
+   research is inconclusive; the uncertainty remains in the report and live legal fields
+   remain user-owned. Confirmed authorization or legitimacy incompatibilities are
+   discarded, while other material fit or legitimacy uncertainty returns to Needs decision.
+4. `preparation.result.commit` rejects a stale context or invalid result, runs
    career-ops fact and artifact checks, and atomically publishes the report and
    tailored CV references. It does not update application status.
-4. `answers.context.get` binds a prepared application to the exact hash of a
+5. `answers.context.get` binds a prepared application to the exact hash of a
    live, typed form snapshot. Job and form text remains marked as untrusted data.
-5. HereForWork invokes the selected provider against that bounded context.
-6. `answers.result.validate` returns only classified field instructions with
+6. HereForWork invokes the selected provider against that bounded context.
+7. `answers.result.validate` returns only classified field instructions with
    provenance. It rejects stale snapshots and never writes to a browser.
-7. After safe fields are read back, `answers.result.commit` accepts only the
+8. After safe fields are read back, `answers.result.commit` accepts only the
    bounded review items and verification results for that context hash. It
    invokes career-ops' fixed `application-answers.mjs` writer and returns the
    updated report hash.
-8. HereForWork queues `release_for_review` only after that canonical answer
+9. HereForWork queues `release_for_review` only after that canonical answer
    write succeeds. A failure leaves the browser session recoverable and retries
    only the answer writer, not inspection or filling.
+
+`preparation.artifacts.delete` is a narrowly scoped cleanup operation used by Undo
+preparation. It accepts only the committed preparation UUID plus the exact report and
+CV PDF paths recorded in the matching staging manifest. It deletes that report and the
+manifest's generated job/CV files; path validation prevents access outside the fixed
+HereForWork preparation layouts.
+
+Safe-fill values must either map to a known verified profile fact or appear exactly in
+the career-ops source named by the provider's provenance. This covers direct CV/profile
+facts such as phone, location, LinkedIn, GitHub, portfolio, education, and employment
+details without turning model output into an unverified fact source.
 
 Canonical decision operations are:
 

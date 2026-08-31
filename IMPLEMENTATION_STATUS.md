@@ -1,7 +1,7 @@
 # Implementation status
 
-Date: 2026-08-30
-Stage: generic public-HTTPS path implemented; unknown-site, Greenhouse, and Lever live observations remain
+Date: 2026-08-31
+Stage: generic public-HTTPS path live-proven; Greenhouse and Lever live observations remain
 
 ## Verified implementation evidence
 
@@ -9,11 +9,15 @@ Stage: generic public-HTTPS path implemented; unknown-site, Greenhouse, and Leve
 - Closing the window leaves one background core; reopening restores it.
 - Login launch is opt-in and has no menu-bar item.
 - The private proof snapshot imported 32 source occurrences into 30 normalized roles.
-- Canonical career-ops history reconciled 99 records and hid six deterministic matches,
-  leaving 24 new roles. Import and reconciliation were read-only; the later explicit
-  Prepare action created canonical Evaluated row 103 through career-ops' fixed writers.
+- Canonical career-ops history now reconciles all 104 Markdown records through
+  career-ops' own rebuildable SQLite index. HereForWork no longer redirects tracker
+  reads and merge synchronization into a private derived database.
 - Codex CLI and Claude CLI both passed the same structured, tool-free conformance probe
   from an empty HereForWork-owned working directory.
+- Finder-launched app processes provide a deterministic provider `PATH` beginning with
+  the selected CLI's directory. The npm Codex launcher can resolve its sibling Node
+  runtime without a terminal shell, and early CLI exits preserve bounded stderr instead
+  of collapsing to an opaque broken-pipe error.
 - Codex accepts both provider contracts through its strict structured-output path. A
   recursive regression test rejects unsupported `oneOf`, open objects, optional object
   properties, and untyped constants or enums before packaging.
@@ -22,7 +26,8 @@ Stage: generic public-HTTPS path implemented; unknown-site, Greenhouse, and Leve
 - SQLite integrity check returned `ok`; a restorable backup and readable JSON summary
   were created in local app data.
 - The package contains the MV3 extension and signed native messaging host.
-- Schema v9 treats the current discovery sources as staged. Missed windows are preserved
+- Schema v10 treats the current discovery sources as staged and persists best-effort
+  resolved application URLs. Missed windows are preserved
   as `action_required`, not inaccurately presented as executable queued work.
 - Active-source runs use ordered discover, reconcile, and notify steps with leases,
   crash recovery, three attempts per step, idempotent completion, cursor advancement only
@@ -38,10 +43,21 @@ Stage: generic public-HTTPS path implemented; unknown-site, Greenhouse, and Leve
   mode-0600 recovery file. Retries reuse it instead of paying for or accepting a
   different model result. Long provider commands run asynchronously so the window and
   Cancel action remain responsive.
-- The renderer follows the approved full-width Queue / Applications / Activity
-  information architecture. Prepare creates a career-ops report and verified tailored CV;
-  Applications can display the report and open the verified CV; Discard and Undo use
-  canonical writers. Active provider work can be cancelled safely and retried.
+- The renderer follows the approved full-width Queue / Applications information
+  architecture with secondary System controls and no Activity tab. Applications keeps
+  one current row per role and opens the formatted career-ops Markdown report in a
+  right-side details panel rather than showing a question-answer log.
+- Queue filters are initialized from verified career-ops preferences, remain editable in
+  System, and apply to both current unprepared roles and future imports. The bounded
+  local filter does not replace career-ops evaluation or scoring.
+- Prepare evaluates the role before committing artifacts. Viable matches continue into
+  report/CV generation and an automatic new-tab browser handoff when authorization is
+  unknown or bounded research is inconclusive. Confirmed authorization or legitimacy
+  incompatibilities are discarded; other material fit or legitimacy uncertainty returns
+  to Needs decision without generating artifacts.
+- Undo preparation records Discarded through the canonical adapter, removes only the
+  generated report and tailored-CV preparation artifacts, and clears local preparation
+  and browser state. It is unavailable after Applied is recorded.
 - Duplicate provenance remains visible as a source-occurrence count on each normalized
   role rather than being hidden by consolidation.
 - Safe form fills are not released for human review until the validated answer snapshot
@@ -50,15 +66,17 @@ Stage: generic public-HTTPS path implemented; unknown-site, Greenhouse, and Leve
 - JSON Schema contracts generate compiler-checked TypeScript declarations through the
   repository-local `generate:contracts` command.
 - Opening an older personal-proof database creates a pre-migration backup before
-  migrating to schema v9. The live database and backup copies pass SQLite integrity
+  migrating to schema v10. The live database and backup copies pass SQLite integrity
   and restore-preflight checks.
 - The selected ordinary Chrome profile and private extension reconnect through the
   signed native host without WebDriver, CDP, remote debugging, or automation flags.
 - A real Ashby `/application` page was inspected: 43 fields were identified, only two
   classified safe for verified facts, and 41 left to the user.
-- The authorized real-form proof filled and read back only verified Name and Email.
-  LinkedIn, GitHub, work-authorization declarations, sponsorship, past-work answers,
-  diversity controls, file inputs, and the terminal action remained untouched. The
+- The original authorized real-form proof filled and read back only verified Name and Email.
+  The current safe-field contract also permits phone, current location, LinkedIn, GitHub,
+  portfolio, and other discrete facts when career-ops traces them exactly to verified
+  CV/profile sources. Work-authorization declarations, sponsorship, past-work answers,
+  diversity controls, file inputs, and the terminal action remain untouched. The
   browser session reached `review_required`; the user-owned Submit button was not clicked.
 - Live recovery testing found and fixed three extension races: a stale native port after
   reload, duplicate identical ATS tabs selecting an older content script, and a new tab
@@ -70,19 +88,42 @@ Stage: generic public-HTTPS path implemented; unknown-site, Greenhouse, and Leve
 - The packaged app completed a real Codex preparation for that role. career-ops owns
   report `reports/103-ashby-2026-08-30.md`, a two-page A4 verified PDF, canonical
   Evaluated tracker row 103, and matching SHA-256 references in HereForWork.
+- Provider result context is bound by HereForWork to the exact synchronous invocation
+  context instead of relying on a model to reproduce a 64-character hash. The adapter
+  still recomputes the context before committing, so a real career-ops source change
+  during generation remains a fail-closed stale-result error.
+- Context hashes use recursively canonicalized JSON, so the same typed preparation
+  context survives the browser-to-Rust JSON round trip regardless of object key order.
+  Version and hash mismatches now identify which invariant failed.
 - career-ops health now checks the executable for its pinned Playwright Chromium, not
   merely the presence of `generate-pdf.mjs`; the missing runtime found by the live proof
   is installed on this Mac.
 - The approved rebuildable `src-tauri/target/debug` directory was removed before the
   current validation run. No source or preserved evidence was removed; subsequent builds
   recreated only the artifacts they needed.
+- A user-authorized KoreLabs proof exercised the generic multi-step form path. The first
+  step filled and read back only verified first name, last name, and email. Later live
+  steps classified phone as sensitive and location and profile links as suggestions;
+  no such field was auto-filled. The grounded role-motivation answer was drafted only
+  after its live question appeared. The final CV upload remained empty and the visible
+  **Submit application** control remained untouched.
+- A user-confirmed external application was recorded through the canonical Applied
+  writer without reopening its form. The rebuilt packaged app reconciled the new tracker
+  row, increased its hidden-history count, and removed the role from Queue. No browser
+  command or page action was issued during reconciliation.
+- Multi-step inspection now clears prior field markers and excludes controls hidden by
+  attributes, ARIA, inline style, or computed style. A refill reuses an existing
+  `review_required` browser session instead of reopening the original URL and resetting
+  the form.
 
 ## Current validation
 
 - React and extension TypeScript checks pass.
-- Twenty-eight extension-focused Vitest tests and nine adapter tests pass in the generic-form change set; the full suite is re-run before packaging.
-- Thirty-one Rust core/native-host tests pass across all targets: 27 library tests and
-  four native-host tests.
+- Thirty extension-focused Vitest tests and ten adapter tests pass, including hidden
+  multi-step controls, post-snapshot visibility changes, and JSON key-order-independent
+  context hashing.
+- Forty-one Rust core/native-host tests pass across all targets: 37 library tests and four
+  native-host tests.
 - Rust formatting and Clippy with warnings denied pass.
 - The all-sites extension and ad-hoc-signed Apple Silicon app build successfully.
 - The current package passes strict code-signature verification and contains the answer,
@@ -132,31 +173,33 @@ Chrome profile. A new installation still follows these steps:
 No LinkedIn or ATS credentials are requested by HereForWork. Sign-in remains inside the
 chosen ordinary Chrome profile. The current live page is public and required no login.
 
-The Ashby transmission checkpoint is complete under the user's specific authorization.
-HereForWork filled only verified Name and Email, released the page for review, and did
-not touch **Submit Application**. Future real forms require their own scoped authority
-before transmitting personal data.
+The Ashby and KoreLabs transmission checkpoints are complete under the user's specific
+authorization. The latest packaged-app refill reused the existing KoreLabs tab, inspected
+the terminal upload step, found no compatible visible fields, and released it for manual
+review. The CV upload is still empty, the canonical row remains **Evaluated**, and neither
+**Submit Application** nor **Submit application** was touched. Future real forms require
+their own scoped authority before transmitting personal data.
 
 ## Deliberately not cut over
 
 - The two existing scheduled workflows are not paused or edited.
 - No Gmail state, career-ops profile source, credentials, or scheduled task was mutated.
   Canonical history changed only through the explicit Prepare action described above.
-- Real report/CV generation and the complete Ashby inspect, draft, fill, verify, persist,
-  and release-to-review path have been exercised. No application was submitted.
+- Real report/CV generation plus Ashby and generic KoreLabs inspect, draft, fill, verify,
+  persist, and release-to-review paths have been exercised. No application was submitted.
 - Developer ID notarization and stable extension distribution remain post-personal-proof.
 
 ## Remaining proof boundary
 
 The typed writable adapter runs only fixed career-ops entry points. The generic public-HTTPS
-path is implemented with per-field fallback. The next checkpoints are one unknown-site live
-observation plus observed Greenhouse and Lever variants, each ending at review without submission.
+path is live-proven with per-field fallback. The next checkpoints are observed Greenhouse
+and Lever variants, each ending at review without submission.
 Scheduled workflows, Gmail, credentials, and career-ops profile facts remain outside
 automated test mutation.
 
 ## Obsidian decision
 
-This iteration has private operational evidence: the selected Chrome profile, live
-Ashby URL, canonical report/tracker references, field values, and recovery observations.
-Record the non-sensitive outcome and private references in the Obsidian personal-proof
-journal; keep only generalized behavior and redacted counts in this repository.
+This iteration has private operational evidence: the selected Chrome profile, live Ashby
+and KoreLabs URLs, canonical report/tracker references, field values, and recovery
+observations. The non-sensitive outcome and private references belong in the Obsidian
+personal-proof journal; only generalized behavior and redacted counts stay here.

@@ -12,8 +12,8 @@ use std::sync::{Arc, Mutex};
 use adapter::{AdapterConfig, CanonicalRoleInput, PreparationRoleInput, discover_executable};
 use domain::{
     BrowserSessionSummary, BrowserSetup, CheckResult, ChromeProfile, DashboardState, ImportResult,
-    IntegrationHealth, MaintenanceResult, PreparationDetail, ReconcileResult, RestorePreflight,
-    ScheduledRun,
+    IntegrationHealth, MaintenanceResult, PreparationDetail, PrepareRoleOutcome, QueueFilters,
+    ReconcileResult, RestorePreflight, ScheduledRun,
 };
 use store::Store;
 use tauri::Manager;
@@ -112,6 +112,21 @@ fn set_background_enabled(
 }
 
 #[tauri::command]
+fn save_queue_filters(
+    filters: QueueFilters,
+    state: tauri::State<'_, AppState>,
+) -> Result<DashboardState, String> {
+    let mut store = state
+        .store
+        .lock()
+        .map_err(|_| "Operational store lock was poisoned".to_string())?;
+    store
+        .set_queue_filters(&filters)
+        .map_err(|error| error.to_string())?;
+    store.dashboard().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn request_notification_permission(app: tauri::AppHandle) -> Result<bool, String> {
     let notifications = app.notification();
     if notifications
@@ -172,13 +187,55 @@ async fn run_provider_probe(
     )
 }
 
+enum PreparationGate {
+    Proceed,
+    NeedsDecision(&'static str),
+    Discard(&'static str),
+}
+
+fn preparation_gate(result: &serde_json::Value) -> Result<PreparationGate, String> {
+    let score = result
+        .get("score")
+        .and_then(serde_json::Value::as_f64)
+        .ok_or("Provider result omitted its match score")?;
+    let legitimacy = result
+        .get("legitimacy")
+        .and_then(serde_json::Value::as_str)
+        .ok_or("Provider result omitted legitimacy")?;
+    let authorization = result
+        .get("authorizationConfidence")
+        .and_then(serde_json::Value::as_str)
+        .ok_or("Provider result omitted authorization confidence")?;
+    if authorization == "problem" {
+        return Ok(PreparationGate::Discard(
+            "Preparation stopped because career-ops confirmed an authorization conflict.",
+        ));
+    }
+    if legitimacy == "Suspicious" {
+        return Ok(PreparationGate::Discard(
+            "Preparation stopped because career-ops found a legitimacy blocker.",
+        ));
+    }
+    if score < 4.0 {
+        return Ok(PreparationGate::NeedsDecision(
+            "Preparation stopped before creating files because the verified match score is below 4.0.",
+        ));
+    }
+    if legitimacy == "Proceed with Caution" {
+        return Ok(PreparationGate::NeedsDecision(
+            "Preparation stopped before creating files because legitimacy still needs review.",
+        ));
+    }
+    Ok(PreparationGate::Proceed)
+}
+
 #[tauri::command]
 async fn prepare_role(
     role_id: String,
     provider: provider::ProviderKind,
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
-) -> Result<DashboardState, String> {
+) -> Result<PrepareRoleOutcome, String> {
     let provider_name = match provider {
         provider::ProviderKind::Codex => "codex",
         provider::ProviderKind::Claude => "claude",
@@ -276,7 +333,15 @@ async fn prepare_role(
                 std::time::Duration::from_secs(600),
                 Some(&cancellation),
             ) {
-                Ok(result) => result,
+                Ok(result) => match provider::bind_context_hash(result, &context.context_hash) {
+                    Ok(result) => result,
+                    Err(error) => {
+                        if let Ok(mut store) = state.store.lock() {
+                            let _ = store.fail_preparation(&work.id, "invalid_provider_result");
+                        }
+                        return Err(error);
+                    }
+                },
                 Err(error) => {
                     if let Ok(mut store) = state.store.lock() {
                         if cancellation.load(Ordering::Relaxed) {
@@ -311,6 +376,54 @@ async fn prepare_role(
             let _ = store.fail_preparation(&work.id, "stale_provider_result");
         }
         return Err("Provider result does not match the current preparation context".to_string());
+    }
+    match preparation_gate(&result)? {
+        PreparationGate::Proceed => {}
+        PreparationGate::NeedsDecision(message) => {
+            let mut store = state
+                .store
+                .lock()
+                .map_err(|_| "Operational store lock was poisoned".to_string())?;
+            store
+                .hold_preparation_for_decision(&work.id, "preparation_gate_needs_decision")
+                .map_err(|error| error.to_string())?;
+            let dashboard = store.dashboard().map_err(|error| error.to_string())?;
+            drop(store);
+            let _ = app
+                .notification()
+                .builder()
+                .title("Role needs your decision")
+                .body(message)
+                .show();
+            return Ok(PrepareRoleOutcome {
+                dashboard,
+                disposition: "needs_decision".to_string(),
+                message: message.to_string(),
+            });
+        }
+        PreparationGate::Discard(message) => {
+            {
+                let mut store = state
+                    .store
+                    .lock()
+                    .map_err(|_| "Operational store lock was poisoned".to_string())?;
+                store
+                    .cancel_preparation(&work.id)
+                    .map_err(|error| error.to_string())?;
+            }
+            let dashboard = discard_role_internal(&role_id, &state)?;
+            let _ = app
+                .notification()
+                .builder()
+                .title("Role removed from the queue")
+                .body(message)
+                .show();
+            return Ok(PrepareRoleOutcome {
+                dashboard,
+                disposition: "discarded".to_string(),
+                message: message.to_string(),
+            });
+        }
     }
     let committed =
         match state
@@ -361,15 +474,35 @@ async fn prepare_role(
             &committed.artifacts.cv_pdf.sha256,
         )
         .map_err(|error| error.to_string())?;
-    let dashboard = store.dashboard().map_err(|error| error.to_string())?;
     drop(store);
+    let browser_result = start_application_browser_session(&work.id, &state);
+    let (disposition, message) = match browser_result {
+        Ok(_) => (
+            "browser_started",
+            "The report and verified CV are ready. The application opened in a new Chrome tab for inspection and safe filling.",
+        ),
+        Err(_) => (
+            "prepared_browser_action_required",
+            "The report and verified CV are ready, but the browser handoff needs your attention in Applications.",
+        ),
+    };
+    let dashboard = state
+        .store
+        .lock()
+        .map_err(|_| "Operational store lock was poisoned".to_string())?
+        .dashboard()
+        .map_err(|error| error.to_string())?;
     let _ = app
         .notification()
         .builder()
         .title("Application materials prepared")
-        .body("The career-ops report and verified CV are ready. Continue in the browser when you are ready.")
+        .body(message)
         .show();
-    Ok(dashboard)
+    Ok(PrepareRoleOutcome {
+        dashboard,
+        disposition: disposition.to_string(),
+        message: message.to_string(),
+    })
 }
 
 #[tauri::command]
@@ -558,7 +691,14 @@ fn continue_in_browser(
     preparation_id: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<BrowserSessionSummary, String> {
-    let (profile_id, session) = {
+    start_application_browser_session(&preparation_id, &state)
+}
+
+fn start_application_browser_session(
+    preparation_id: &str,
+    state: &AppState,
+) -> Result<BrowserSessionSummary, String> {
+    let (profile_id, session, reuse_existing_page) = {
         let mut store = state
             .store
             .lock()
@@ -567,10 +707,13 @@ fn continue_in_browser(
             .selected_chrome_profile()
             .map_err(|error| error.to_string())?
             .ok_or("Select and connect a Chrome profile first")?;
-        let session = store
-            .queue_application_session(&preparation_id)
+        let reuse_existing_page = store
+            .has_review_required_application_session(preparation_id)
             .map_err(|error| error.to_string())?;
-        (profile_id, session)
+        let session = store
+            .queue_application_session(preparation_id)
+            .map_err(|error| error.to_string())?;
+        (profile_id, session, reuse_existing_page)
     };
     let url = session
         .page_url
@@ -578,13 +721,26 @@ fn continue_in_browser(
         .ok_or("The application session has no URL")?;
     let chrome = PathBuf::from("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome");
     if !chrome.is_file() {
+        if let Ok(mut store) = state.store.lock() {
+            let _ = store.fail_browser_session_start(&session.id, "chrome_not_installed");
+        }
         return Err("Google Chrome is not installed in /Applications.".to_string());
     }
-    std::process::Command::new(chrome)
-        .arg(format!("--profile-directory={profile_id}"))
-        .arg(url)
-        .spawn()
-        .map_err(|error| format!("Could not open the selected Chrome profile: {error}"))?;
+    if !reuse_existing_page {
+        if let Err(error) = std::process::Command::new(chrome)
+            .arg(format!("--profile-directory={profile_id}"))
+            .arg("--new-tab")
+            .arg(url)
+            .spawn()
+        {
+            if let Ok(mut store) = state.store.lock() {
+                let _ = store.fail_browser_session_start(&session.id, "chrome_launch_failed");
+            }
+            return Err(format!(
+                "Could not open the selected Chrome profile: {error}"
+            ));
+        }
+    }
     Ok(session)
 }
 
@@ -763,6 +919,8 @@ fn start_answer_worker(app: tauri::AppHandle) -> Result<(), String> {
                         std::time::Duration::from_secs(600),
                     )
                     .map_err(|_| "answer_provider_failed".to_string())?;
+                    let result = provider::bind_context_hash(result, &context.context_hash)
+                        .map_err(|_| "invalid_answer_provider_result".to_string())?;
                     if result
                         .get("contextHash")
                         .and_then(serde_json::Value::as_str)
@@ -1022,13 +1180,17 @@ fn dismiss_role(
     role_id: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<DashboardState, String> {
+    discard_role_internal(&role_id, &state)
+}
+
+fn discard_role_internal(role_id: &str, state: &AppState) -> Result<DashboardState, String> {
     let effect = {
         let mut store = state
             .store
             .lock()
             .map_err(|_| "Operational store lock was poisoned".to_string())?;
         store
-            .begin_discard_effect(&role_id)
+            .begin_discard_effect(role_id)
             .map_err(|error| error.to_string())?
     };
     let input = CanonicalRoleInput {
@@ -1058,11 +1220,73 @@ fn dismiss_role(
         .map_err(|_| "Operational store lock was poisoned".to_string())?;
     store
         .complete_discard_effect(
-            &role_id,
+            role_id,
             &effect.idempotency_key,
             canonical.tracker_id,
             &canonical.status,
         )
+        .map_err(|error| error.to_string())?;
+    store.dashboard().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn undo_preparation(
+    preparation_id: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<DashboardState, String> {
+    let work = {
+        let mut store = state
+            .store
+            .lock()
+            .map_err(|_| "Operational store lock was poisoned".to_string())?;
+        store
+            .begin_preparation_cleanup(&preparation_id)
+            .map_err(|error| error.to_string())?
+    };
+    let input = CanonicalRoleInput {
+        idempotency_key: work.effect.idempotency_key.clone(),
+        event_date: madrid_today(),
+        company: work.effect.role.company.clone(),
+        title: work.effect.role.title.clone(),
+        location: work.effect.role.location.clone(),
+        url: work.effect.role.application_url.clone(),
+    };
+    let canonical = match state.adapter.discard_role(&input) {
+        Ok(canonical) => canonical,
+        Err(error) => {
+            if let Ok(mut store) = state.store.lock() {
+                let _ = store.fail_preparation_cleanup(
+                    &work.preparation_id,
+                    &work.effect.idempotency_key,
+                    "canonical_writer_failed",
+                );
+            }
+            return Err(error.to_string());
+        }
+    };
+    if canonical.idempotency_key != work.effect.idempotency_key {
+        return Err("career-ops returned a mismatched idempotency key".to_string());
+    }
+    if let Err(error) = state.adapter.delete_preparation_artifacts(
+        &work.preparation_id,
+        &work.report_path,
+        &work.cv_pdf_path,
+    ) {
+        if let Ok(mut store) = state.store.lock() {
+            let _ = store.fail_preparation_cleanup(
+                &work.preparation_id,
+                &work.effect.idempotency_key,
+                "artifact_cleanup_failed",
+            );
+        }
+        return Err(error.to_string());
+    }
+    let mut store = state
+        .store
+        .lock()
+        .map_err(|_| "Operational store lock was poisoned".to_string())?;
+    store
+        .complete_preparation_cleanup(&work, canonical.tracker_id, &canonical.status)
         .map_err(|error| error.to_string())?;
     store.dashboard().map_err(|error| error.to_string())
 }
@@ -1213,15 +1437,23 @@ pub fn run() {
             if !background_enabled && app.autolaunch().is_enabled().unwrap_or(false) {
                 let _ = app.autolaunch().disable();
             }
+            let career_ops_root = home_dir.join("Work/career-ops");
+            let tracker_index_path = career_ops_root.join("data/applications.db");
+            let adapter = AdapterConfig {
+                node_path,
+                script_path,
+                career_ops_root,
+                tracker_index_path,
+                staging_path: career_ops_staging_path,
+            };
+            if !store.queue_filters_configured()? {
+                if let Ok(defaults) = adapter.queue_filter_defaults() {
+                    store.set_queue_filters(&defaults)?;
+                }
+            }
             app.manage(AppState {
                 store: Mutex::new(store),
-                adapter: AdapterConfig {
-                    node_path,
-                    script_path,
-                    career_ops_root: home_dir.join("Work/career-ops"),
-                    mirror_index_path: app_data_dir.join("career-ops-history.sqlite3"),
-                    staging_path: career_ops_staging_path,
-                },
+                adapter,
                 codex_path: discover_executable(&home_dir, "codex"),
                 claude_path: discover_executable(&home_dir, "claude"),
                 provider_schema_path,
@@ -1253,6 +1485,7 @@ pub fn run() {
             get_dashboard,
             import_dataset,
             set_background_enabled,
+            save_queue_filters,
             request_notification_permission,
             send_test_notification,
             queue_manual_discovery,
@@ -1276,6 +1509,7 @@ pub fn run() {
             check_integrations,
             reconcile_application_history,
             dismiss_role,
+            undo_preparation,
             undo_dismissal
         ])
         .build(tauri::generate_context!())
@@ -1296,6 +1530,8 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
+    use super::PreparationGate;
+
     #[test]
     fn preparation_artifacts_cannot_escape_career_ops_root() {
         let directory = tempfile::tempdir().unwrap();
@@ -1306,5 +1542,63 @@ mod tests {
 
         assert!(super::checked_career_ops_artifact(&root, "report.md").is_ok());
         assert!(super::checked_career_ops_artifact(&root, "../outside.md").is_err());
+    }
+
+    #[test]
+    fn preparation_gate_allows_viable_matches_when_authorization_is_not_explicitly_blocked() {
+        for authorization in ["excellent", "interesting", "investigate"] {
+            let result = serde_json::json!({
+                "score": 4.0,
+                "legitimacy": "High Confidence",
+                "authorizationConfidence": authorization
+            });
+
+            assert!(matches!(
+                super::preparation_gate(&result).unwrap(),
+                PreparationGate::Proceed
+            ));
+        }
+    }
+
+    #[test]
+    fn preparation_gate_holds_uncertain_roles_before_artifacts() {
+        for result in [
+            serde_json::json!({
+                "score": 3.9,
+                "legitimacy": "High Confidence",
+                "authorizationConfidence": "excellent"
+            }),
+            serde_json::json!({
+                "score": 4.5,
+                "legitimacy": "Proceed with Caution",
+                "authorizationConfidence": "excellent"
+            }),
+        ] {
+            assert!(matches!(
+                super::preparation_gate(&result).unwrap(),
+                PreparationGate::NeedsDecision(_)
+            ));
+        }
+    }
+
+    #[test]
+    fn preparation_gate_discards_confirmed_blockers_before_artifacts() {
+        for result in [
+            serde_json::json!({
+                "score": 5.0,
+                "legitimacy": "High Confidence",
+                "authorizationConfidence": "problem"
+            }),
+            serde_json::json!({
+                "score": 5.0,
+                "legitimacy": "Suspicious",
+                "authorizationConfidence": "excellent"
+            }),
+        ] {
+            assert!(matches!(
+                super::preparation_gate(&result).unwrap(),
+                PreparationGate::Discard(_)
+            ));
+        }
     }
 }

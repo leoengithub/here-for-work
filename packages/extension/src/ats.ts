@@ -41,6 +41,17 @@ function labelFor(element: HTMLInputElement | HTMLTextAreaElement | HTMLSelectEl
   );
 }
 
+export function isControlVisible(element: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement): boolean {
+  for (let current: Element | null = element; current; current = current.parentElement) {
+    if (current.hasAttribute("hidden") || current.getAttribute("aria-hidden") === "true") return false;
+    const inlineStyle = (current as HTMLElement).style;
+    if (inlineStyle?.display === "none" || inlineStyle?.visibility === "hidden" || inlineStyle?.visibility === "collapse") return false;
+    const style = current.ownerDocument.defaultView?.getComputedStyle(current);
+    if (style?.display === "none" || style?.visibility === "hidden" || style?.visibility === "collapse") return false;
+  }
+  return true;
+}
+
 export function classifyField(label: string, inputType: string, autocomplete = ""): { classification: FieldClassification; reason: string } {
   const normalized = `${label} ${inputType} ${autocomplete}`.toLowerCase();
   const semanticLabel = label.trim().toLowerCase();
@@ -48,7 +59,7 @@ export function classifyField(label: string, inputType: string, autocomplete = "
   if (/password|social security|passport|national id|date of birth|birth date/.test(normalized)) {
     return { classification: "sensitive", reason: "Identity or account data requires the user." };
   }
-  if (/salary|compensation|work authori[sz]ation|sponsor|visa|gender|race|ethnic|veteran|disab|pronoun|phone/.test(normalized)) {
+  if (/salary|compensation|work authori[sz]ation|sponsor|visa|gender|race|ethnic|veteran|disab|pronoun/.test(normalized)) {
     return { classification: "sensitive", reason: "A sensitive declaration requires explicit review." };
   }
   if (inputType === "checkbox" || inputType === "radio") {
@@ -56,9 +67,10 @@ export function classifyField(label: string, inputType: string, autocomplete = "
   }
   const autocompleteTokens = autocomplete.toLowerCase().split(/\s+/);
   if (inputType === "email"
-      || autocompleteTokens.some((token) => ["name", "given-name", "family-name", "email"].includes(token))
+      || inputType === "tel"
+      || autocompleteTokens.some((token) => ["name", "given-name", "family-name", "email", "tel", "country", "country-name"].includes(token))
       || /^(first name|given name|last name|family name|surname|full name|your name|name)\b/.test(semanticLabel)
-      || /e-?mail/.test(semanticLabel)) {
+      || /e-?mail|phone|mobile|telephone|linkedin|github|portfolio|personal website|website url|current location|city|country|current company|current employer|current job title|school|university|college|degree|field of study|graduation year/.test(semanticLabel)) {
     return { classification: "safe_verified", reason: "May be filled only from a verified career-ops fact." };
   }
   return { classification: "unknown", reason: "No allowlisted meaning was recognized." };
@@ -69,11 +81,17 @@ export async function inspectForm(doc: Document = document, pageUrl = new URL(do
     throw new Error("This browser session reports automation control. Reopen the page in an ordinary Chrome profile and complete it manually.");
   }
   const ats = detectAts(pageUrl.hostname);
-  const controls = Array.from(
+  const allControls = Array.from(
     doc.querySelectorAll<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>("input, textarea, select"),
-  ).filter((element) => {
+  );
+  for (const element of allControls) delete element.dataset.hfwFieldId;
+  const controls = allControls.filter((element) => {
     const inputType = element instanceof HTMLInputElement ? element.type.toLowerCase() : "";
-    return !element.disabled && inputType !== "hidden" && inputType !== "submit" && inputType !== "button";
+    return !element.disabled
+      && inputType !== "hidden"
+      && inputType !== "submit"
+      && inputType !== "button"
+      && isControlVisible(element);
   });
   const ids = new Map<string, number>();
   const fields: FormField[] = controls.map((element, index) => {

@@ -7,7 +7,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 const adapter = fileURLToPath(new URL("./adapter.mjs", import.meta.url));
-const { fetchJob } = await import("./adapter.mjs");
+const { contextHash, fetchJob } = await import("./adapter.mjs");
 
 function request(payload, env = {}) {
   return new Promise((resolve, reject) => {
@@ -126,6 +126,43 @@ test("generic discovery does not follow redirects to a local target", async (con
   assert.equal(job.descriptionAvailable, false);
 });
 
+test("preparation context hash is stable across typed JSON key reordering", () => {
+  const role = {
+    company: "Example Co",
+    title: "Frontend Engineer",
+    location: "Remote Europe",
+    url: "https://example.test/jobs/1",
+  };
+  const browserJob = {
+    title: "Frontend Engineer",
+    company: "Example Co",
+    location: "Remote Europe",
+    url: "https://example.test/apply/1",
+    sourceUrl: "https://example.test/jobs/1",
+    description: "A sufficiently descriptive live job fixture.",
+    descriptionAvailable: true,
+    postedAt: null,
+    provider: "generic",
+  };
+  const rustRoundTripJob = {
+    company: browserJob.company,
+    description: browserJob.description,
+    descriptionAvailable: browserJob.descriptionAvailable,
+    location: browserJob.location,
+    postedAt: browserJob.postedAt,
+    provider: browserJob.provider,
+    sourceUrl: browserJob.sourceUrl,
+    title: browserJob.title,
+    url: browserJob.url,
+  };
+  const sources = [{ relativePath: "cv.md", sha256: "a".repeat(64) }];
+
+  assert.equal(
+    contextHash(role, browserJob, sources),
+    contextHash(role, rustRoundTripJob, sources),
+  );
+});
+
 async function fakeCareerOps() {
   const root = await mkdtemp(join(tmpdir(), "hfw-career-ops-"));
   const staging = join(root, "staging");
@@ -140,7 +177,27 @@ async function fakeCareerOps() {
   for (const path of ["modes/_shared.md", "modes/oferta.md", "modes/pdf.md", "modes/apply.md", "modes/_profile.md", "modes/heuristics/recruiter-side.md", "cv.md"]) {
     await writeFile(join(root, path), `# ${path}\nVerified fixture facts for Test Candidate at Example Co.\n`);
   }
-  await writeFile(join(root, "config/profile.yml"), "name: Test Candidate\nemail: test@example.test\nlocation: Madrid\n");
+  await writeFile(join(root, "config/profile.yml"), `candidate:
+  full_name: "Test Candidate"
+  email: "test@example.test"
+  phone: "+34 600 000 000"
+  location: "Madrid, Spain"
+  linkedin: "https://linkedin.example/test"
+  portfolio_url: "https://portfolio.example/test"
+  github: "https://github.example/test"
+target_roles:
+  primary:
+    - "Frontend Engineer"
+  archetypes:
+    - name: "Frontend Engineer"
+      level: "Experienced"
+      fit: "primary"
+compensation:
+  location_flexibility: "Target geography: Spain first, followed by Lisbon. Remote roles are an active search lane when they provide sponsorship or another authorization path."
+location:
+  country: "Spain"
+  city: "Madrid"
+`);
   await writeFile(join(root, "config/cv-facts.json"), "{\"allow_metrics\":[],\"allow_facts\":[],\"forbidden_phrases\":[],\"warn_phrases\":[]}\n");
   await writeFile(join(root, "providers/_http.mjs"), "export async function fetchJson() { return {}; }\n");
   const chromiumFixture = join(root, "fixture-chromium");
@@ -244,7 +301,7 @@ async function fakeCareerOps() {
     staging,
     env: {
       HFW_CAREER_OPS_ROOT: root,
-      HFW_CAREER_OPS_INDEX: join(root, "mirror.sqlite3"),
+      HFW_CAREER_OPS_INDEX: join(root, "applications.db"),
       HFW_CAREER_OPS_STAGING: staging,
     },
   };
@@ -261,6 +318,17 @@ test("provider-neutral preparation commits only through fixed career-ops writers
   assert.equal(health.ok, true);
   assert.equal(health.result.ready, true);
   assert.equal(health.result.checks.playwrightChromium, true);
+  assert.equal(health.result.checks.trackerIndexConfigured, true);
+  const queueFilters = await request({
+    id: "queue-filter-defaults",
+    protocolVersion: 1,
+    operation: "profile.queue_filters.get",
+    input: {},
+  }, fixture.env);
+  assert.equal(queueFilters.ok, true);
+  assert.deepEqual(queueFilters.result.roleFamilies, ["Frontend Engineer"]);
+  assert.equal(queueFilters.result.remoteAllowed, true);
+  assert.equal(queueFilters.result.requireAuthorizationPath, true);
   const preparationId = "55555555-5555-4555-8555-555555555555";
   const role = {
     preparationId,
@@ -375,7 +443,7 @@ test("provider-neutral preparation commits only through fixed career-ops writers
     fields: [
       { id: "email", label: "Email", control: "input", inputType: "email", required: true, options: [], classification: "safe_verified", reason: "Verified profile fact." },
       { id: "why", label: "Why this role?", control: "textarea", inputType: "textarea", required: true, options: [], classification: "unknown", reason: "Needs grounded drafting." },
-      { id: "phone", label: "Phone", control: "input", inputType: "tel", required: false, options: [], classification: "sensitive", reason: "Requires user review." },
+      { id: "phone", label: "Phone", control: "input", inputType: "tel", required: false, options: [], classification: "safe_verified", reason: "Verified profile fact." },
       { id: "unlabeled", label: "", control: "input", inputType: "text", required: false, options: [], classification: "unknown", reason: "No visible label." },
     ],
   };
@@ -392,7 +460,7 @@ test("provider-neutral preparation commits only through fixed career-ops writers
     answers: [
       { fieldId: "email", answer: "untrusted-model@example.test", provenance: ["config/profile.yml"] },
       { fieldId: "why", answer: "The role matches my verified React and accessibility work.", provenance: ["cv.md", "reports/042-example-co-2026-08-30.md"] },
-      { fieldId: "phone", answer: null, provenance: [] },
+      { fieldId: "phone", answer: "+34 600 000 000", provenance: ["config/profile.yml"] },
       { fieldId: "unlabeled", answer: null, provenance: [] },
     ],
   };
@@ -405,9 +473,10 @@ test("provider-neutral preparation commits only through fixed career-ops writers
   assert.equal(answers.ok, true);
   assert.deepEqual(answers.result.fillPlan.instructions, [
     { fieldId: "email", value: "test@example.test", classification: "safe_verified" },
+    { fieldId: "phone", value: "+34 600 000 000", classification: "safe_verified" },
   ]);
   assert.equal(answers.result.reviewItems.find((item) => item.fieldId === "why").decision, "suggest");
-  assert.equal(answers.result.reviewItems.find((item) => item.fieldId === "phone").decision, "skip");
+  assert.equal(answers.result.reviewItems.find((item) => item.fieldId === "phone").decision, "fill");
 
   const answerCommit = await request({
     id: "answer-commit",
@@ -421,7 +490,7 @@ test("provider-neutral preparation commits only through fixed career-ops writers
       fillResults: [
         { fieldId: "email", status: "verified", reason: null },
         { fieldId: "why", status: "skipped", reason: "User review required." },
-        { fieldId: "phone", status: "skipped", reason: "Sensitive field." },
+        { fieldId: "phone", status: "verified", reason: null },
         { fieldId: "unlabeled", status: "skipped", reason: "No visible label." },
       ],
       cvPdfPath: commit.result.artifacts.cvPdf.path,
@@ -434,8 +503,23 @@ test("provider-neutral preparation commits only through fixed career-ops writers
   assert.match(reportWithAnswers, /## Application Answers/);
   assert.match(reportWithAnswers, /\*\*Email:\*\* test@example\.test/);
   assert.match(reportWithAnswers, /verified React and accessibility work/);
-  assert.doesNotMatch(reportWithAnswers, /Phone:\*\*/);
+  assert.match(reportWithAnswers, /\*\*Phone:\*\* \+34 600 000 000/);
   assert.doesNotMatch(reportWithAnswers, /\*\*:\*\*/);
+
+  const cleanup = await request({
+    id: "preparation-cleanup",
+    protocolVersion: 1,
+    operation: "preparation.artifacts.delete",
+    input: {
+      preparationId,
+      reportPath: commit.result.artifacts.report.path,
+      cvPdfPath: commit.result.artifacts.cvPdf.path,
+    },
+  }, fixture.env);
+  assert.equal(cleanup.ok, true);
+  await assert.rejects(readFile(join(fixture.root, commit.result.artifacts.report.path)));
+  await assert.rejects(readFile(join(fixture.root, commit.result.artifacts.cvPdf.path)));
+  await assert.rejects(readFile(join(fixture.staging, preparationId, "preparation.json")));
 });
 
 test("preparation accepts career-ops profiles without optional cv-facts config", async () => {

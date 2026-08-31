@@ -62,15 +62,19 @@ Selecting the role title opens the source listing. Selecting **Prepare** starts 
 
 ### Applications
 
-Shows active preparation, browser work waiting for review, recoverable blockers, and recently completed applications. It is progress visibility, not a second canonical tracker.
+Shows one current row per application: active preparation, browser work waiting for review, recoverable blockers, and recently completed applications. It is progress visibility, not a second canonical tracker or an event log.
 
-### Activity
+Selecting **Details** opens a right-side panel with a formatted preview of the career-ops Markdown report and links to the original report and verified CV. Form-question and answer logs do not appear in this surface.
 
-Shows source health, run progress, actionable failures, retries, and summary counts for duplicates, dead listings, prior applications, and confirmed blockers. Exclusion diagnostics remain secondary to the daily queue.
+### System
+
+System is a secondary utility surface, not a primary-navigation destination. It contains queue filters, source health, actionable run failures, browser pairing, provider checks, backup, export, and diagnostics. There is no Activity tab.
+
+Queue filters are initialized from the verified career-ops profile and remain editable. They apply to current unprepared roles and future imports. The initial controls cover role families, seniority, locations, remote roles, and explicit authorization conflicts; they do not create a second scoring engine.
 
 ### Application workspace
 
-Shows the career-ops report, tailored CV, full evidence and uncertainty, preparation progress, inspected questions, answer provenance, skipped or failed fields, review checklist, and canonical outcome. Internal browser transport is presented in plain language such as Opening application, Filling form, and Ready for review.
+Shows the career-ops report, tailored CV, full evidence and uncertainty, preparation progress, skipped or failed fields, review checklist, and canonical outcome. Internal browser transport is presented in plain language such as Opening application, Filling form, and Ready for review.
 
 ## Core Loop
 
@@ -79,15 +83,16 @@ Shows the career-ops report, tailored CV, full evidence and uncertainty, prepara
 3. HereForWork adds every viable role to the ordered queue.
 4. A macOS notification announces new viable roles and opens the queue filtered to that run.
 5. The user selects **Prepare** for a role.
-6. career-ops generates the full report and tailored CV.
-7. HereForWork automatically opens the application in the user-selected ordinary Chrome profile.
-8. The extension inspects the live form and returns typed field descriptions.
-9. career-ops drafts answers grounded in verified profile sources and the inspected questions.
-10. The extension fills and verifies supported safe fields while skipping everything requiring the user.
-11. HereForWork notifies the user that the live form is ready for review.
-12. The user reviews the live page, completes missing fields, and physically clicks Submit.
-13. The user confirms the outcome in HereForWork.
-14. The adapter records Applied through a canonical career-ops writer.
+6. career-ops evaluates the live role before artifacts are committed. A viable match continues even when the job description and bounded research leave authorization unresolved. A confirmed authorization or legitimacy incompatibility is recorded Discarded; other material fit or legitimacy uncertainty returns to Needs decision with a visible explanation.
+7. For a viable match, career-ops generates the full report and tailored CV.
+8. HereForWork automatically opens the application in a new tab of the user-selected ordinary Chrome profile.
+9. The extension inspects the live form and returns typed field descriptions.
+10. career-ops drafts answers grounded in verified profile sources and the inspected questions.
+11. The extension fills and verifies supported safe fields while skipping everything requiring the user.
+12. HereForWork notifies the user that the live form is ready for review.
+13. The user reviews the live page, completes missing fields, and physically clicks Submit.
+14. The user confirms the outcome in HereForWork.
+15. The adapter records Applied through a canonical career-ops writer.
 
 Preparation and document tasks may overlap where their dependencies permit. Canonical writes, per-role transitions, and browser-form sessions remain ordered and idempotent. If several preparations finish together, browser sessions open one at a time.
 
@@ -126,6 +131,8 @@ Recovery branches preserve completed work and retry only the failed step. If can
 
 Uncertainty remains visible when it changes a decision. It states the unresolved fact, available evidence, likely impact, and required confirmation without converting ambiguity into a confident claim.
 
+Missing or inconclusive work-authorization evidence does not by itself stop preparation. It remains explicit in the report and any live authorization or sponsorship question is left for the user. Only affirmative evidence of incompatibility blocks the role.
+
 Form results are grouped as:
 
 - Filled and verified.
@@ -135,9 +142,13 @@ Form results are grouped as:
 
 Safe fields continue even when another field needs the user. Partial completion is always Review required, never Ready.
 
+Safe verified fields include direct profile facts such as name, email, phone, current location, LinkedIn, GitHub, portfolio, and other discrete values that career-ops can trace exactly to verified profile or CV sources. Work authorization, sponsorship, demographic, consent, and other sensitive or uncertain answers remain skipped for the user.
+
 ## Dismissal
 
 Dismiss immediately records Discarded through the career-ops adapter, removes the role from the active queue, and offers Undo. An optional Add reason action may store operational context in HereForWork and pass it through the adapter when career-ops supports it. The adapter does not become a recommendation engine, and the feedback must not silently change ranking.
+
+**Undo preparation** is distinct from Undo dismissal: it records the unsuitable role as Discarded, deletes only the generated report and tailored-CV preparation artifacts, clears HereForWork's preparation and browser state, and removes the application row. It is unavailable after Applied has been confirmed.
 
 ## Adapter Boundary
 
@@ -158,7 +169,7 @@ Every public HTTPS application URL enters the generic path. Greenhouse, Lever, a
 ## Notifications
 
 - New viable roles: open the queue filtered to the originating run.
-- Actionable discovery failure: open Activity at the failed source.
+- Actionable discovery failure: open System at the failed source.
 - Form ready for review: focus the prepared form in the selected ordinary Chrome profile.
 - Successful run with no viable roles: remain quiet.
 - Application receipts: no automatic matching in the MVP.
@@ -180,7 +191,7 @@ Every public HTTPS application URL enters the generic path. Greenhouse, Lever, a
 
 ```text
 +------------------------------------------------------------------------------+
-| HereForWork          Queue   Applications   Activity           Updated 10:42|
+| HereForWork          Queue   Applications              System  Updated 10:42|
 +------------------------------------------------------------------------------+
 | TODAY'S QUEUE                                                   12 READY     |
 |                                                                              |
