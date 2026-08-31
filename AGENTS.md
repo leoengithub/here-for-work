@@ -23,3 +23,10 @@ HereForWork owns orchestration, the unified review queue, user-triggered prepara
 ## Documentation boundary
 
 The private product notebook is maintained in the owner’s Obsidian vault. Stable, implementation-relevant decisions must be distilled into repository files before code depends on them. Do not copy personal career data into this repository.
+
+## UI component policy
+
+- Use the shadcn registry as the first source for every new UI component.
+- Before creating a component from scratch, search or inspect the shadcn registry for an existing component that covers the required semantics and interaction.
+- Add and adapt the shadcn component when one exists. Create a project-owned component from scratch only when the registry has no suitable component, and document that decision in the change.
+- Preserve HereForWork's product safety, accessibility, and visual-system rules when adapting registry code.

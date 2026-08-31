@@ -9,6 +9,7 @@ describe("App", () => {
     render(<App />);
     expect(await screen.findByRole("heading", { name: "Review queue" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Your review queue is ready for its first run." })).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "Preparation provider" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "Import discovery snapshot" })).toBeEnabled();
   });
 
@@ -16,12 +17,13 @@ describe("App", () => {
     render(<App />);
     await screen.findByRole("heading", { name: "Review queue" });
 
-    fireEvent.click(screen.getByRole("button", { name: "applications" }));
+    expect(screen.getByRole("tablist")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("tab", { name: "applications" }));
     expect(screen.getByRole("heading", { name: "Applications" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "No prepared applications yet." })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "activity" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: "activity" })).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "queue" }));
+    fireEvent.click(screen.getByRole("tab", { name: "queue" }));
     expect(screen.getByRole("heading", { name: "Review queue" })).toBeInTheDocument();
   });
 
@@ -32,6 +34,11 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: "System" }));
 
     expect(screen.getByRole("heading", { name: "Queue filters" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "queue" })).toHaveAttribute("aria-selected", "false");
+    expect(screen.getByRole("tab", { name: "applications" })).toHaveAttribute("aria-selected", "false");
+    expect(screen.getByRole("checkbox", { name: "Include remote roles" })).toBeInTheDocument();
+    expect(screen.getByRole("checkbox", { name: "Hide explicit authorization conflicts" })).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "Chrome profile" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "settings" })).not.toBeInTheDocument();
   });
 
