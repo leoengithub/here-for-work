@@ -59,7 +59,7 @@ export interface QueueFilters {
 
 export interface PrepareRoleOutcome {
   dashboard: DashboardState;
-  disposition: "browser_started" | "prepared_browser_action_required" | "needs_decision" | "discarded";
+  disposition: "queued";
   message: string;
 }
 
@@ -69,7 +69,7 @@ export interface PreparationSummary {
   company: string;
   title: string;
   provider: "codex" | "claude";
-  status: "preparing" | "completed" | "action_required" | "cancelled";
+  status: "queued" | "preparing" | "completed" | "action_required" | "cancelled";
   step: string;
   attempt: number;
   reportPath: string | null;

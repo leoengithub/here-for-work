@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
-import { App, BrowserSessions } from "./App";
+import { App, BrowserSessions, RoleRow } from "./App";
 
 afterEach(cleanup);
 
@@ -20,11 +20,55 @@ describe("App", () => {
     expect(screen.getByRole("tablist")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("tab", { name: "applications" }));
     expect(screen.getByRole("heading", { name: "Applications" })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "No prepared applications yet." })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "No application preparations yet." })).toBeInTheDocument();
     expect(screen.queryByRole("tab", { name: "activity" })).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("tab", { name: "queue" }));
     expect(screen.getByRole("heading", { name: "Review queue" })).toBeInTheDocument();
+  });
+
+  it("keeps other roles actionable while one preparation is being queued", () => {
+    const role = {
+      id: "role-1",
+      company: "Acme",
+      title: "Frontend Engineer",
+      location: "Remote",
+      source: "Fixture",
+      sourceCount: 1,
+      queueGroup: "strong_match" as const,
+      eligibilitySummary: "Strong match",
+      uncertainty: null,
+      discoveredAt: "2026-08-31T08:00:00Z",
+      applicationUrl: "https://example.com/apply",
+      preparationState: "not_started" as const,
+      canonicalTrackerId: null,
+      canonicalStatus: null,
+    };
+    render(
+      <>
+        <RoleRow
+          role={role}
+          canPrepare
+          canDismiss
+          busy={false}
+          enqueuing
+          onPrepare={() => undefined}
+          onDismiss={() => undefined}
+        />
+        <RoleRow
+          role={{ ...role, id: "role-2", title: "Product Engineer" }}
+          canPrepare
+          canDismiss
+          busy={false}
+          enqueuing={false}
+          onPrepare={() => undefined}
+          onDismiss={() => undefined}
+        />
+      </>,
+    );
+
+    expect(screen.getByRole("button", { name: "Queueing…" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Prepare" })).toBeEnabled();
   });
 
   it("keeps queue filters in System instead of primary navigation", async () => {

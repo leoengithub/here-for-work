@@ -94,7 +94,9 @@ Shows the career-ops report, tailored CV, full evidence and uncertainty, prepara
 14. The user confirms the outcome in HereForWork.
 15. The adapter records Applied through a canonical career-ops writer.
 
-Preparation and document tasks may overlap where their dependencies permit. Canonical writes, per-role transitions, and browser-form sessions remain ordered and idempotent. If several preparations finish together, browser sessions open one at a time.
+Selecting Prepare durably queues the role and immediately moves it from Queue to Applications. Queue remains interactive, so the user can select additional roles without waiting. At most two report/CV preparation jobs run concurrently; later jobs remain queued in first-in, first-out order.
+
+Canonical writes, per-role transitions, and browser-form sessions remain ordered and idempotent. Browser inspection, answer drafting, filling, verification, and release use a separate single-application FIFO lane. Browser tabs open in the background without taking focus. A blocked or failed role becomes action required or returns to Needs decision without stopping later roles, and each completed form produces its own notification.
 
 ## State Model
 

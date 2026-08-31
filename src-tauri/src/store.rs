@@ -16,9 +16,10 @@ use crate::domain::{
     SourceScheduleSummary,
 };
 
-const SCHEMA_VERSION: i64 = 11;
+const SCHEMA_VERSION: i64 = 12;
 const MAX_RUN_ATTEMPTS: i64 = 3;
 const MAX_BROWSER_COMMAND_ATTEMPTS: i64 = 3;
+const MAX_ACTIVE_PREPARATIONS: i64 = 2;
 const RUN_STEPS: [&str; 3] = ["discover", "reconcile", "notify"];
 
 #[derive(Debug, Error)]
@@ -377,6 +378,16 @@ impl Store {
                  COMMIT;",
             )?;
             version = 11;
+        }
+        if version < 12 {
+            self.connection.execute_batch(
+                "BEGIN IMMEDIATE;
+                 CREATE INDEX IF NOT EXISTS preparation_jobs_claimable
+                   ON preparation_jobs(status, created_at, id);
+                 UPDATE schema_meta SET version = 12;
+                 COMMIT;",
+            )?;
+            version = 12;
         }
         if version != SCHEMA_VERSION {
             return Err(StoreError::Database(rusqlite::Error::InvalidQuery));
@@ -786,10 +797,35 @@ impl Store {
         )?;
         let candidate = transaction
             .query_row(
-                "SELECT id, session_id, command_type, payload_json
-                   FROM browser_commands
-                  WHERE status = 'pending' AND attempt < ?1
-                  ORDER BY created_at, id LIMIT 1",
+                "SELECT c.id, c.session_id, c.command_type, c.payload_json
+                   FROM browser_commands c
+                   JOIN browser_sessions s ON s.id = c.session_id
+                  WHERE c.status = 'pending' AND c.attempt < ?1
+                    AND (
+                      s.id = (
+                        SELECT active.id FROM browser_sessions active
+                         WHERE active.purpose = 'application'
+                           AND active.status IN (
+                             'waiting_for_extension', 'inspecting', 'drafting_answers',
+                             'answering', 'filling', 'persisting_answers',
+                             'saving_answers', 'releasing'
+                           )
+                         ORDER BY active.created_at, active.rowid LIMIT 1
+                      )
+                      OR (
+                        s.purpose != 'application'
+                        AND NOT EXISTS (
+                          SELECT 1 FROM browser_sessions active
+                           WHERE active.purpose = 'application'
+                             AND active.status IN (
+                               'waiting_for_extension', 'inspecting', 'drafting_answers',
+                               'answering', 'filling', 'persisting_answers',
+                               'saving_answers', 'releasing'
+                             )
+                        )
+                      )
+                    )
+                  ORDER BY c.created_at, c.rowid LIMIT 1",
                 [MAX_BROWSER_COMMAND_ATTEMPTS],
                 |row| {
                     Ok((
@@ -1611,18 +1647,25 @@ impl Store {
                     "retry must use the original {stored_provider} provider"
                 )));
             }
-            self.connection.execute(
+            let transaction = self.connection.transaction()?;
+            transaction.execute(
                 "UPDATE preparation_jobs
-                    SET status = 'preparing', step = 'preparing_report', attempt = attempt + 1,
+                    SET status = 'queued', step = 'queued',
                         error_class = NULL, updated_at = ?1
                   WHERE id = ?2",
                 params![now, id],
             )?;
-            self.connection.execute(
-                "UPDATE roles SET preparation_state = 'preparing', updated_at = ?1 WHERE id = ?2",
+            transaction.execute(
+                "UPDATE roles SET preparation_state = 'queued', updated_at = ?1 WHERE id = ?2",
                 params![now, role_id],
             )?;
-            return Ok(PreparationWork { id, role });
+            transaction.commit()?;
+            return Ok(PreparationWork {
+                id,
+                role_id: role_id.to_string(),
+                provider: stored_provider,
+                role,
+            });
         }
         let already_active: bool = self.connection.query_row(
             "SELECT EXISTS(
@@ -1642,16 +1685,153 @@ impl Store {
         transaction.execute(
             "INSERT INTO preparation_jobs(
                id, role_id, provider, status, step, attempt, created_at, updated_at
-             ) VALUES (?1, ?2, ?3, 'preparing', 'preparing_report', 1, ?4, ?4)",
+             ) VALUES (?1, ?2, ?3, 'queued', 'queued', 0, ?4, ?4)",
             params![id, role_id, provider, now],
         )?;
         transaction.execute(
-            "UPDATE roles SET preparation_state = 'preparing', review_state = 'viewed', updated_at = ?1
+            "UPDATE roles SET preparation_state = 'queued', review_state = 'viewed', updated_at = ?1
               WHERE id = ?2",
             params![now, role_id],
         )?;
         transaction.commit()?;
-        Ok(PreparationWork { id, role })
+        Ok(PreparationWork {
+            id,
+            role_id: role_id.to_string(),
+            provider: provider.to_string(),
+            role,
+        })
+    }
+
+    pub fn claim_preparation_work(&mut self) -> Result<Option<PreparationWork>, StoreError> {
+        let transaction = self.connection.transaction()?;
+        let candidate = transaction
+            .query_row(
+                "SELECT p.id, p.provider, p.role_id, r.company, r.title, r.location, r.application_url
+                   FROM preparation_jobs p
+                   JOIN roles r ON r.id = p.role_id
+                  WHERE p.status = 'queued'
+                    AND (SELECT COUNT(*) FROM preparation_jobs WHERE status = 'preparing') < ?1
+                  ORDER BY p.created_at, p.rowid LIMIT 1",
+                [MAX_ACTIVE_PREPARATIONS],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        AdapterRoleContext {
+                            company: row.get(3)?,
+                            title: row.get(4)?,
+                            location: row.get(5)?,
+                            application_url: row.get(6)?,
+                        },
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((id, provider, role_id, role)) = candidate else {
+            transaction.commit()?;
+            return Ok(None);
+        };
+        let now = Utc::now().to_rfc3339();
+        let changed = transaction.execute(
+            "UPDATE preparation_jobs
+                SET status = 'preparing', step = 'preparing_report', attempt = attempt + 1,
+                    error_class = NULL, updated_at = ?1
+              WHERE id = ?2 AND status = 'queued'",
+            params![now, id],
+        )?;
+        if changed != 1 {
+            transaction.commit()?;
+            return Ok(None);
+        }
+        transaction.execute(
+            "UPDATE roles SET preparation_state = 'preparing', updated_at = ?1 WHERE id = ?2",
+            params![now, role_id],
+        )?;
+        transaction.commit()?;
+        Ok(Some(PreparationWork {
+            id,
+            role_id,
+            provider,
+            role,
+        }))
+    }
+
+    pub fn recover_interrupted_preparations(&mut self) -> Result<(), StoreError> {
+        let transaction = self.connection.transaction()?;
+        let now = Utc::now().to_rfc3339();
+        transaction.execute(
+            "UPDATE roles SET preparation_state = 'queued', updated_at = ?1
+              WHERE id IN (SELECT role_id FROM preparation_jobs WHERE status = 'queued')",
+            [now.clone()],
+        )?;
+        transaction.execute(
+            "UPDATE roles SET preparation_state = 'failed', updated_at = ?1
+              WHERE id IN (SELECT role_id FROM preparation_jobs WHERE status = 'preparing')",
+            [now.clone()],
+        )?;
+        transaction.execute(
+            "UPDATE preparation_jobs
+                SET status = 'action_required', error_class = 'app_interrupted', updated_at = ?1
+              WHERE status = 'preparing'",
+            [now],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn next_preparation_for_browser_handoff(&self) -> Result<Option<String>, StoreError> {
+        self.connection
+            .query_row(
+                "SELECT p.id
+                   FROM preparation_jobs p
+                  WHERE p.status = 'completed'
+                    AND NOT EXISTS (
+                      SELECT 1 FROM browser_sessions b WHERE b.preparation_id = p.id
+                    )
+                    AND NOT EXISTS (
+                      SELECT 1 FROM preparation_jobs earlier
+                       WHERE earlier.rowid < p.rowid
+                         AND earlier.status IN ('queued', 'preparing')
+                    )
+                  ORDER BY p.rowid LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(StoreError::from)
+    }
+
+    pub fn cancel_queued_preparation_for_role(
+        &mut self,
+        role_id: &str,
+    ) -> Result<bool, StoreError> {
+        let transaction = self.connection.transaction()?;
+        let preparation_id = transaction
+            .query_row(
+                "SELECT id FROM preparation_jobs
+                  WHERE role_id = ?1 AND status = 'queued'
+                  ORDER BY created_at DESC LIMIT 1",
+                [role_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        let Some(preparation_id) = preparation_id else {
+            transaction.commit()?;
+            return Ok(false);
+        };
+        let now = Utc::now().to_rfc3339();
+        transaction.execute(
+            "UPDATE preparation_jobs SET status = 'cancelled', step = 'cancelled',
+                    error_class = NULL, updated_at = ?1 WHERE id = ?2 AND status = 'queued'",
+            params![now, preparation_id],
+        )?;
+        transaction.execute(
+            "UPDATE roles SET preparation_state = 'not_started', updated_at = ?1 WHERE id = ?2",
+            params![now, role_id],
+        )?;
+        transaction.commit()?;
+        Ok(true)
     }
 
     pub fn preparation_artifact_paths(
@@ -2682,6 +2862,7 @@ impl Store {
              LEFT JOIN source_occurrences s ON s.role_id = r.id
              WHERE (r.canonical_tracker_id IS NULL OR r.canonical_visibility_override = 1)
                AND COALESCE(r.legitimacy, '') <> 'suspicious'
+               AND r.preparation_state = 'not_started'
              GROUP BY r.id
              ORDER BY
                CASE r.queue_group
@@ -3464,6 +3645,7 @@ fn missed_nominal_times(
 #[cfg(test)]
 mod tests {
     use super::{QueueFilters, Store};
+    use crate::domain::PreparationWork;
 
     const DATASET: &str = r#"{
       "schemaVersion": 1,
@@ -3485,6 +3667,13 @@ mod tests {
         }
       ]
     }"#;
+
+    fn queue_and_claim(store: &mut Store, role_id: &str, provider: &str) -> PreparationWork {
+        let queued = store.begin_preparation(role_id, provider).unwrap();
+        let claimed = store.claim_preparation_work().unwrap().unwrap();
+        assert_eq!(claimed.id, queued.id);
+        claimed
+    }
 
     #[test]
     fn importing_the_same_snapshot_is_idempotent() {
@@ -3633,7 +3822,13 @@ mod tests {
         store.import_dataset(DATASET).unwrap();
         let role_id = store.dashboard().unwrap().roles[0].id.clone();
 
-        let first = store.begin_preparation(&role_id, "codex").unwrap();
+        let queued = store.begin_preparation(&role_id, "codex").unwrap();
+        let queued_dashboard = store.dashboard().unwrap();
+        assert!(queued_dashboard.roles.is_empty());
+        assert_eq!(queued_dashboard.preparations[0].status, "queued");
+        assert_eq!(queued_dashboard.preparations[0].attempt, 0);
+        let first = store.claim_preparation_work().unwrap().unwrap();
+        assert_eq!(first.id, queued.id);
         store
             .record_preparation_context(
                 &first.id,
@@ -3651,7 +3846,9 @@ mod tests {
             Some("provider_failed")
         );
 
-        let retry = store.begin_preparation(&role_id, "codex").unwrap();
+        let queued_retry = store.begin_preparation(&role_id, "codex").unwrap();
+        assert_eq!(queued_retry.id, first.id);
+        let retry = store.claim_preparation_work().unwrap().unwrap();
         assert_eq!(retry.id, first.id);
         store
             .record_preparation_context(
@@ -3688,13 +3885,123 @@ mod tests {
         let role_id = store.dashboard().unwrap().roles[0].id.clone();
         let work = store.begin_preparation(&role_id, "codex").unwrap();
 
-        store.cancel_preparation(&work.id).unwrap();
+        assert!(store.cancel_queued_preparation_for_role(&role_id).unwrap());
 
         let dashboard = store.dashboard().unwrap();
         assert_eq!(dashboard.roles[0].preparation_state, "not_started");
         assert!(dashboard.preparations.is_empty());
         let restarted = store.begin_preparation(&role_id, "claude").unwrap();
         assert_ne!(restarted.id, work.id);
+    }
+
+    #[test]
+    fn preparation_queue_runs_at_most_two_jobs_and_preserves_fifo_order() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+        store.import_dataset(DATASET).unwrap();
+        for index in 2..=3 {
+            let dataset = DATASET
+                .replace("role-1", &format!("role-{index}"))
+                .replace("Northstar Tools", &format!("Company {index}"))
+                .replace(
+                    "northstar-tools/frontend-engineer",
+                    &format!("company-{index}/frontend-engineer"),
+                );
+            store.import_dataset(&dataset).unwrap();
+        }
+        let role_ids = store
+            .dashboard()
+            .unwrap()
+            .roles
+            .into_iter()
+            .map(|role| role.id)
+            .collect::<Vec<_>>();
+        for role_id in &role_ids {
+            store.begin_preparation(role_id, "codex").unwrap();
+        }
+
+        let first = store.claim_preparation_work().unwrap().unwrap();
+        let second = store.claim_preparation_work().unwrap().unwrap();
+        assert!(store.claim_preparation_work().unwrap().is_none());
+        assert_ne!(first.id, second.id);
+
+        store
+            .complete_preparation(
+                &second.id,
+                42,
+                "reports/042-example.md",
+                &"b".repeat(64),
+                "output/042-example/cv.pdf",
+                &"c".repeat(64),
+            )
+            .unwrap();
+        assert!(
+            store
+                .next_preparation_for_browser_handoff()
+                .unwrap()
+                .is_none()
+        );
+
+        store
+            .fail_preparation(&first.id, "provider_failed")
+            .unwrap();
+        assert_eq!(
+            store.next_preparation_for_browser_handoff().unwrap(),
+            Some(second.id.clone())
+        );
+        let third = store.claim_preparation_work().unwrap().unwrap();
+        assert_ne!(third.id, first.id);
+        assert_ne!(third.id, second.id);
+        assert_eq!(third.provider, "codex");
+    }
+
+    #[test]
+    fn restart_preserves_queued_work_and_marks_only_interrupted_active_work() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+        store.import_dataset(DATASET).unwrap();
+        let second_dataset = DATASET
+            .replace("role-1", "role-2")
+            .replace("Northstar Tools", "Second Company")
+            .replace(
+                "northstar-tools/frontend-engineer",
+                "second-company/frontend-engineer",
+            );
+        store.import_dataset(&second_dataset).unwrap();
+        let role_ids = store
+            .dashboard()
+            .unwrap()
+            .roles
+            .into_iter()
+            .map(|role| role.id)
+            .collect::<Vec<_>>();
+        for role_id in &role_ids {
+            store.begin_preparation(role_id, "codex").unwrap();
+        }
+        let interrupted = store.claim_preparation_work().unwrap().unwrap();
+
+        store.recover_interrupted_preparations().unwrap();
+
+        let dashboard = store.dashboard().unwrap();
+        let interrupted_summary = dashboard
+            .preparations
+            .iter()
+            .find(|preparation| preparation.id == interrupted.id)
+            .unwrap();
+        assert_eq!(interrupted_summary.status, "action_required");
+        assert_eq!(
+            interrupted_summary.error_class.as_deref(),
+            Some("app_interrupted")
+        );
+        assert_eq!(
+            dashboard
+                .preparations
+                .iter()
+                .filter(|preparation| preparation.status == "queued")
+                .count(),
+            1
+        );
+        assert!(store.claim_preparation_work().unwrap().is_some());
     }
 
     #[test]
@@ -3958,12 +4265,91 @@ mod tests {
     }
 
     #[test]
+    fn browser_lane_finishes_or_fails_one_application_before_leasing_the_next() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+        store.import_dataset(DATASET).unwrap();
+        let second_dataset = DATASET
+            .replace("role-1", "role-2")
+            .replace("Northstar Tools", "Second Company")
+            .replace(
+                "northstar-tools/frontend-engineer",
+                "second-company/frontend-engineer",
+            )
+            .replace("https://example.test/jobs/1", "https://example.test/jobs/2");
+        store.import_dataset(&second_dataset).unwrap();
+        let role_ids = store
+            .dashboard()
+            .unwrap()
+            .roles
+            .into_iter()
+            .map(|role| role.id)
+            .collect::<Vec<_>>();
+        let mut preparations = Vec::new();
+        for (index, role_id) in role_ids.iter().enumerate() {
+            let preparation = queue_and_claim(&mut store, role_id, "codex");
+            store
+                .record_preparation_context(
+                    &preparation.id,
+                    &"a".repeat(64),
+                    &format!("https://example.test/jobs/{}", index + 1),
+                )
+                .unwrap();
+            store
+                .complete_preparation(
+                    &preparation.id,
+                    40 + index as i64,
+                    &format!("reports/{}-example.md", index + 1),
+                    &"b".repeat(64),
+                    &format!("output/{}/cv.pdf", index + 1),
+                    &"c".repeat(64),
+                )
+                .unwrap();
+            preparations.push(preparation);
+        }
+        store
+            .configure_browser(
+                "abcdefghijklmnopabcdefghijklmnop",
+                "019d0000-0000-7000-8000-000000000001",
+                "Profile 1",
+            )
+            .unwrap();
+        let first_session = store
+            .queue_application_session(&preparations[0].id)
+            .unwrap();
+        let second_session = store
+            .queue_application_session(&preparations[1].id)
+            .unwrap();
+
+        let first_command = store
+            .claim_browser_command(chrono::Utc::now(), chrono::Duration::seconds(30))
+            .unwrap()
+            .unwrap();
+        assert_eq!(first_command.session_id, first_session.id);
+        assert!(
+            store
+                .claim_browser_command(chrono::Utc::now(), chrono::Duration::seconds(30))
+                .unwrap()
+                .is_none()
+        );
+
+        store
+            .fail_browser_command(&first_command.command_id, "inspection_failed")
+            .unwrap();
+        let second_command = store
+            .claim_browser_command(chrono::Utc::now(), chrono::Duration::seconds(30))
+            .unwrap()
+            .unwrap();
+        assert_eq!(second_command.session_id, second_session.id);
+    }
+
+    #[test]
     fn application_session_with_no_compatible_fields_releases_for_manual_review() {
         let directory = tempfile::tempdir().unwrap();
         let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
         store.import_dataset(DATASET).unwrap();
         let role_id = store.dashboard().unwrap().roles[0].id.clone();
-        let preparation = store.begin_preparation(&role_id, "codex").unwrap();
+        let preparation = queue_and_claim(&mut store, &role_id, "codex");
         store
             .record_preparation_context(
                 &preparation.id,
@@ -4035,7 +4421,7 @@ mod tests {
         );
         store.import_dataset(&dataset).unwrap();
         let role_id = store.dashboard().unwrap().roles[0].id.clone();
-        let preparation = store.begin_preparation(&role_id, "codex").unwrap();
+        let preparation = queue_and_claim(&mut store, &role_id, "codex");
         store
             .record_preparation_context(
                 &preparation.id,

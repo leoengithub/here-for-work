@@ -12,8 +12,8 @@ use std::sync::{Arc, Mutex};
 use adapter::{AdapterConfig, CanonicalRoleInput, PreparationRoleInput, discover_executable};
 use domain::{
     BrowserSessionSummary, BrowserSetup, CheckResult, ChromeProfile, DashboardState, ImportResult,
-    IntegrationHealth, MaintenanceResult, PreparationDetail, PrepareRoleOutcome, QueueFilters,
-    ReconcileResult, RestorePreflight, ScheduledRun,
+    IntegrationHealth, MaintenanceResult, PreparationDetail, PreparationWork, PrepareRoleOutcome,
+    QueueFilters, ReconcileResult, RestorePreflight, ScheduledRun,
 };
 use sha2::Digest;
 use store::Store;
@@ -35,6 +35,7 @@ struct AppState {
     native_host_path: PathBuf,
     app_data_dir: PathBuf,
     preparation_cancellations: Mutex<HashMap<String, Arc<AtomicBool>>>,
+    canonical_write_lock: Mutex<()>,
 }
 
 struct PreparationCancellationRegistration<'a> {
@@ -226,25 +227,44 @@ fn preparation_gate(result: &serde_json::Value) -> Result<PreparationGate, Strin
 }
 
 #[tauri::command]
-async fn prepare_role(
+fn prepare_role(
     role_id: String,
     provider: provider::ProviderKind,
-    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<PrepareRoleOutcome, String> {
     let provider_name = match provider {
         provider::ProviderKind::Codex => "codex",
         provider::ProviderKind::Claude => "claude",
     };
-    let work = {
-        let mut store = state
-            .store
-            .lock()
-            .map_err(|_| "Operational store lock was poisoned".to_string())?;
-        store
-            .begin_preparation(&role_id, provider_name)
-            .map_err(|error| error.to_string())?
+    let mut store = state
+        .store
+        .lock()
+        .map_err(|_| "Operational store lock was poisoned".to_string())?;
+    store
+        .begin_preparation(&role_id, provider_name)
+        .map_err(|error| error.to_string())?;
+    let dashboard = store.dashboard().map_err(|error| error.to_string())?;
+    Ok(PrepareRoleOutcome {
+        dashboard,
+        disposition: "queued".to_string(),
+        message: "Preparation queued. You can keep working while HereForWork prepares this application in the background.".to_string(),
+    })
+}
+
+fn process_preparation_work(app: &tauri::AppHandle, work: PreparationWork) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let provider = match work.provider.as_str() {
+        "codex" => provider::ProviderKind::Codex,
+        "claude" => provider::ProviderKind::Claude,
+        _ => {
+            if let Ok(mut store) = state.store.lock() {
+                let _ = store.fail_preparation(&work.id, "invalid_provider");
+            }
+            return Err("Stored preparation provider is invalid".to_string());
+        }
     };
+    let provider_name = work.provider.as_str();
+    let role_id = work.role_id.clone();
     let cancellation = Arc::new(AtomicBool::new(false));
     state
         .preparation_cancellations
@@ -383,7 +403,6 @@ async fn prepare_role(
             store
                 .hold_preparation_for_decision(&work.id, "preparation_gate_needs_decision")
                 .map_err(|error| error.to_string())?;
-            let dashboard = store.dashboard().map_err(|error| error.to_string())?;
             drop(store);
             let _ = app
                 .notification()
@@ -391,11 +410,7 @@ async fn prepare_role(
                 .title("Role needs your decision")
                 .body(message)
                 .show();
-            return Ok(PrepareRoleOutcome {
-                dashboard,
-                disposition: "needs_decision".to_string(),
-                message: message.to_string(),
-            });
+            return Ok(());
         }
         PreparationGate::Discard(message) => {
             {
@@ -407,21 +422,21 @@ async fn prepare_role(
                     .cancel_preparation(&work.id)
                     .map_err(|error| error.to_string())?;
             }
-            let dashboard = discard_role_internal(&role_id, &state)?;
+            discard_role_internal(&role_id, &state)?;
             let _ = app
                 .notification()
                 .builder()
                 .title("Role removed from the queue")
                 .body(message)
                 .show();
-            return Ok(PrepareRoleOutcome {
-                dashboard,
-                disposition: "discarded".to_string(),
-                message: message.to_string(),
-            });
+            return Ok(());
         }
     }
-    let committed =
+    let committed = {
+        let _canonical_write = state
+            .canonical_write_lock
+            .lock()
+            .map_err(|_| "Canonical writer lock was poisoned".to_string())?;
         match state
             .adapter
             .commit_preparation(&input, &madrid_today(), context.job, result)
@@ -433,7 +448,8 @@ async fn prepare_role(
                 }
                 return Err(error.to_string());
             }
-        };
+        }
+    };
     if committed.preparation_id != work.id || committed.context_hash != context.context_hash {
         if let Ok(mut store) = state.store.lock() {
             let _ = store.fail_preparation(&work.id, "commit_identity_mismatch");
@@ -470,48 +486,95 @@ async fn prepare_role(
             &committed.artifacts.cv_pdf.sha256,
         )
         .map_err(|error| error.to_string())?;
-    drop(store);
-    let browser_result = start_application_browser_session(&work.id, &state);
-    let (disposition, message) = match browser_result {
-        Ok(_) => (
-            "browser_started",
-            "The report and verified CV are ready. The application opened in a new Chrome tab for inspection and safe filling.",
-        ),
-        Err(_) => (
-            "prepared_browser_action_required",
-            "The report and verified CV are ready, but the browser handoff needs your attention in Applications.",
-        ),
-    };
-    let dashboard = state
-        .store
-        .lock()
-        .map_err(|_| "Operational store lock was poisoned".to_string())?
-        .dashboard()
-        .map_err(|error| error.to_string())?;
-    let _ = app
-        .notification()
-        .builder()
-        .title("Application materials prepared")
-        .body(message)
-        .show();
-    Ok(PrepareRoleOutcome {
-        dashboard,
-        disposition: disposition.to_string(),
-        message: message.to_string(),
-    })
+    Ok(())
+}
+
+const PREPARATION_WORKER_COUNT: usize = 2;
+
+fn start_preparation_workers(app: tauri::AppHandle) -> Result<(), String> {
+    for worker_index in 0..PREPARATION_WORKER_COUNT {
+        let worker_app = app.clone();
+        std::thread::Builder::new()
+            .name(format!("here-for-work-preparation-worker-{worker_index}"))
+            .spawn(move || loop {
+                let work = {
+                    let state = worker_app.state::<AppState>();
+                    state
+                        .store
+                        .lock()
+                        .ok()
+                        .and_then(|mut store| store.claim_preparation_work().ok().flatten())
+                };
+                let Some(work) = work else {
+                    std::thread::sleep(std::time::Duration::from_millis(350));
+                    continue;
+                };
+                let preparation_id = work.id.clone();
+                if process_preparation_work(&worker_app, work).is_err() {
+                    if let Ok(mut store) = worker_app.state::<AppState>().store.lock() {
+                        let _ = store.fail_preparation(&preparation_id, "preparation_failed");
+                    }
+                    let _ = worker_app
+                        .notification()
+                        .builder()
+                        .title("Application preparation needs attention")
+                        .body("One role stopped safely. Later queued roles will continue; open Applications for details or retry.")
+                        .show();
+                }
+            })
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+fn start_browser_handoff_worker(app: tauri::AppHandle) -> Result<(), String> {
+    std::thread::Builder::new()
+        .name("here-for-work-browser-handoff-worker".to_string())
+        .spawn(move || loop {
+            let preparation_id = {
+                let state = app.state::<AppState>();
+                state
+                    .store
+                    .lock()
+                    .ok()
+                    .and_then(|store| store.next_preparation_for_browser_handoff().ok().flatten())
+            };
+            let Some(preparation_id) = preparation_id else {
+                std::thread::sleep(std::time::Duration::from_millis(350));
+                continue;
+            };
+            let state = app.state::<AppState>();
+            if start_application_browser_session(&preparation_id, &state).is_err() {
+                let _ = app
+                    .notification()
+                    .builder()
+                    .title("Browser handoff needs attention")
+                    .body("The application materials are ready, but its Chrome tab could not start. Later roles will continue.")
+                    .show();
+            }
+        })
+        .map(|_| ())
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
 fn cancel_preparation(role_id: String, state: tauri::State<'_, AppState>) -> Result<bool, String> {
-    let registrations = state
+    let active_cancellation = state
         .preparation_cancellations
         .lock()
-        .map_err(|_| "Preparation cancellation lock was poisoned".to_string())?;
-    let Some(cancellation) = registrations.get(&role_id) else {
-        return Ok(false);
-    };
-    cancellation.store(true, Ordering::Relaxed);
-    Ok(true)
+        .map_err(|_| "Preparation cancellation lock was poisoned".to_string())?
+        .get(&role_id)
+        .cloned();
+    if let Some(cancellation) = active_cancellation {
+        cancellation.store(true, Ordering::Relaxed);
+        return Ok(true);
+    }
+    state
+        .store
+        .lock()
+        .map_err(|_| "Operational store lock was poisoned".to_string())?
+        .cancel_queued_preparation_for_role(&role_id)
+        .map_err(|error| error.to_string())
 }
 
 pub(crate) fn checked_career_ops_artifact(
@@ -766,20 +829,15 @@ fn start_application_browser_session(
         .page_url
         .as_deref()
         .ok_or("The application session has no URL")?;
-    let chrome = PathBuf::from("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome");
-    if !chrome.is_file() {
+    let chrome = PathBuf::from("/Applications/Google Chrome.app");
+    if !chrome.is_dir() {
         if let Ok(mut store) = state.store.lock() {
             let _ = store.fail_browser_session_start(&session.id, "chrome_not_installed");
         }
         return Err("Google Chrome is not installed in /Applications.".to_string());
     }
     if !reuse_existing_page {
-        if let Err(error) = std::process::Command::new(chrome)
-            .arg(format!("--profile-directory={profile_id}"))
-            .arg("--new-tab")
-            .arg(url)
-            .spawn()
-        {
+        if let Err(error) = background_chrome_command(&profile_id, url).spawn() {
             if let Ok(mut store) = state.store.lock() {
                 let _ = store.fail_browser_session_start(&session.id, "chrome_launch_failed");
             }
@@ -789,6 +847,19 @@ fn start_application_browser_session(
         }
     }
     Ok(session)
+}
+
+fn background_chrome_command(profile_id: &str, url: &str) -> std::process::Command {
+    let mut command = std::process::Command::new("/usr/bin/open");
+    command
+        .arg("-g")
+        .arg("-a")
+        .arg("Google Chrome")
+        .arg("--args")
+        .arg(format!("--profile-directory={profile_id}"))
+        .arg("--new-tab")
+        .arg(url);
+    command
 }
 
 #[tauri::command]
@@ -821,21 +892,27 @@ fn confirm_application_applied(
         location: context.role.location,
         url: context.role.application_url,
     };
-    let effect = match state.adapter.confirm_applied(&input, tracker_id) {
-        Ok(effect) => effect,
-        Err(error) => {
-            if let Ok(mut store) = state.store.lock() {
-                let _ =
-                    store.fail_adapter_effect(&context.idempotency_key, "canonical_write_failed");
-                let _ = store.mark_submitted_tracking_pending(&session_id);
+    let effect = {
+        let _canonical_write = state
+            .canonical_write_lock
+            .lock()
+            .map_err(|_| "Canonical writer lock was poisoned".to_string())?;
+        match state.adapter.confirm_applied(&input, tracker_id) {
+            Ok(effect) => effect,
+            Err(error) => {
+                if let Ok(mut store) = state.store.lock() {
+                    let _ = store
+                        .fail_adapter_effect(&context.idempotency_key, "canonical_write_failed");
+                    let _ = store.mark_submitted_tracking_pending(&session_id);
+                }
+                let _ = app
+                    .notification()
+                    .builder()
+                    .title("Tracking update pending")
+                    .body("Your submission is not repeated. Open HereForWork to retry only the career-ops update.")
+                    .show();
+                return Err(error.to_string());
             }
-            let _ = app
-                .notification()
-                .builder()
-                .title("Tracking update pending")
-                .body("Your submission is not repeated. Open HereForWork to retry only the career-ops update.")
-                .show();
-            return Err(error.to_string());
         }
     };
     let mut store = state
@@ -875,9 +952,12 @@ fn start_answer_worker(app: tauri::AppHandle) -> Result<(), String> {
                 if let Some(work) = commit_work {
                     let outcome = (|| -> Result<(), String> {
                         let state = app.state::<AppState>();
-                        let committed = state
-                            .adapter
-                            .commit_answers(
+                        let committed = {
+                            let _canonical_write = state
+                                .canonical_write_lock
+                                .lock()
+                                .map_err(|_| "answer_persistence_failed".to_string())?;
+                            state.adapter.commit_answers(
                                 &work.preparation_id,
                                 &work.report_path,
                                 &work.cv_pdf_path,
@@ -886,7 +966,8 @@ fn start_answer_worker(app: tauri::AppHandle) -> Result<(), String> {
                                 work.fill_results.clone(),
                                 &madrid_today(),
                             )
-                            .map_err(|_| "answer_persistence_failed".to_string())?;
+                            .map_err(|_| "answer_persistence_failed".to_string())?
+                        };
                         if committed.preparation_id != work.preparation_id
                             || committed.context_hash != work.context_hash
                             || committed.report.path != work.report_path
@@ -1253,14 +1334,20 @@ fn discard_role_internal(role_id: &str, state: &AppState) -> Result<DashboardSta
         location: effect.role.location,
         url: effect.role.application_url,
     };
-    let canonical = match state.adapter.discard_role(&input) {
-        Ok(canonical) => canonical,
-        Err(error) => {
-            if let Ok(mut store) = state.store.lock() {
-                let _ =
-                    store.fail_adapter_effect(&effect.idempotency_key, "canonical_writer_failed");
+    let canonical = {
+        let _canonical_write = state
+            .canonical_write_lock
+            .lock()
+            .map_err(|_| "Canonical writer lock was poisoned".to_string())?;
+        match state.adapter.discard_role(&input) {
+            Ok(canonical) => canonical,
+            Err(error) => {
+                if let Ok(mut store) = state.store.lock() {
+                    let _ = store
+                        .fail_adapter_effect(&effect.idempotency_key, "canonical_writer_failed");
+                }
+                return Err(error.to_string());
             }
-            return Err(error.to_string());
         }
     };
     if canonical.idempotency_key != effect.idempotency_key {
@@ -1303,27 +1390,35 @@ fn undo_preparation(
         location: work.effect.role.location.clone(),
         url: work.effect.role.application_url.clone(),
     };
-    let canonical = match state.adapter.discard_role(&input) {
-        Ok(canonical) => canonical,
-        Err(error) => {
-            if let Ok(mut store) = state.store.lock() {
-                let _ = store.fail_preparation_cleanup(
-                    &work.preparation_id,
-                    &work.effect.idempotency_key,
-                    "canonical_writer_failed",
-                );
+    let (canonical, cleanup_result) = {
+        let _canonical_write = state
+            .canonical_write_lock
+            .lock()
+            .map_err(|_| "Canonical writer lock was poisoned".to_string())?;
+        let canonical = match state.adapter.discard_role(&input) {
+            Ok(canonical) => canonical,
+            Err(error) => {
+                if let Ok(mut store) = state.store.lock() {
+                    let _ = store.fail_preparation_cleanup(
+                        &work.preparation_id,
+                        &work.effect.idempotency_key,
+                        "canonical_writer_failed",
+                    );
+                }
+                return Err(error.to_string());
             }
-            return Err(error.to_string());
-        }
+        };
+        let cleanup_result = state.adapter.delete_preparation_artifacts(
+            &work.preparation_id,
+            &work.report_path,
+            &work.cv_pdf_path,
+        );
+        (canonical, cleanup_result)
     };
     if canonical.idempotency_key != work.effect.idempotency_key {
         return Err("career-ops returned a mismatched idempotency key".to_string());
     }
-    if let Err(error) = state.adapter.delete_preparation_artifacts(
-        &work.preparation_id,
-        &work.report_path,
-        &work.cv_pdf_path,
-    ) {
+    if let Err(error) = cleanup_result {
         if let Ok(mut store) = state.store.lock() {
             let _ = store.fail_preparation_cleanup(
                 &work.preparation_id,
@@ -1362,19 +1457,25 @@ fn undo_dismissal(
         .as_deref()
         .ok_or("Undo is missing its dismissal effect key")?;
     let tracker_id = effect.tracker_id.ok_or("Undo is missing its tracker id")?;
-    let canonical = match state.adapter.undo_discard(
-        &effect.idempotency_key,
-        parent_effect_key,
-        tracker_id,
-        &madrid_today(),
-    ) {
-        Ok(canonical) => canonical,
-        Err(error) => {
-            if let Ok(mut store) = state.store.lock() {
-                let _ =
-                    store.fail_adapter_effect(&effect.idempotency_key, "canonical_writer_failed");
+    let canonical = {
+        let _canonical_write = state
+            .canonical_write_lock
+            .lock()
+            .map_err(|_| "Canonical writer lock was poisoned".to_string())?;
+        match state.adapter.undo_discard(
+            &effect.idempotency_key,
+            parent_effect_key,
+            tracker_id,
+            &madrid_today(),
+        ) {
+            Ok(canonical) => canonical,
+            Err(error) => {
+                if let Ok(mut store) = state.store.lock() {
+                    let _ = store
+                        .fail_adapter_effect(&effect.idempotency_key, "canonical_writer_failed");
+                }
+                return Err(error.to_string());
             }
-            return Err(error.to_string());
         }
     };
     if canonical.idempotency_key != effect.idempotency_key {
@@ -1413,6 +1514,7 @@ pub fn run() {
             let app_data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&app_data_dir)?;
             let mut store = Store::open(app_data_dir.join("here-for-work.sqlite3"))?;
+            store.recover_interrupted_preparations()?;
             let _ = store.reconcile_due_runs(chrono::Utc::now())?;
             let home_dir = app.path().home_dir()?;
             let bundled_adapter = app
@@ -1517,8 +1619,11 @@ pub fn run() {
                 native_host_path,
                 app_data_dir: app_data_dir.clone(),
                 preparation_cancellations: Mutex::new(HashMap::new()),
+                canonical_write_lock: Mutex::new(()),
             });
             bridge::start(app.handle().clone(), bridge::socket_path(&app_data_dir))?;
+            start_preparation_workers(app.handle().clone())?;
+            start_browser_handoff_worker(app.handle().clone())?;
             start_answer_worker(app.handle().clone())?;
             if launch_in_background {
                 if let Some(window) = app.get_webview_window("main") {
@@ -1585,6 +1690,27 @@ mod tests {
     use super::PreparationGate;
 
     #[test]
+    fn chrome_handoff_opens_the_selected_profile_without_automation_or_focus_flags() {
+        let command = super::background_chrome_command(
+            "Profile 1",
+            "https://jobs.example.test/application",
+        );
+        let arguments = command
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert_eq!(arguments.first().map(String::as_str), Some("-g"));
+        assert!(arguments.contains(&"--profile-directory=Profile 1".to_string()));
+        assert!(arguments.contains(&"https://jobs.example.test/application".to_string()));
+        assert!(!arguments.iter().any(|argument| {
+            argument.contains("automation")
+                || argument.contains("remote-debugging")
+                || argument.contains("webdriver")
+        }));
+    }
+
+    #[test]
     fn preparation_artifacts_cannot_escape_career_ops_root() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("career-ops");
@@ -1637,10 +1763,15 @@ mod tests {
 
     #[test]
     fn preparation_gate_allows_viable_matches_when_authorization_is_not_explicitly_blocked() {
-        for authorization in ["excellent", "interesting", "investigate"] {
+        for (legitimacy, authorization) in [
+            ("High Confidence", "excellent"),
+            ("High Confidence", "interesting"),
+            ("High Confidence", "investigate"),
+            ("Proceed with Caution", "excellent"),
+        ] {
             let result = serde_json::json!({
                 "score": 4.0,
-                "legitimacy": "High Confidence",
+                "legitimacy": legitimacy,
                 "authorizationConfidence": authorization
             });
 
