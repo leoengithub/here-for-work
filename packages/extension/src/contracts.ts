@@ -40,6 +40,15 @@ export interface FillPlan {
   instructions: FillInstruction[];
 }
 
+export interface FileUploadInstruction {
+  fieldId: string;
+  fileName: string;
+  mimeType: "application/pdf";
+  contentBase64: string;
+  sha256: string;
+  classification: "safe_verified";
+}
+
 export const BROWSER_COMMAND_TYPES = ["inspect_request", "fill_plan", "release_for_review"] as const;
 export type BrowserCommandType = typeof BROWSER_COMMAND_TYPES[number];
 

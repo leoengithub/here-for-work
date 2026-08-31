@@ -27,6 +27,24 @@ impl QueueGroup {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DiscoveryLegitimacy {
+    HighConfidence,
+    ProceedWithCaution,
+    Suspicious,
+}
+
+impl DiscoveryLegitimacy {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::HighConfidence => "high_confidence",
+            Self::ProceedWithCaution => "proceed_with_caution",
+            Self::Suspicious => "suspicious",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RoleSummary {
@@ -257,6 +275,8 @@ pub struct BrowserAnswerWork {
     pub preparation_id: String,
     pub provider: String,
     pub report_path: String,
+    pub cv_pdf_path: String,
+    pub cv_pdf_hash: String,
     pub snapshot: serde_json::Value,
     pub snapshot_fingerprint: String,
 }
@@ -332,6 +352,8 @@ pub struct DiscoveryFinding {
     pub queue_group: QueueGroup,
     pub eligibility_summary: String,
     pub uncertainty: Option<String>,
+    #[serde(default)]
+    pub legitimacy: Option<DiscoveryLegitimacy>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

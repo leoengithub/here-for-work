@@ -16,7 +16,7 @@ use crate::domain::{
     SourceScheduleSummary,
 };
 
-const SCHEMA_VERSION: i64 = 10;
+const SCHEMA_VERSION: i64 = 11;
 const MAX_RUN_ATTEMPTS: i64 = 3;
 const MAX_BROWSER_COMMAND_ATTEMPTS: i64 = 3;
 const RUN_STEPS: [&str; 3] = ["discover", "reconcile", "notify"];
@@ -368,6 +368,15 @@ impl Store {
                  COMMIT;",
             )?;
             version = 10;
+        }
+        if version < 11 {
+            self.connection.execute_batch(
+                "BEGIN IMMEDIATE;
+                 ALTER TABLE roles ADD COLUMN legitimacy TEXT;
+                 UPDATE schema_meta SET version = 11;
+                 COMMIT;",
+            )?;
+            version = 11;
         }
         if version != SCHEMA_VERSION {
             return Err(StoreError::Database(rusqlite::Error::InvalidQuery));
@@ -902,8 +911,9 @@ impl Store {
         let transaction = self.connection.transaction()?;
         let candidate = transaction
             .query_row(
-                "SELECT b.id, b.preparation_id, b.provider, p.report_path, b.ats, b.page_url,
-                    b.page_title, b.fields_json, b.snapshot_fingerprint
+                "SELECT b.id, b.preparation_id, b.provider, p.report_path, p.cv_pdf_path,
+                    p.cv_pdf_hash, b.ats, b.page_url, b.page_title, b.fields_json,
+                    b.snapshot_fingerprint
                FROM browser_sessions b JOIN preparation_jobs p ON p.id = b.preparation_id
               WHERE b.status = 'drafting_answers'
               ORDER BY b.updated_at LIMIT 1",
@@ -919,6 +929,8 @@ impl Store {
                         row.get::<_, String>(6)?,
                         row.get::<_, String>(7)?,
                         row.get::<_, String>(8)?,
+                        row.get::<_, String>(9)?,
+                        row.get::<_, String>(10)?,
                     ))
                 },
             )
@@ -938,7 +950,7 @@ impl Store {
             return Ok(None);
         }
         transaction.commit()?;
-        let fields: serde_json::Value = serde_json::from_str(&candidate.7).map_err(|error| {
+        let fields: serde_json::Value = serde_json::from_str(&candidate.9).map_err(|error| {
             StoreError::InvalidBrowserTransition(format!("stored form fields are invalid: {error}"))
         })?;
         Ok(Some(BrowserAnswerWork {
@@ -946,15 +958,17 @@ impl Store {
             preparation_id: candidate.1,
             provider: candidate.2,
             report_path: candidate.3,
+            cv_pdf_path: candidate.4,
+            cv_pdf_hash: candidate.5,
             snapshot: serde_json::json!({
                 "protocolVersion": 1,
-                "ats": candidate.4,
-                "url": candidate.5,
-                "title": candidate.6,
+                "ats": candidate.6,
+                "url": candidate.7,
+                "title": candidate.8,
                 "fields": fields,
-                "fingerprint": candidate.8,
+                "fingerprint": candidate.10,
             }),
-            snapshot_fingerprint: candidate.8,
+            snapshot_fingerprint: candidate.10,
         }))
     }
 
@@ -964,6 +978,7 @@ impl Store {
         context_hash: &str,
         fill_plan: &serde_json::Value,
         review_items: &serde_json::Value,
+        cv_upload: Option<&serde_json::Value>,
     ) -> Result<BrowserSessionSummary, StoreError> {
         let transaction = self.connection.transaction()?;
         let fingerprint = transaction.query_row(
@@ -991,10 +1006,11 @@ impl Store {
                 )
             })?;
         let now = Utc::now().to_rfc3339();
-        let next_status = if instructions.is_empty() {
-            "persisting_answers"
-        } else {
+        let has_browser_work = !instructions.is_empty() || cv_upload.is_some();
+        let next_status = if has_browser_work {
             "filling"
+        } else {
+            "persisting_answers"
         };
         let empty_fill_results = serde_json::json!([]);
         transaction.execute(
@@ -1005,23 +1021,21 @@ impl Store {
                 next_status,
                 context_hash,
                 review_items.to_string(),
-                if instructions.is_empty() {
-                    Some(empty_fill_results.to_string())
-                } else {
+                if has_browser_work {
                     None
+                } else {
+                    Some(empty_fill_results.to_string())
                 },
                 now,
                 session_id
             ],
         )?;
-        if !instructions.is_empty() {
-            insert_browser_command(
-                &transaction,
-                session_id,
-                "fill_plan",
-                &serde_json::json!({ "plan": fill_plan }),
-                &now,
-            )?;
+        if has_browser_work {
+            let mut payload = serde_json::json!({ "plan": fill_plan });
+            if let Some(upload) = cv_upload {
+                payload["cvUpload"] = upload.clone();
+            }
+            insert_browser_command(&transaction, session_id, "fill_plan", &payload, &now)?;
         }
         transaction.commit()?;
         self.browser_session(session_id)
@@ -2666,7 +2680,8 @@ impl Store {
                r.canonical_tracker_id, r.canonical_status
              FROM roles r
              LEFT JOIN source_occurrences s ON s.role_id = r.id
-             WHERE r.canonical_tracker_id IS NULL OR r.canonical_visibility_override = 1
+             WHERE (r.canonical_tracker_id IS NULL OR r.canonical_visibility_override = 1)
+               AND COALESCE(r.legitimacy, '') <> 'suspicious'
              GROUP BY r.id
              ORDER BY
                CASE r.queue_group
@@ -3020,8 +3035,8 @@ fn upsert_role(
     transaction.execute(
         "INSERT INTO roles (
            id, normalized_key, company, title, location, queue_group,
-           eligibility_summary, uncertainty, application_url, discovered_at, updated_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+           eligibility_summary, uncertainty, legitimacy, application_url, discovered_at, updated_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
          ON CONFLICT(normalized_key) DO UPDATE SET
            company = excluded.company,
            title = excluded.title,
@@ -3029,6 +3044,7 @@ fn upsert_role(
            queue_group = excluded.queue_group,
            eligibility_summary = excluded.eligibility_summary,
            uncertainty = excluded.uncertainty,
+           legitimacy = excluded.legitimacy,
            application_url = COALESCE(excluded.application_url, roles.application_url),
            discovered_at = MIN(roles.discovered_at, excluded.discovered_at),
            updated_at = excluded.updated_at",
@@ -3041,6 +3057,7 @@ fn upsert_role(
             finding.queue_group.as_str(),
             finding.eligibility_summary,
             finding.uncertainty,
+            finding.legitimacy.as_ref().map(|value| value.as_str()),
             finding.application_url,
             finding.discovered_at,
             Utc::now().to_rfc3339(),
@@ -3232,6 +3249,29 @@ fn contains_filter_phrase(haystack: &str, needle: &str) -> bool {
 }
 
 fn role_matches_queue_filters(role: &RoleSummary, filters: &QueueFilters) -> bool {
+    let trust_evidence = normalized_filter_value(&format!(
+        "{} {}",
+        role.eligibility_summary,
+        role.uncertainty.as_deref().unwrap_or_default()
+    ));
+    if [
+        "suspicious",
+        "possible scam",
+        "suspected scam",
+        "job could not be verified",
+        "employer could not be verified",
+        "company could not be verified",
+        "possible impersonation",
+        "suspected impersonation",
+        "fraudulent listing",
+        "legitimacy blocker",
+    ]
+    .iter()
+    .any(|marker| contains_filter_phrase(&trust_evidence, marker))
+    {
+        return false;
+    }
+
     let title = normalized_filter_value(&role.title);
     if !filters.role_families.is_empty() {
         let ignored = ["engineer", "engineering", "developer", "software", "web"];
@@ -3520,6 +3560,34 @@ mod tests {
                 require_authorization_path: true,
             })
             .unwrap();
+
+        assert!(store.dashboard().unwrap().roles.is_empty());
+    }
+
+    #[test]
+    fn suspicious_discovery_findings_never_reach_the_queue() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+        let suspicious = DATASET.replace(
+            "\"uncertainty\": \"Confirm whether Spain is an eligible hiring location.\"",
+            "\"uncertainty\": \"Company identity could not be verified.\",\n          \"legitimacy\": \"suspicious\"",
+        );
+
+        store.import_dataset(&suspicious).unwrap();
+
+        assert!(store.dashboard().unwrap().roles.is_empty());
+    }
+
+    #[test]
+    fn legacy_suspicious_evidence_is_hidden_without_a_typed_legitimacy_value() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+        let suspicious = DATASET.replace(
+            "Confirm whether Spain is an eligible hiring location.",
+            "Possible impersonation: employer could not be verified.",
+        );
+
+        store.import_dataset(&suspicious).unwrap();
 
         assert!(store.dashboard().unwrap().roles.is_empty());
     }
@@ -4036,14 +4104,30 @@ mod tests {
         let review_items = serde_json::json!([{
             "fieldId": "email", "label": "Email", "decision": "fill", "answer": "verified@example.test", "provenance": ["config/profile.yml:email"]
         }]);
+        let cv_upload = serde_json::json!({
+            "fieldId": "resume",
+            "relativePath": "output/042-example/cv.pdf",
+            "sha256": "c".repeat(64),
+            "fileName": "HereForWork-tailored-CV.pdf",
+            "mimeType": "application/pdf",
+            "classification": "safe_verified"
+        });
         store
-            .complete_answer_work(&session.id, &"e".repeat(64), &fill_plan, &review_items)
+            .complete_answer_work(
+                &session.id,
+                &"e".repeat(64),
+                &fill_plan,
+                &review_items,
+                Some(&cv_upload),
+            )
             .unwrap();
         let fill = store
             .claim_browser_command(chrono::Utc::now(), chrono::Duration::seconds(30))
             .unwrap()
             .unwrap();
         assert_eq!(fill.command_type, "fill_plan");
+        assert_eq!(fill.payload["cvUpload"]["fieldId"], "resume");
+        assert!(fill.payload.get("uploads").is_none());
         store
             .complete_browser_fill(
                 &fill.command_id,

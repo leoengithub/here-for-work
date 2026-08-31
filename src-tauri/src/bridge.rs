@@ -5,9 +5,11 @@ use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::thread;
 
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use chrono::{Duration, Utc};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use tauri::Manager;
 use tauri_plugin_notification::NotificationExt;
 
@@ -95,21 +97,91 @@ fn handle_message(app: &tauri::AppHandle, bytes: &[u8]) -> Value {
     match message.get("type").and_then(Value::as_str) {
         Some("hello") => json!({ "protocolVersion": 1, "ok": true, "type": "hello_ack" }),
         Some("poll") => match store.claim_browser_command(Utc::now(), Duration::seconds(30)) {
-            Ok(Some(command)) => json!({
-                "protocolVersion": 1,
-                "ok": true,
-                "type": "command",
-                "commandId": command.command_id,
-                "sessionId": command.session_id,
-                "commandType": command.command_type,
-                "payload": command.payload,
-            }),
+            Ok(Some(mut command)) => match materialize_browser_payload(
+                &state.adapter.career_ops_root,
+                &mut command.payload,
+            ) {
+                Ok(()) => json!({
+                    "protocolVersion": 1,
+                    "ok": true,
+                    "type": "command",
+                    "commandId": command.command_id,
+                    "sessionId": command.session_id,
+                    "commandType": command.command_type,
+                    "payload": command.payload,
+                }),
+                Err(error) => {
+                    let _ = store.fail_browser_command(&command.command_id, error);
+                    json!({ "protocolVersion": 1, "ok": false, "error": error })
+                }
+            },
             Ok(None) => json!({ "protocolVersion": 1, "ok": true, "type": "idle" }),
             Err(_) => json!({ "protocolVersion": 1, "ok": false, "error": "store_unavailable" }),
         },
         Some("command_result") => handle_command_result(app, &mut store, &message),
         _ => json!({ "protocolVersion": 1, "ok": false, "error": "unsupported_message" }),
     }
+}
+
+fn materialize_browser_payload(root: &Path, payload: &mut Value) -> Result<(), &'static str> {
+    const MAX_CV_PDF_BYTES: usize = 600_000;
+
+    let Some(descriptor) = payload
+        .as_object_mut()
+        .and_then(|object| object.remove("cvUpload"))
+    else {
+        return Ok(());
+    };
+    let object = descriptor
+        .as_object()
+        .ok_or("invalid_cv_upload_descriptor")?;
+    let field_id = object
+        .get("fieldId")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty() && value.len() <= 500)
+        .ok_or("invalid_cv_upload_descriptor")?;
+    let relative_path = object
+        .get("relativePath")
+        .and_then(Value::as_str)
+        .ok_or("invalid_cv_upload_descriptor")?;
+    let expected_hash = object
+        .get("sha256")
+        .and_then(Value::as_str)
+        .filter(|value| {
+            value.len() == 64
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        })
+        .ok_or("invalid_cv_upload_descriptor")?;
+    if object.get("mimeType").and_then(Value::as_str) != Some("application/pdf")
+        || object.get("classification").and_then(Value::as_str) != Some("safe_verified")
+    {
+        return Err("invalid_cv_upload_descriptor");
+    }
+    let path = crate::checked_career_ops_artifact(root, relative_path)
+        .map_err(|_| "cv_upload_artifact_unavailable")?;
+    let bytes = fs::read(path).map_err(|_| "cv_upload_artifact_unavailable")?;
+    if bytes.is_empty() || bytes.len() > MAX_CV_PDF_BYTES {
+        return Err("cv_upload_artifact_size_invalid");
+    }
+    let actual_hash = format!("{:x}", Sha256::digest(&bytes));
+    if actual_hash != expected_hash {
+        return Err("cv_upload_artifact_changed");
+    }
+    let upload = json!({
+        "fieldId": field_id,
+        "fileName": "HereForWork-tailored-CV.pdf",
+        "mimeType": "application/pdf",
+        "contentBase64": STANDARD.encode(bytes),
+        "sha256": expected_hash,
+        "classification": "safe_verified"
+    });
+    payload
+        .as_object_mut()
+        .ok_or("invalid_cv_upload_descriptor")?
+        .insert("uploads".to_string(), json!([upload]));
+    Ok(())
 }
 
 #[derive(Debug, Deserialize)]
@@ -403,6 +475,42 @@ pub fn socket_path(app_data_dir: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
+
+    #[test]
+    fn cv_bytes_are_materialized_only_for_the_transient_browser_response() {
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
+        use sha2::{Digest, Sha256};
+
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("career-ops");
+        let relative = "output/role/cv/tailored/v001/cv.pdf";
+        let path = root.join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let bytes = b"%PDF-1 verified";
+        std::fs::write(&path, bytes).unwrap();
+        let hash = format!("{:x}", Sha256::digest(bytes));
+        let mut payload = json!({
+            "plan": { "protocolVersion": 1, "snapshotFingerprint": "a".repeat(64), "instructions": [] },
+            "cvUpload": {
+                "fieldId": "resume",
+                "relativePath": relative,
+                "sha256": hash,
+                "fileName": "HereForWork-tailored-CV.pdf",
+                "mimeType": "application/pdf",
+                "classification": "safe_verified"
+            }
+        });
+
+        super::materialize_browser_payload(&root, &mut payload).unwrap();
+
+        assert!(payload.get("cvUpload").is_none());
+        assert_eq!(payload["uploads"][0]["fieldId"], "resume");
+        assert_eq!(
+            payload["uploads"][0]["contentBase64"],
+            STANDARD.encode(bytes)
+        );
+        assert!(!payload.to_string().contains(relative));
+    }
 
     #[test]
     fn form_snapshot_accepts_known_and_generic_public_https_hosts() {

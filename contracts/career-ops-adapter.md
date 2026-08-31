@@ -45,11 +45,13 @@ The extension keeps provider execution separate from canonical writes:
    a conservative generic context instead of rejecting the role.
 2. HereForWork invokes the selected Codex or Claude subscription CLI in an
    ephemeral, tool-free working directory.
-3. HereForWork evaluates the typed score, legitimacy, and authorization result before
-   artifact commit. A viable match continues when authorization is unknown or bounded
-   research is inconclusive; the uncertainty remains in the report and live legal fields
-   remain user-owned. Confirmed authorization or legitimacy incompatibilities are
-   discarded, while other material fit or legitimacy uncertainty returns to Needs decision.
+3. Discovery excludes typed `suspicious` findings before Queue. HereForWork then evaluates
+   the typed score, legitimacy, and authorization result before artifact commit. A viable
+   match continues when authorization is unknown, bounded research is inconclusive, or
+   legitimacy is `Proceed with Caution`; the concrete warning remains in the report and
+   live legal fields remain user-owned. A confirmed authorization conflict or newly
+   detected `Suspicious` result is discarded, while a below-threshold verified match
+   returns to Needs decision.
 4. `preparation.result.commit` rejects a stale context or invalid result, runs
    career-ops fact and artifact checks, and atomically publishes the report and
    tailored CV references. It does not update application status.
@@ -76,6 +78,14 @@ Safe-fill values must either map to a known verified profile fact or appear exac
 the career-ops source named by the provider's provenance. This covers direct CV/profile
 facts such as phone, location, LinkedIn, GitHub, portfolio, education, and employment
 details without turning model output into an unverified fact source.
+
+The CV upload is not provider-authored. HereForWork may create an internal upload
+descriptor only for one inspected, unambiguous CV/resume file control and the exact PDF
+path and SHA-256 recorded by the committed career-ops preparation manifest. The bridge
+rechecks the root boundary, size, and hash and materializes bytes only in the transient
+message to the approved extension; HereForWork does not store those PDF bytes. The
+extension preserves any file already selected by the user and skips ambiguous controls,
+non-PDF controls, unsupported attachment types, or unverifiable inputs.
 
 Canonical decision operations are:
 

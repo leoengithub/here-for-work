@@ -55,7 +55,12 @@ export function isControlVisible(element: HTMLInputElement | HTMLTextAreaElement
 export function classifyField(label: string, inputType: string, autocomplete = ""): { classification: FieldClassification; reason: string } {
   const normalized = `${label} ${inputType} ${autocomplete}`.toLowerCase();
   const semanticLabel = label.trim().toLowerCase();
-  if (inputType === "file") return { classification: "unsupported", reason: "File attachment stays with the user." };
+  if (inputType === "file") {
+    if (/\b(resume|résumé|cv|curriculum vitae)\b/.test(semanticLabel) && !/cover letter/.test(semanticLabel)) {
+      return { classification: "safe_verified", reason: "May receive only the verified tailored career-ops PDF." };
+    }
+    return { classification: "unsupported", reason: "Only an unambiguous resume or CV PDF control is supported." };
+  }
   if (/password|social security|passport|national id|date of birth|birth date/.test(normalized)) {
     return { classification: "sensitive", reason: "Identity or account data requires the user." };
   }

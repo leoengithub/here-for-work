@@ -21,5 +21,6 @@ export interface HereForWorkDiscoveryDataset {
     queueGroup: "strong_match" | "other_new" | "needs_decision";
     eligibilitySummary: string;
     uncertainty: string | null;
+    legitimacy?: "high_confidence" | "proceed_with_caution" | "suspicious";
   }[];
 }

@@ -1,5 +1,5 @@
 import { BROWSER_COMMAND_TYPES } from "./contracts";
-import type { BrowserCommand, FillPlan } from "./contracts";
+import type { BrowserCommand, FileUploadInstruction, FillPlan } from "./contracts";
 import { createInstallationIdResolver } from "./identity";
 import { retryMessage } from "./message-retry";
 import { isConfirmedNativeResponse, postMessageSafely } from "./native-port";
@@ -127,7 +127,10 @@ async function executeCommand(command: BrowserCommand): Promise<unknown> {
     const tabId = await rememberedTabId(command.sessionId);
     const plan = command.payload.plan as FillPlan | undefined;
     if (!plan) throw new Error("Fill plan is missing.");
-    return chrome.tabs.sendMessage(tabId, { type: "fill_plan", plan });
+    const uploads = Array.isArray(command.payload.uploads)
+      ? command.payload.uploads as FileUploadInstruction[]
+      : [];
+    return chrome.tabs.sendMessage(tabId, { type: "fill_plan", plan, uploads });
   }
   if (command.commandType === "release_for_review") {
     let tabId: number;

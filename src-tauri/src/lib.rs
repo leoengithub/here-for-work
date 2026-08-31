@@ -15,6 +15,7 @@ use domain::{
     IntegrationHealth, MaintenanceResult, PreparationDetail, PrepareRoleOutcome, QueueFilters,
     ReconcileResult, RestorePreflight, ScheduledRun,
 };
+use sha2::Digest;
 use store::Store;
 use tauri::Manager;
 use tauri_plugin_autostart::ManagerExt;
@@ -219,11 +220,6 @@ fn preparation_gate(result: &serde_json::Value) -> Result<PreparationGate, Strin
     if score < 4.0 {
         return Ok(PreparationGate::NeedsDecision(
             "Preparation stopped before creating files because the verified match score is below 4.0.",
-        ));
-    }
-    if legitimacy == "Proceed with Caution" {
-        return Ok(PreparationGate::NeedsDecision(
-            "Preparation stopped before creating files because legitimacy still needs review.",
         ));
     }
     Ok(PreparationGate::Proceed)
@@ -518,7 +514,10 @@ fn cancel_preparation(role_id: String, state: tauri::State<'_, AppState>) -> Res
     Ok(true)
 }
 
-fn checked_career_ops_artifact(root: &std::path::Path, relative: &str) -> Result<PathBuf, String> {
+pub(crate) fn checked_career_ops_artifact(
+    root: &std::path::Path,
+    relative: &str,
+) -> Result<PathBuf, String> {
     let canonical_root = root.canonicalize().map_err(|error| error.to_string())?;
     let candidate = canonical_root
         .join(relative)
@@ -528,6 +527,54 @@ fn checked_career_ops_artifact(root: &std::path::Path, relative: &str) -> Result
         return Err("Artifact is outside the configured career-ops output roots.".to_string());
     }
     Ok(candidate)
+}
+
+fn verified_cv_upload_descriptor(
+    root: &std::path::Path,
+    work: &crate::domain::BrowserAnswerWork,
+) -> Result<Option<serde_json::Value>, String> {
+    const MAX_CV_PDF_BYTES: u64 = 600_000;
+
+    let eligible_fields = work
+        .snapshot
+        .get("fields")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|field| {
+            field.get("control").and_then(serde_json::Value::as_str) == Some("input")
+                && field.get("inputType").and_then(serde_json::Value::as_str) == Some("file")
+                && field
+                    .get("classification")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("safe_verified")
+        })
+        .collect::<Vec<_>>();
+    let [field] = eligible_fields.as_slice() else {
+        return Ok(None);
+    };
+    let field_id = field
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "cv_upload_field_invalid".to_string())?;
+    let path = checked_career_ops_artifact(root, &work.cv_pdf_path)
+        .map_err(|_| "cv_upload_artifact_unavailable".to_string())?;
+    let bytes = std::fs::read(path).map_err(|_| "cv_upload_artifact_unavailable".to_string())?;
+    if bytes.is_empty() || bytes.len() as u64 > MAX_CV_PDF_BYTES {
+        return Err("cv_upload_artifact_size_invalid".to_string());
+    }
+    let actual_hash = format!("{:x}", sha2::Sha256::digest(&bytes));
+    if actual_hash != work.cv_pdf_hash {
+        return Err("cv_upload_artifact_changed".to_string());
+    }
+    Ok(Some(serde_json::json!({
+        "fieldId": field_id,
+        "relativePath": work.cv_pdf_path,
+        "sha256": work.cv_pdf_hash,
+        "fileName": "HereForWork-tailored-CV.pdf",
+        "mimeType": "application/pdf",
+        "classification": "safe_verified"
+    })))
 }
 
 #[tauri::command]
@@ -928,12 +975,16 @@ fn start_answer_worker(app: tauri::AppHandle) -> Result<(), String> {
                     {
                         return Err("stale_answer_result".to_string());
                     }
+                    let cv_upload = verified_cv_upload_descriptor(
+                        &state.adapter.career_ops_root,
+                        &work,
+                    )?;
                     let validated = state
                         .adapter
                         .validate_answers(
                             &work.preparation_id,
                             &work.report_path,
-                            work.snapshot,
+                            work.snapshot.clone(),
                             result,
                         )
                         .map_err(|_| "answer_validation_failed".to_string())?;
@@ -952,6 +1003,7 @@ fn start_answer_worker(app: tauri::AppHandle) -> Result<(), String> {
                             &validated.context_hash,
                             &validated.fill_plan,
                             &validated.review_items,
+                            cv_upload.as_ref(),
                         )
                         .map_err(|_| "answer_commit_failed".to_string())?;
                     Ok(())
@@ -1545,6 +1597,45 @@ mod tests {
     }
 
     #[test]
+    fn cv_upload_descriptor_is_bound_to_the_verified_preparation_artifact() {
+        use sha2::{Digest, Sha256};
+
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("career-ops");
+        let cv_directory = root.join("output/role/cv/tailored/v001");
+        std::fs::create_dir_all(&cv_directory).unwrap();
+        let bytes = b"%PDF-1 verified tailored CV";
+        std::fs::write(cv_directory.join("cv.pdf"), bytes).unwrap();
+        let hash = format!("{:x}", Sha256::digest(bytes));
+        let work = crate::domain::BrowserAnswerWork {
+            session_id: "session".to_string(),
+            preparation_id: "preparation".to_string(),
+            provider: "codex".to_string(),
+            report_path: "reports/role.md".to_string(),
+            cv_pdf_path: "output/role/cv/tailored/v001/cv.pdf".to_string(),
+            cv_pdf_hash: hash.clone(),
+            snapshot: serde_json::json!({
+                "fields": [{
+                    "id": "resume",
+                    "control": "input",
+                    "inputType": "file",
+                    "classification": "safe_verified"
+                }]
+            }),
+            snapshot_fingerprint: "a".repeat(64),
+        };
+
+        let descriptor = super::verified_cv_upload_descriptor(&root, &work)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(descriptor["fieldId"], "resume");
+        assert_eq!(descriptor["relativePath"], work.cv_pdf_path);
+        assert_eq!(descriptor["sha256"], hash);
+        assert!(descriptor.get("contentBase64").is_none());
+    }
+
+    #[test]
     fn preparation_gate_allows_viable_matches_when_authorization_is_not_explicitly_blocked() {
         for authorization in ["excellent", "interesting", "investigate"] {
             let result = serde_json::json!({
@@ -1561,24 +1652,29 @@ mod tests {
     }
 
     #[test]
-    fn preparation_gate_holds_uncertain_roles_before_artifacts() {
-        for result in [
-            serde_json::json!({
-                "score": 3.9,
-                "legitimacy": "High Confidence",
-                "authorizationConfidence": "excellent"
-            }),
-            serde_json::json!({
-                "score": 4.5,
-                "legitimacy": "Proceed with Caution",
-                "authorizationConfidence": "excellent"
-            }),
-        ] {
-            assert!(matches!(
-                super::preparation_gate(&result).unwrap(),
-                PreparationGate::NeedsDecision(_)
-            ));
-        }
+    fn preparation_gate_holds_low_match_scores_before_artifacts() {
+        let result = serde_json::json!({
+            "score": 3.9,
+            "legitimacy": "High Confidence",
+            "authorizationConfidence": "excellent"
+        });
+        assert!(matches!(
+            super::preparation_gate(&result).unwrap(),
+            PreparationGate::NeedsDecision(_)
+        ));
+    }
+
+    #[test]
+    fn preparation_gate_allows_caution_when_no_concrete_blocker_exists() {
+        let result = serde_json::json!({
+            "score": 4.5,
+            "legitimacy": "Proceed with Caution",
+            "authorizationConfidence": "investigate"
+        });
+        assert!(matches!(
+            super::preparation_gate(&result).unwrap(),
+            PreparationGate::Proceed
+        ));
     }
 
     #[test]

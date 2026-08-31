@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { classifyField, detectAts, inspectForm } from "./ats";
 import { BROWSER_COMMAND_TYPES } from "./contracts";
-import type { FillPlan } from "./contracts";
+import type { FileUploadInstruction, FillPlan } from "./contracts";
 import { applyFillPlan } from "./fill";
 import { installFinalizationGuard } from "./guard";
 
@@ -39,6 +39,8 @@ describe("ATS trust boundary", () => {
     expect(classifyField("LinkedIn URL", "url").classification).toBe("safe_verified");
     expect(classifyField("GitHub URL", "url").classification).toBe("safe_verified");
     expect(classifyField("Portfolio website", "url").classification).toBe("safe_verified");
+    expect(classifyField("Resume / CV", "file").classification).toBe("safe_verified");
+    expect(classifyField("Cover letter", "file").classification).toBe("unsupported");
     expect(classifyField("Tell us something", "textarea").classification).toBe("unknown");
   });
 
@@ -134,6 +136,73 @@ describe("ATS trust boundary", () => {
 
     expect(result.map((item) => item.status)).toEqual(["verified", "skipped"]);
     expect(doc.querySelector<HTMLInputElement>("#email")?.value).toBe("verified@example.test");
+  });
+
+  it("attaches the manifest-verified tailored CV to an unambiguous PDF control", async () => {
+    const doc = new DOMParser().parseFromString(`
+      <form><label for="resume">Resume / CV</label><input id="resume" type="file" accept="application/pdf"></form>
+    `, "text/html");
+    const snapshot = await inspectForm(doc, new URL("https://apply.example.com/form"));
+    const bytes = Uint8Array.from([37, 80, 68, 70, 45, 49]);
+    const digest = await crypto.subtle.digest("SHA-256", bytes);
+    const hash = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+    const upload: FileUploadInstruction = {
+      fieldId: "resume",
+      fileName: "HereForWork-tailored-CV.pdf",
+      mimeType: "application/pdf",
+      contentBase64: btoa(String.fromCharCode(...bytes)),
+      sha256: hash,
+      classification: "safe_verified",
+    };
+    const plan: FillPlan = {
+      protocolVersion: 1,
+      snapshotFingerprint: snapshot.fingerprint,
+      instructions: [],
+    };
+
+    const results = await applyFillPlan(plan, snapshot.fingerprint, doc, [upload], (element, file) => {
+      Object.defineProperty(element, "files", {
+        configurable: true,
+        value: { 0: file, length: 1, item: () => file },
+      });
+    });
+
+    expect(results).toEqual([{ fieldId: "resume", status: "verified", reason: null }]);
+    expect(doc.querySelector<HTMLInputElement>("#resume")?.files?.item(0)?.name).toBe("HereForWork-tailored-CV.pdf");
+  });
+
+  it("preserves a CV the user already selected", async () => {
+    const doc = new DOMParser().parseFromString(`
+      <form><label for="resume">Resume</label><input id="resume" type="file" accept=".pdf"></form>
+    `, "text/html");
+    const snapshot = await inspectForm(doc, new URL("https://apply.example.com/form"));
+    const element = doc.querySelector<HTMLInputElement>("#resume")!;
+    const selected = new File(["user"], "my-selected-cv.pdf", { type: "application/pdf" });
+    Object.defineProperty(element, "files", {
+      configurable: true,
+      value: { 0: selected, length: 1, item: () => selected },
+    });
+    const upload: FileUploadInstruction = {
+      fieldId: "resume",
+      fileName: "HereForWork-tailored-CV.pdf",
+      mimeType: "application/pdf",
+      contentBase64: "",
+      sha256: "a".repeat(64),
+      classification: "safe_verified",
+    };
+
+    const results = await applyFillPlan({
+      protocolVersion: 1,
+      snapshotFingerprint: snapshot.fingerprint,
+      instructions: [],
+    }, snapshot.fingerprint, doc, [upload]);
+
+    expect(results).toEqual([{
+      fieldId: "resume",
+      status: "skipped",
+      reason: "The CV already selected by the user was preserved.",
+    }]);
+    expect(element.files?.item(0)?.name).toBe("my-selected-cv.pdf");
   });
 
   it("guards the terminal control only until release", () => {

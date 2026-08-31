@@ -47,11 +47,11 @@ The first integration will use career-ops as the engine for verified profile dat
 - The desktop-first queue is a direct list without a lightweight detail pane.
 - Queue filters live in System, start from verified career-ops profile preferences, and apply to current unprepared roles and future imports.
 - Applications keeps one current row per role; Details opens a formatted career-ops report preview instead of exposing a question-answer log.
-- Preparation artifacts are committed only after the typed evaluation gate passes. Unknown authorization remains visible and proceeds; only an explicit incompatibility blocks preparation. Undo preparation records Discarded and deletes only the generated report and tailored-CV artifacts.
+- Suspicious findings are excluded before Queue. Preparation keeps a suspicious live result as a safety backstop; unknown authorization and `Proceed with Caution` legitimacy continue with their warnings preserved. Undo preparation records Discarded and deletes only the generated report and tailored-CV artifacts.
 - The browser extension is a focused form-inspection, filling, and verification companion, not the primary interface.
 - Any public HTTPS application URL is accepted; source listings receive best-effort application-link resolution and unknown sites use conservative generic inspection.
 - ATS-specific adapters improve reliability but never act as a support allowlist.
-- Verified CV/profile facts including phone, LinkedIn, GitHub, portfolio, and location are safe when directly grounded; sensitive, unknown, unsupported, or unverifiable fields are skipped while safe fields continue.
+- Verified CV/profile facts including phone, LinkedIn, GitHub, portfolio, and location are safe when directly grounded. The extension may attach only the manifest-verified tailored career-ops PDF to one unambiguous CV/resume control and preserves a file the user already selected; sensitive, unknown, ambiguous, unsupported, or unverifiable fields are skipped while safe fields continue.
 - HereForWork never submits an application or sends a message for the user.
 
 Read [PRODUCT.md](PRODUCT.md) before making product or interface decisions.

@@ -79,16 +79,16 @@ Shows the career-ops report, tailored CV, full evidence and uncertainty, prepara
 ## Core Loop
 
 1. HereForWork runs both discovery sources while the Mac is available.
-2. career-ops normalizes, deduplicates, checks liveness, and classifies the findings.
-3. HereForWork adds every viable role to the ordered queue.
+2. career-ops normalizes, deduplicates, checks liveness, and classifies the findings, excluding suspicious roles before presentation.
+3. HereForWork adds every viable, non-suspicious role to the ordered queue.
 4. A macOS notification announces new viable roles and opens the queue filtered to that run.
 5. The user selects **Prepare** for a role.
-6. career-ops evaluates the live role before artifacts are committed. A viable match continues even when the job description and bounded research leave authorization unresolved. A confirmed authorization or legitimacy incompatibility is recorded Discarded; other material fit or legitimacy uncertainty returns to Needs decision with a visible explanation.
+6. career-ops evaluates the live role before artifacts are committed. A viable match continues when authorization remains unresolved or legitimacy is `Proceed with Caution`, preserving the concrete warning for review. A confirmed authorization conflict or newly detected suspicious result is recorded Discarded; a below-threshold verified match returns to Needs decision.
 7. For a viable match, career-ops generates the full report and tailored CV.
 8. HereForWork automatically opens the application in a new tab of the user-selected ordinary Chrome profile.
 9. The extension inspects the live form and returns typed field descriptions.
 10. career-ops drafts answers grounded in verified profile sources and the inspected questions.
-11. The extension fills and verifies supported safe fields while skipping everything requiring the user.
+11. The extension fills and verifies supported safe fields and attaches the exact manifest-verified tailored career-ops PDF to one unambiguous CV/resume control. An existing user-selected file is preserved. Other file controls, ambiguous CV controls, unsupported types, and unverifiable fields are skipped.
 12. HereForWork notifies the user that the live form is ready for review.
 13. The user reviews the live page, completes missing fields, and physically clicks Submit.
 14. The user confirms the outcome in HereForWork.
@@ -142,7 +142,7 @@ Form results are grouped as:
 
 Safe fields continue even when another field needs the user. Partial completion is always Review required, never Ready.
 
-Safe verified fields include direct profile facts such as name, email, phone, current location, LinkedIn, GitHub, portfolio, and other discrete values that career-ops can trace exactly to verified profile or CV sources. Work authorization, sponsorship, demographic, consent, and other sensitive or uncertain answers remain skipped for the user.
+Safe verified fields include direct profile facts such as name, email, phone, current location, LinkedIn, GitHub, portfolio, and other discrete values that career-ops can trace exactly to verified profile or CV sources. The exact tailored career-ops PDF is also safe for an unambiguous CV/resume file control, but HereForWork preserves any file the user already selected. Work authorization, sponsorship, demographic, consent, other sensitive or uncertain answers, ambiguous attachment controls, and unsupported file types remain skipped for the user.
 
 ## Dismissal
 

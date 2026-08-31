@@ -48,6 +48,9 @@
           "eligibilitySummary": { "type": "string", "minLength": 1 },
           "uncertainty": {
             "oneOf": [{ "type": "string", "minLength": 1 }, { "type": "null" }]
+          },
+          "legitimacy": {
+            "enum": ["high_confidence", "proceed_with_caution", "suspicious"]
           }
         }
       }
