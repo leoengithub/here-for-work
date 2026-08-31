@@ -178,11 +178,13 @@ Every new component starts with a shadcn registry search. Registry code is adapt
 
 ### Navigation
 
-Primary navigation remains compact and familiar. Active state combines Quiet Ink, weight, and a Signal Lime marker. System stays a secondary utility action rather than a third primary destination.
+Primary navigation remains compact and familiar. Active state combines Quiet Ink, weight, and a Signal Lime marker. System stays a secondary utility action rather than a third primary destination and uses the established Hugeicons settings icon with an accessible label and 44-pixel target.
 
-### Role Row
+### Queue Role Card
 
-The role row is the signature working component. It stays list-like, not card-like, and preserves role, company, location, ATS, uncertainty, preparation state, and actions in a stable reading order. Narrow layouts may reflow metadata but never hide decision-changing information.
+The compact queue role card is the signature working component. Cards remain a single vertical list, with a flat Clean Surface, one-pixel Cool Border, gentle radius, and no shadow, expansion, whole-card click, or nested card. The linked role title occupies the top line alone. Company, location, optional source-backed age, and one decision-changing uncertainty share the secondary line below and wrap when required. Only actions occupy the right edge: quiet ghost Dismiss first, then primary Prepare. ATS, score, internal source counts, and preparation state stay out of Queue. Narrow layouts reflow actions beneath the content without hiding age, location, or uncertainty.
+
+The shadcn Card registry primitive was inspected before this pattern was implemented. Its generic header/content/footer regions added unnecessary nested structure for a semantic `ul > li > article` comparison list, so the existing project-owned role-row component was refined in place instead. Interactive controls continue to use the shared shadcn Button primitive and design tokens.
 
 ## Do's and Don'ts
 

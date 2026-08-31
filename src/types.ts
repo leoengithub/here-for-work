@@ -19,6 +19,7 @@ export interface RoleSummary {
   queueGroup: QueueGroup;
   eligibilitySummary: string;
   uncertainty: string | null;
+  postedAt: string | null;
   discoveredAt: string;
   applicationUrl: string | null;
   preparationState: PreparationState;

@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
+import { FileUploadIcon, Settings01Icon } from "@hugeicons/core-free-icons";
+import { HugeiconsIcon } from "@hugeicons/react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Alert, AlertAction, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -72,22 +74,14 @@ import type {
   PreparationDetail,
   QueueFilters,
 } from "./types";
+import { formatPublicationAge } from "./lib/publication-age";
 
 const groupOrder: QueueGroup[] = ["strong_match", "other_new", "needs_decision"];
 
-const groupCopy: Record<QueueGroup, { title: string; description: string }> = {
-  strong_match: {
-    title: "Strong matches",
-    description: "Verified fit with no known blocker.",
-  },
-  other_new: {
-    title: "Other new roles",
-    description: "Worth seeing, but not yet a strong match.",
-  },
-  needs_decision: {
-    title: "Needs a decision",
-    description: "A blocker or uncertainty needs your judgment.",
-  },
+const groupCopy: Record<QueueGroup, string> = {
+  strong_match: "Strong matches",
+  other_new: "Other new roles",
+  needs_decision: "Needs a decision",
 };
 
 const formatRelative = (iso: string): string => {
@@ -99,19 +93,6 @@ const formatRelative = (iso: string): string => {
   const elapsedHours = Math.round(elapsedMinutes / 60);
   if (elapsedHours < 24) return `${elapsedHours}h ago`;
   return date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
-};
-
-const atsLabel = (applicationUrl: string | null): string => {
-  if (!applicationUrl) return "Web form";
-  try {
-    const hostname = new URL(applicationUrl).hostname;
-    if (hostname.includes("ashbyhq.com")) return "Ashby";
-    if (hostname.includes("greenhouse.io")) return "Greenhouse";
-    if (hostname.includes("lever.co")) return "Lever";
-  } catch {
-    return "Web form";
-  }
-  return "Web form";
 };
 
 export function RoleRow({
@@ -131,46 +112,59 @@ export function RoleRow({
   onPrepare: (roleId: string) => void;
   onDismiss: (roleId: string) => void;
 }) {
+  const titleId = `queue-role-${role.id}-title`;
+  const statusId = `queue-role-${role.id}-status`;
+  const publicationAge = formatPublicationAge(role.postedAt);
   return (
-    <article className="role-row">
-      <span className="role-row__main">
-        {role.applicationUrl ? (
-          <a className="role-row__title" href={role.applicationUrl} target="_blank" rel="noreferrer">
-            {role.title}
-          </a>
-        ) : (
-          <span className="role-row__title">{role.title}</span>
-        )}
-        <span className="role-row__company">{role.company}</span>
-        {role.uncertainty ? <span className="role-row__uncertainty">{role.uncertainty}</span> : null}
-      </span>
-      <span className="role-row__meta">
-        <span>{role.location}</span>
-        <span>{atsLabel(role.applicationUrl)}</span>
-        {role.sourceCount > 1 ? <span>{role.sourceCount} source occurrences</span> : null}
-      </span>
-      <Badge variant="outline">{role.preparationState.replaceAll("_", " ")}</Badge>
-      <span className="role-row__actions">
-        <Button
-
-          type="button"
-          disabled={!canPrepare || busy || enqueuing}
-          aria-describedby="queue-action-status"
-          onClick={() => onPrepare(role.id)}
-        >
-          {enqueuing ? "Queueing…" : "Prepare"}
-        </Button>
-        <Button
-          variant="outline"
-          type="button"
-          disabled={!canDismiss || busy || enqueuing}
-          aria-describedby="queue-action-status"
-          onClick={() => onDismiss(role.id)}
-        >
-          Dismiss
-        </Button>
-      </span>
-    </article>
+    <li className="role-list__item">
+      <article className="role-card" aria-labelledby={titleId} aria-busy={enqueuing || undefined}>
+        <div className="role-card__heading">
+          {role.applicationUrl ? (
+            <a id={titleId} className="role-card__title" href={role.applicationUrl} target="_blank" rel="noreferrer">
+              {role.title}
+            </a>
+          ) : (
+            <span id={titleId} className="role-card__title">{role.title}</span>
+          )}
+        </div>
+        <p className="role-card__meta">
+          <span>{role.company}</span>
+          <span aria-hidden="true">·</span>
+          <span>{role.location}</span>
+          {publicationAge ? (
+            <>
+              <span aria-hidden="true">·</span>
+              <span className="role-card__age">{publicationAge}</span>
+            </>
+          ) : null}
+          {role.uncertainty ? (
+            <span className="role-card__uncertainty">{role.uncertainty}</span>
+          ) : null}
+        </p>
+        <div className="role-card__actions">
+          <Button
+            variant="ghost"
+            type="button"
+            disabled={!canDismiss || busy || enqueuing}
+            aria-describedby={statusId}
+            onClick={() => onDismiss(role.id)}
+          >
+            Dismiss
+          </Button>
+          <Button
+            type="button"
+            disabled={!canPrepare || busy || enqueuing}
+            aria-describedby={statusId}
+            onClick={() => onPrepare(role.id)}
+          >
+            {enqueuing ? "Queueing…" : "Prepare"}
+          </Button>
+        </div>
+        <span id={statusId} className="visually-hidden" role="status" aria-live="polite">
+          {enqueuing ? `${role.title} is being queued for preparation.` : ""}
+        </span>
+      </article>
+    </li>
   );
 }
 
@@ -389,6 +383,9 @@ function SystemPanel({
   queueFilters,
   onQueueFiltersChange,
   onSaveQueueFilters,
+  selectedProvider,
+  onSelectedProviderChange,
+  onToggleBackground,
   notificationsReady,
   onEnableNotifications,
   onTestNotification,
@@ -421,6 +418,9 @@ function SystemPanel({
   queueFilters: QueueFilters;
   onQueueFiltersChange: (filters: QueueFilters) => void;
   onSaveQueueFilters: () => void;
+  selectedProvider: "codex" | "claude";
+  onSelectedProviderChange: (provider: "codex" | "claude") => void;
+  onToggleBackground: () => void;
   notificationsReady: boolean;
   onEnableNotifications: () => void;
   onTestNotification: () => void;
@@ -506,6 +506,49 @@ function SystemPanel({
           Reconcile history
         </Button>
       </div>
+      <section className="queue-runtime-settings" aria-labelledby="queue-runtime-settings-title">
+        <div>
+          <h3 id="queue-runtime-settings-title">Queue settings</h3>
+          <p>Choose how preparation runs and whether HereForWork checks for work in the background.</p>
+        </div>
+        <div className="queue-runtime-settings__controls">
+          <Field className="provider-select">
+            <FieldLabel htmlFor="preparation-provider">Preparation provider</FieldLabel>
+            <Select
+              value={selectedProvider}
+              onValueChange={(value) => {
+                if (value === "codex" || value === "claude") onSelectedProviderChange(value);
+              }}
+              disabled={busy}
+            >
+              <SelectTrigger id="preparation-provider" size="sm" aria-label="Preparation provider">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="codex">Codex</SelectItem>
+                <SelectItem value="claude">Claude</SelectItem>
+              </SelectContent>
+            </Select>
+          </Field>
+          <div className="background-setting">
+            <div>
+              <span className="background-setting__label">Background checks</span>
+              <span className="background-setting__state">
+                {dashboard.backgroundEnabled ? "On" : "Off"}
+              </span>
+            </div>
+            <Button
+              variant="outline"
+              type="button"
+              aria-pressed={dashboard.backgroundEnabled}
+              onClick={onToggleBackground}
+              disabled={busy}
+            >
+              {dashboard.backgroundEnabled ? "Turn off" : "Turn on"}
+            </Button>
+          </div>
+        </div>
+      </section>
       <section className="queue-filter-settings" aria-labelledby="queue-filter-settings-title">
         <div className="queue-filter-settings__heading">
           <div>
@@ -1138,6 +1181,9 @@ export function App() {
           queueFilters={queueFiltersDraft ?? dashboard.queueFilters}
           onQueueFiltersChange={setQueueFiltersDraft}
           onSaveQueueFilters={() => void persistQueueFilters()}
+          selectedProvider={selectedProvider}
+          onSelectedProviderChange={setSelectedProvider}
+          onToggleBackground={() => void toggleBackground()}
           notificationsReady={notificationsReady}
           onEnableNotifications={() => void enableNotifications()}
           onTestNotification={() => void testNotification()}
@@ -1310,26 +1356,17 @@ export function App() {
               <h2 id="queue-title">Review queue</h2>
             </div>
             <div className="queue-heading__actions">
-              <Field className="provider-select">
-                <FieldLabel htmlFor="preparation-provider">Preparation provider</FieldLabel>
-                <Select
-                  value={selectedProvider}
-                  onValueChange={(value) => {
-                    if (value === "codex" || value === "claude") setSelectedProvider(value);
-                  }}
-                  disabled={busy}
-                >
-                  <SelectTrigger id="preparation-provider" size="sm" aria-label="Preparation provider">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="codex">Codex</SelectItem>
-                    <SelectItem value="claude">Claude</SelectItem>
-                  </SelectContent>
-                </Select>
-              </Field>
-              <Button variant="outline" type="button" onClick={() => fileInputRef.current?.click()} disabled={busy}>
-                Import
+              <Button
+                className="icon-action"
+                variant="outline"
+                size="icon"
+                type="button"
+                aria-label="Import discovery snapshot"
+                title="Import discovery snapshot"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={busy}
+              >
+                <HugeiconsIcon icon={FileUploadIcon} strokeWidth={2} />
               </Button>
             </div>
             <Input
@@ -1337,6 +1374,8 @@ export function App() {
               className="visually-hidden"
               type="file"
               accept="application/json,.json"
+              tabIndex={-1}
+              aria-hidden="true"
               onChange={(event) => {
                 const file = event.target.files?.[0];
                 if (file) void handleImport(file);
@@ -1364,13 +1403,10 @@ export function App() {
                 return (
                   <section className="queue-group" key={group} aria-labelledby={`${group}-heading`}>
                     <div className="queue-group__heading">
-                      <div>
-                        <h3 id={`${group}-heading`}>{groupCopy[group].title}</h3>
-                        <p>{groupCopy[group].description}</p>
-                      </div>
+                      <h3 id={`${group}-heading`}>{groupCopy[group]}</h3>
                       <span aria-label={`${roles.length} roles`}>{roles.length}</span>
                     </div>
-                    <div className="role-list">
+                    <ul className="role-list">
                       {roles.map((role) => (
                         <RoleRow
                           key={role.id}
@@ -1383,17 +1419,12 @@ export function App() {
                           onDismiss={(roleId) => void dismissQueueRole(roleId)}
                         />
                       ))}
-                    </div>
+                    </ul>
                   </section>
                 );
               })}
             </div>
           )}
-          {dashboard.roles.length > 0 ? (
-            <p className="queue-action-status" id="queue-action-status">
-              Prepare sends bounded career-ops context to the selected tool-free subscription CLI, then career-ops verifies and owns the report and CV. Dismiss records canonical history immediately and can be undone. Neither action submits an application.
-            </p>
-          ) : null}
         </section>
       </main>
     );
@@ -1425,23 +1456,20 @@ export function App() {
           </TabsList>
         </nav>
         <div className="topbar__actions">
-          <span className="status-line">
-            <span className="status-dot" data-active={dashboard.backgroundEnabled} aria-hidden="true" />
-            {dashboard.backgroundEnabled ? "Background checks on" : "Background checks off"}
-          </span>
-          <Button variant="outline" type="button" onClick={toggleBackground} disabled={busy}>
-            {dashboard.backgroundEnabled ? "Turn off" : "Turn on"}
-          </Button>
           <Button
+            className="icon-action"
             variant="outline"
+            size="icon"
             type="button"
+            aria-label="System settings"
+            title="System settings"
             aria-pressed={view === "system"}
             onClick={() => {
               setView("system");
               if (!health) void refreshHealth();
             }}
           >
-            System
+            <HugeiconsIcon icon={Settings01Icon} strokeWidth={2} />
           </Button>
         </div>
       </header>

@@ -9,8 +9,9 @@ describe("App", () => {
     render(<App />);
     expect(await screen.findByRole("heading", { name: "Review queue" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Your review queue is ready for its first run." })).toBeInTheDocument();
-    expect(screen.getByRole("combobox", { name: "Preparation provider" })).toBeEnabled();
-    expect(screen.getByRole("button", { name: "Import discovery snapshot" })).toBeEnabled();
+    expect(screen.queryByRole("combobox", { name: "Preparation provider" })).not.toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "Import discovery snapshot" })).toHaveLength(2);
+    expect(screen.getByRole("button", { name: "System settings" })).toBeEnabled();
   });
 
   it("keeps primary navigation focused on queue and applications", async () => {
@@ -38,6 +39,7 @@ describe("App", () => {
       queueGroup: "strong_match" as const,
       eligibilitySummary: "Strong match",
       uncertainty: null,
+      postedAt: "2026-08-30",
       discoveredAt: "2026-08-31T08:00:00Z",
       applicationUrl: "https://example.com/apply",
       preparationState: "not_started" as const,
@@ -45,7 +47,7 @@ describe("App", () => {
       canonicalStatus: null,
     };
     render(
-      <>
+      <ul>
         <RoleRow
           role={role}
           canPrepare
@@ -64,18 +66,30 @@ describe("App", () => {
           onPrepare={() => undefined}
           onDismiss={() => undefined}
         />
-      </>,
+      </ul>,
     );
 
     expect(screen.getByRole("button", { name: "Queueing…" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Prepare" })).toBeEnabled();
+    expect(screen.getAllByRole("button").map((button) => button.textContent)).toEqual([
+      "Dismiss",
+      "Queueing…",
+      "Dismiss",
+      "Prepare",
+    ]);
+    expect(screen.getAllByRole("listitem")).toHaveLength(2);
+    expect(screen.getAllByRole("article")).toHaveLength(2);
+    expect(screen.getByText("Frontend Engineer is being queued for preparation.")).toBeInTheDocument();
+    expect(screen.queryByText(/Ashby|Greenhouse|Lever|Web form/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/source occurrences|not started/i)).not.toBeInTheDocument();
   });
 
   it("keeps queue filters in System instead of primary navigation", async () => {
     render(<App />);
     await screen.findByRole("heading", { name: "Review queue" });
 
-    fireEvent.click(screen.getByRole("button", { name: "System" }));
+    expect(screen.queryByText("Background checks")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "System settings" }));
 
     expect(screen.getByRole("heading", { name: "Queue filters" })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "queue" })).toHaveAttribute("aria-selected", "false");
@@ -83,7 +97,9 @@ describe("App", () => {
     expect(screen.getByRole("checkbox", { name: "Include remote roles" })).toBeInTheDocument();
     expect(screen.getByRole("checkbox", { name: "Hide explicit authorization conflicts" })).toBeInTheDocument();
     expect(screen.getByRole("combobox", { name: "Chrome profile" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "settings" })).not.toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "Preparation provider" })).toBeInTheDocument();
+    expect(screen.getByText("Background checks")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Turn on" })).toBeInTheDocument();
   });
 
   it("explains a verified inspection without implying a completed application", () => {

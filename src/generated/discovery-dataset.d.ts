@@ -16,6 +16,10 @@ export interface HereForWorkDiscoveryDataset {
     title: string;
     location: string;
     discoveredAt: string;
+    /**
+     * Optional source-backed publication date or timestamp. Omit or use null when the source does not provide one.
+     */
+    postedAt?: string | null;
     applicationUrl: string | null;
     normalizedKey: string;
     queueGroup: "strong_match" | "other_new" | "needs_decision";

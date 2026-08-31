@@ -9,6 +9,7 @@ Stage: generic public-HTTPS path live-proven; Greenhouse and Lever live observat
 - Closing the window leaves one background core; reopening restores it.
 - Login launch is opt-in and has no menu-bar item.
 - The private proof snapshot imported 32 source occurrences into 30 normalized roles.
+- Schema v13 stores an optional source publication date on each source occurrence. Queue projects a date only when non-null occurrences agree; re-imported omission clears the occurrence value and conflicts omit the role-level age.
 - Canonical career-ops history now reconciles all 104 Markdown records through
   career-ops' own rebuildable SQLite index. HereForWork no longer redirects tracker
   reads and merge synchronization into a private derived database.
@@ -47,6 +48,11 @@ Stage: generic public-HTTPS path live-proven; Greenhouse and Lever live observat
   architecture with secondary System controls and no Activity tab. Applications keeps
   one current row per role and opens the formatted career-ops Markdown report in a
   right-side details panel rather than showing a question-answer log.
+- Queue cards reserve the first line for the role title, keep source-backed age and
+  decision metadata together below it, and reserve the right edge for Dismiss then
+  Prepare. Group descriptions and the repeated footer explanation are removed. Provider
+  selection and background checks now live in System; Queue's upload icon remains an
+  explicit selected-file JSON import rather than an automatic refresh.
 - Queue filters are initialized from verified career-ops preferences, remain editable in
   System, and apply to both current unprepared roles and future imports. The bounded
   local filter does not replace career-ops evaluation or scoring.
@@ -58,8 +64,7 @@ Stage: generic public-HTTPS path live-proven; Greenhouse and Lever live observat
 - Undo preparation records Discarded through the canonical adapter, removes only the
   generated report and tailored-CV preparation artifacts, and clears local preparation
   and browser state. It is unavailable after Applied is recorded.
-- Duplicate provenance remains visible as a source-occurrence count on each normalized
-  role rather than being hidden by consolidation.
+- Duplicate provenance remains persisted for reconciliation and diagnostics, but source-occurrence count is intentionally hidden from the decision-focused Queue.
 - Safe form fills are not released for human review until the validated answer snapshot
   has been persisted through career-ops' fixed application-answer writer. Persistence
   failure retries that canonical write without inspecting or filling the page again.

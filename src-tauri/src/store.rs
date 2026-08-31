@@ -16,7 +16,7 @@ use crate::domain::{
     SourceScheduleSummary,
 };
 
-const SCHEMA_VERSION: i64 = 12;
+const SCHEMA_VERSION: i64 = 13;
 const MAX_RUN_ATTEMPTS: i64 = 3;
 const MAX_BROWSER_COMMAND_ATTEMPTS: i64 = 3;
 const MAX_ACTIVE_PREPARATIONS: i64 = 2;
@@ -389,6 +389,15 @@ impl Store {
             )?;
             version = 12;
         }
+        if version < 13 {
+            self.connection.execute_batch(
+                "BEGIN IMMEDIATE;
+                 ALTER TABLE source_occurrences ADD COLUMN posted_at TEXT;
+                 UPDATE schema_meta SET version = 13;
+                 COMMIT;",
+            )?;
+            version = 13;
+        }
         if version != SCHEMA_VERSION {
             return Err(StoreError::Database(rusqlite::Error::InvalidQuery));
         }
@@ -431,13 +440,14 @@ impl Store {
             upsert_role(&transaction, &role_id, finding)?;
             transaction.execute(
                 "INSERT INTO source_occurrences (
-                   id, role_id, source_id, source, source_role_id, payload_hash, discovered_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                   id, role_id, source_id, source, source_role_id, payload_hash, discovered_at, posted_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
                  ON CONFLICT(source_id, source_role_id) DO UPDATE SET
                    role_id = excluded.role_id,
                    source = excluded.source,
                    payload_hash = excluded.payload_hash,
-                   discovered_at = excluded.discovered_at",
+                   discovered_at = excluded.discovered_at,
+                   posted_at = excluded.posted_at",
                 params![
                     Uuid::new_v4().to_string(),
                     role_id,
@@ -446,6 +456,7 @@ impl Store {
                     finding.source_role_id,
                     payload_hash,
                     finding.discovered_at,
+                    finding.posted_at,
                 ],
             )?;
         }
@@ -2856,6 +2867,7 @@ impl Store {
                r.id, r.company, r.title, r.location,
                COALESCE(MIN(s.source), 'Unknown'), COUNT(s.id),
                r.queue_group, r.eligibility_summary, r.uncertainty,
+               CASE WHEN COUNT(DISTINCT s.posted_at) = 1 THEN MIN(s.posted_at) ELSE NULL END,
                r.discovered_at, r.application_url, r.preparation_state,
                r.canonical_tracker_id, r.canonical_status
              FROM roles r
@@ -2886,11 +2898,12 @@ impl Store {
                     queue_group,
                     row.get::<_, String>(7)?,
                     row.get::<_, Option<String>>(8)?,
-                    row.get::<_, String>(9)?,
-                    row.get::<_, Option<String>>(10)?,
-                    row.get::<_, String>(11)?,
-                    row.get::<_, Option<i64>>(12)?,
-                    row.get::<_, Option<String>>(13)?,
+                    row.get::<_, Option<String>>(9)?,
+                    row.get::<_, String>(10)?,
+                    row.get::<_, Option<String>>(11)?,
+                    row.get::<_, String>(12)?,
+                    row.get::<_, Option<i64>>(13)?,
+                    row.get::<_, Option<String>>(14)?,
                 ))
             })?
             .map(role_summary_from_tuple)
@@ -2902,6 +2915,7 @@ impl Store {
                r.id, r.company, r.title, r.location,
                COALESCE(MIN(s.source), 'Unknown'), COUNT(s.id),
                r.queue_group, r.eligibility_summary, r.uncertainty,
+               CASE WHEN COUNT(DISTINCT s.posted_at) = 1 THEN MIN(s.posted_at) ELSE NULL END,
                r.discovered_at, r.application_url, r.preparation_state,
                r.canonical_tracker_id, r.canonical_status
              FROM roles r
@@ -2923,11 +2937,12 @@ impl Store {
                     queue_group,
                     row.get::<_, String>(7)?,
                     row.get::<_, Option<String>>(8)?,
-                    row.get::<_, String>(9)?,
-                    row.get::<_, Option<String>>(10)?,
-                    row.get::<_, String>(11)?,
-                    row.get::<_, Option<i64>>(12)?,
-                    row.get::<_, Option<String>>(13)?,
+                    row.get::<_, Option<String>>(9)?,
+                    row.get::<_, String>(10)?,
+                    row.get::<_, Option<String>>(11)?,
+                    row.get::<_, String>(12)?,
+                    row.get::<_, Option<i64>>(13)?,
+                    row.get::<_, Option<String>>(14)?,
                 ))
             })?
             .map(role_summary_from_tuple)
@@ -3343,6 +3358,7 @@ type RoleSummaryTuple = (
     String,
     String,
     Option<String>,
+    Option<String>,
     String,
     Option<String>,
     String,
@@ -3363,6 +3379,7 @@ fn role_summary_from_tuple(
         queue_group,
         eligibility_summary,
         uncertainty,
+        posted_at,
         discovered_at,
         application_url,
         preparation_state,
@@ -3381,6 +3398,7 @@ fn role_summary_from_tuple(
         queue_group: parsed_group,
         eligibility_summary,
         uncertainty,
+        posted_at,
         discovered_at,
         application_url,
         preparation_state,
@@ -3659,6 +3677,7 @@ mod tests {
           "title": "Frontend Engineer",
           "location": "Remote, Europe",
           "discoveredAt": "2026-08-30T09:00:00+02:00",
+          "postedAt": "2026-08-28",
           "applicationUrl": "https://example.test/jobs/1",
           "normalizedKey": "northstar-tools/frontend-engineer",
           "queueGroup": "needs_decision",
@@ -3685,7 +3704,40 @@ mod tests {
 
         assert_eq!(first.imported, 1);
         assert_eq!(second.unchanged, 1);
-        assert_eq!(store.dashboard().unwrap().roles.len(), 1);
+        let roles = store.dashboard().unwrap().roles;
+        assert_eq!(roles.len(), 1);
+        assert_eq!(roles[0].posted_at.as_deref(), Some("2026-08-28"));
+    }
+
+    #[test]
+    fn reimporting_an_occurrence_without_a_publication_date_clears_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+        store.import_dataset(DATASET).unwrap();
+        let without_posted_at = DATASET.replace("          \"postedAt\": \"2026-08-28\",\n", "");
+
+        let result = store.import_dataset(&without_posted_at).unwrap();
+
+        assert_eq!(result.updated, 1);
+        assert!(store.dashboard().unwrap().roles[0].posted_at.is_none());
+    }
+
+    #[test]
+    fn conflicting_source_publication_dates_are_omitted_from_the_role() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+        store.import_dataset(DATASET).unwrap();
+        let second_source = DATASET
+            .replace("source-a", "source-b")
+            .replace("role-1", "role-2")
+            .replace("2026-08-28", "2026-08-27");
+
+        store.import_dataset(&second_source).unwrap();
+
+        let dashboard = store.dashboard().unwrap();
+        let role = &dashboard.roles[0];
+        assert_eq!(role.source_count, 2);
+        assert!(role.posted_at.is_none());
     }
 
     #[test]

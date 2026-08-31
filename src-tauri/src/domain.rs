@@ -57,6 +57,7 @@ pub struct RoleSummary {
     pub queue_group: QueueGroup,
     pub eligibility_summary: String,
     pub uncertainty: Option<String>,
+    pub posted_at: Option<String>,
     pub discovered_at: String,
     pub application_url: Option<String>,
     pub preparation_state: String,
@@ -349,6 +350,8 @@ pub struct DiscoveryFinding {
     pub title: String,
     pub location: String,
     pub discovered_at: String,
+    #[serde(default)]
+    pub posted_at: Option<String>,
     pub application_url: Option<String>,
     pub normalized_key: String,
     pub queue_group: QueueGroup,

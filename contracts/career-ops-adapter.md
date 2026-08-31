@@ -30,6 +30,13 @@ The implemented read-only operations are:
 There is deliberately no arbitrary command operation and no operation for
 submitting an application or sending a message.
 
+The version-1 discovery dataset may include `postedAt` as a source-backed ISO date or
+zoned timestamp, or omit it when the producer has no publication evidence. HereForWork
+stores the nullable value per source occurrence and clears it when that occurrence is
+re-imported without a date. Merged roles expose it only when non-null occurrences agree;
+conflicts stay absent rather than selecting an earliest or latest value. Discovery time
+is never used as publication time.
+
 ## Writable personal-proof operations
 
 Writable operations require a matching, explicitly approved entry point in the

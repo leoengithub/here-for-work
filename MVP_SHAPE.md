@@ -56,7 +56,9 @@ Roles are grouped in this order:
 2. Other new roles.
 3. Needs decision.
 
-Every listed role has already passed the inclusion gates. A row contains only the role, company, location or remote arrangement, ATS when known, concise uncertainty when it changes the decision, preparation state, Prepare action, and secondary dismiss action. Listing age and discovery time do not appear.
+Every listed role has already passed the inclusion gates. Each group is a semantic list of compact, bounded cards. The linked role title owns the first line. A single secondary metadata line beneath it contains company, location or remote arrangement, optional source-backed relative listing age, and concise uncertainty when it changes the decision; it wraps rather than hides information. The right side contains only the quiet Dismiss action followed by the primary Prepare action. The card does not expand and is not itself clickable. ATS, source-occurrence count, preparation state, score, and discovery time do not appear.
+
+Listing age is shown without a prefix, as `Today`, `1 day ago`, or `N days ago`, using Europe/Madrid calendar days. It is absent when the source publication date is missing, invalid, in the future, or conflicts across merged source occurrences. `discoveredAt` and first-seen time are never substitutes for a source publication date.
 
 Selecting the role title opens the source listing. Selecting **Prepare** starts the complete application workflow without an intermediate lightweight detail view.
 
@@ -68,7 +70,9 @@ Selecting **Details** opens a right-side panel with a formatted preview of the c
 
 ### System
 
-System is a secondary utility surface, not a primary-navigation destination. It contains queue filters, source health, actionable run failures, browser pairing, provider checks, backup, export, and diagnostics. There is no Activity tab.
+System is a secondary utility surface, not a primary-navigation destination. It contains the preparation-provider choice, background-check status and control, queue filters, source health, actionable run failures, browser pairing, provider checks, backup, export, and diagnostics. There is no Activity tab. The header exposes System through an accessible settings-icon button rather than a third text destination.
+
+Queue retains a file-upload icon for explicit discovery-snapshot import. It opens the native file picker and imports the selected JSON; it is not labeled or presented as an automatic refresh.
 
 Queue filters are initialized from the verified career-ops profile and remain editable. They apply to current unprepared roles and future imports. The initial controls cover role families, seniority, locations, remote roles, and explicit authorization conflicts; they do not create a second scoring engine.
 
