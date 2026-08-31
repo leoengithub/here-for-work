@@ -114,24 +114,23 @@ const atsLabel = (applicationUrl: string | null): string => {
   return "Web form";
 };
 
-function RoleRow({
+export function RoleRow({
   role,
   canPrepare,
   canDismiss,
   busy,
+  enqueuing,
   onPrepare,
-  onCancel,
   onDismiss,
 }: {
   role: RoleSummary;
   canPrepare: boolean;
   canDismiss: boolean;
   busy: boolean;
+  enqueuing: boolean;
   onPrepare: (roleId: string) => void;
-  onCancel: (roleId: string) => void;
   onDismiss: (roleId: string) => void;
 }) {
-  const preparing = role.preparationState === "preparing";
   return (
     <article className="role-row">
       <span className="role-row__main">
@@ -155,16 +154,16 @@ function RoleRow({
         <Button
 
           type="button"
-          disabled={preparing ? false : !canPrepare || busy}
+          disabled={!canPrepare || busy || enqueuing}
           aria-describedby="queue-action-status"
-          onClick={() => preparing ? onCancel(role.id) : onPrepare(role.id)}
+          onClick={() => onPrepare(role.id)}
         >
-          {preparing ? "Cancel preparation" : "Prepare"}
+          {enqueuing ? "Queueing…" : "Prepare"}
         </Button>
         <Button
           variant="outline"
           type="button"
-          disabled={!canDismiss || busy}
+          disabled={!canDismiss || busy || enqueuing}
           aria-describedby="queue-action-status"
           onClick={() => onDismiss(role.id)}
         >
@@ -751,7 +750,8 @@ export function App() {
   const [preparationDetail, setPreparationDetail] = useState<PreparationDetail | null>(null);
   const [queueFiltersDraft, setQueueFiltersDraft] = useState<QueueFilters | null>(null);
   const [undoPreparationId, setUndoPreparationId] = useState<string | null>(null);
-  const [cancellationRequestedRoleId, setCancellationRequestedRoleId] = useState<string | null>(null);
+  const [enqueuingRoleIds, setEnqueuingRoleIds] = useState<Set<string>>(() => new Set());
+  const [cancellationRequestedRoleIds, setCancellationRequestedRoleIds] = useState<Set<string>>(() => new Set());
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -781,6 +781,15 @@ export function App() {
       }).catch(() => {
         // The primary action handler reports errors. Background refresh remains quiet.
       });
+      if (view === "applications") {
+        void getDashboard().then((state) => {
+          if (!active) return;
+          setDashboard(state);
+          setQueueFiltersDraft(state.queueFilters);
+        }).catch(() => {
+          // Per-role failures remain visible in the last successful dashboard state.
+        });
+      }
     };
     refresh();
     const interval = window.setInterval(refresh, 1_000);
@@ -981,24 +990,15 @@ export function App() {
     }
   };
 
-  const prepareQueueRole = async (roleId: string) => {
-    setBusy(true);
+  const prepareQueueRole = async (roleId: string, provider = selectedProvider) => {
+    setEnqueuingRoleIds((current) => new Set(current).add(roleId));
     setError(null);
     setNotice(null);
-    setDashboard((current) => current ? {
-      ...current,
-      roles: current.roles.map((role) => role.id === roleId ? { ...role, preparationState: "preparing" } : role),
-    } : current);
     try {
-      const outcome = await prepareRole(roleId, selectedProvider);
+      const outcome = await prepareRole(roleId, provider);
       setDashboard(outcome.dashboard);
       setQueueFiltersDraft(outcome.dashboard.queueFilters);
       setNotice(outcome.message);
-      if (outcome.disposition === "browser_started" || outcome.disposition === "prepared_browser_action_required") {
-        setView("applications");
-      } else {
-        setView("queue");
-      }
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
       try {
@@ -1007,20 +1007,29 @@ export function App() {
         // Preserve the actionable preparation error when refreshing state also fails.
       }
     } finally {
-      setCancellationRequestedRoleId(null);
-      setBusy(false);
+      setEnqueuingRoleIds((current) => {
+        const next = new Set(current);
+        next.delete(roleId);
+        return next;
+      });
     }
   };
 
   const cancelQueuePreparation = async (roleId: string) => {
-    if (cancellationRequestedRoleId === roleId) return;
-    setCancellationRequestedRoleId(roleId);
+    if (cancellationRequestedRoleIds.has(roleId)) return;
+    setCancellationRequestedRoleIds((current) => new Set(current).add(roleId));
     try {
       const requested = await cancelPreparation(roleId);
       if (!requested) setError("The preparation had already finished or stopped.");
+      setDashboard(await getDashboard());
     } catch (reason) {
-      setCancellationRequestedRoleId(null);
       setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setCancellationRequestedRoleIds((current) => {
+        const next = new Set(current);
+        next.delete(roleId);
+        return next;
+      });
     }
   };
 
@@ -1162,7 +1171,12 @@ export function App() {
         <h2 id="applications-title">Applications</h2>
         <p>One current status per application. Open Details when you want the full career-ops report.</p>
         {dashboard.preparations.length > 0 ? (
-          <ol className="preparation-list" aria-label="Application preparations">
+          <ol
+            className="preparation-list"
+            aria-label="Application preparations"
+            aria-live="polite"
+            aria-relevant="additions text"
+          >
             {dashboard.preparations.map((item) => {
               const latestSession = browserSessions
                 .filter((session) => session.purpose === "application" && session.preparationId === item.id)
@@ -1176,6 +1190,29 @@ export function App() {
                   <span>{item.company} · {item.provider}</span>
                 </div>
                 <Badge variant="outline">{status}</Badge>
+                {item.status === "queued" || item.status === "preparing" ? (
+                  <div className="preparation-list__actions">
+                    <Button
+                      variant="outline"
+                      type="button"
+                      onClick={() => void cancelQueuePreparation(item.roleId)}
+                      disabled={cancellationRequestedRoleIds.has(item.roleId)}
+                    >
+                      {cancellationRequestedRoleIds.has(item.roleId) ? "Cancelling…" : "Cancel preparation"}
+                    </Button>
+                  </div>
+                ) : null}
+                {item.status === "action_required" ? (
+                  <div className="preparation-list__actions">
+                    <Button
+                      type="button"
+                      onClick={() => void prepareQueueRole(item.roleId, item.provider)}
+                      disabled={enqueuingRoleIds.has(item.roleId)}
+                    >
+                      {enqueuingRoleIds.has(item.roleId) ? "Queueing…" : "Retry preparation"}
+                    </Button>
+                  </div>
+                ) : null}
                 {item.status === "completed" ? (
                   <div className="preparation-list__actions">
                     <Button variant="outline" type="button" onClick={() => void showPreparationDetail(item.id)} disabled={busy}>
@@ -1237,8 +1274,8 @@ export function App() {
         ) : (
           <Empty className="empty-state empty-state--compact" role="region" aria-labelledby="applications-empty-title">
             <EmptyHeader>
-              <EmptyTitle><h3 id="applications-empty-title">No prepared applications yet.</h3></EmptyTitle>
-              <EmptyDescription>Prepare a suitable role from Queue. HereForWork will add it here only after career-ops creates the verified materials.</EmptyDescription>
+              <EmptyTitle><h3 id="applications-empty-title">No application preparations yet.</h3></EmptyTitle>
+              <EmptyDescription>Select Prepare in Queue. The role appears here immediately while HereForWork works in the background.</EmptyDescription>
             </EmptyHeader>
           </Empty>
         )}
@@ -1341,8 +1378,8 @@ export function App() {
                           canPrepare={dashboard.adapterStatus === "ready" && role.applicationUrl !== null}
                           canDismiss={dashboard.adapterStatus === "ready"}
                           busy={busy}
+                          enqueuing={enqueuingRoleIds.has(role.id)}
                           onPrepare={(roleId) => void prepareQueueRole(roleId)}
-                          onCancel={(roleId) => void cancelQueuePreparation(roleId)}
                           onDismiss={(roleId) => void dismissQueueRole(roleId)}
                         />
                       ))}

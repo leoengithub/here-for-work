@@ -15,7 +15,7 @@ The last verified Apple Silicon package is built at:
 src-tauri/target/release/bundle/macos/HereForWork.app
 ```
 
-It includes the local React/Tauri queue, schema-v10 SQLite migrations, real private proof
+It includes the local React/Tauri queue, schema-v12 SQLite migrations, real private proof
 import, canonical-history reconciliation, scheduling/catch-up records, Codex and Claude
 CLI conformance, provider-neutral report/CV preparation, grounded live-form answers,
 login launch, notifications, backup/export, a native messaging host, and an unpacked
@@ -48,6 +48,7 @@ The first integration will use career-ops as the engine for verified profile dat
 - Queue filters live in System, start from verified career-ops profile preferences, and apply to current unprepared roles and future imports.
 - Applications keeps one current row per role; Details opens a formatted career-ops report preview instead of exposing a question-answer log.
 - Suspicious findings are excluded before Queue. Preparation keeps a suspicious live result as a safety backstop; unknown authorization and `Proceed with Caution` legitimacy continue with their warnings preserved. Undo preparation records Discarded and deletes only the generated report and tailored-CV artifacts.
+- Prepare is a durable background queue: two report/CV jobs may run concurrently while Queue stays interactive, and Applications shows queued and in-progress roles immediately. Browser inspection and filling remain FIFO and one application at a time; one failure cannot block later roles.
 - The browser extension is a focused form-inspection, filling, and verification companion, not the primary interface.
 - Any public HTTPS application URL is accepted; source listings receive best-effort application-link resolution and unknown sites use conservative generic inspection.
 - ATS-specific adapters improve reliability but never act as a support allowlist.

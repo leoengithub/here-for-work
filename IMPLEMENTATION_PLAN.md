@@ -293,6 +293,29 @@ Gate:
 
 Vault decision: a private trial journal is useful here. Stable defects, recovery steps, and product conclusions must be summarized into repository issues or documentation before implementation relies on them.
 
+## Iteration 10 — Multi-role preparation pipeline
+
+Objective: let the user keep selecting viable roles while HereForWork completes each preparation-to-review workflow safely in the background.
+
+Deliverables:
+
+- Durable FIFO preparation queue with two concurrent report/CV workers.
+- Immediate per-role transition from Queue to Applications with queued, preparing, and action-required states.
+- Serialized career-ops canonical writes even when provider work overlaps.
+- A separate one-application browser lane that orders inspection, grounded drafting, safe filling, verification, and release.
+- Background Chrome tab opening that does not steal focus.
+- Role-scoped cancellation, retry, failure recovery, and notifications; one failed role never stalls later work.
+- No global UI busy state for Prepare.
+
+Gate:
+
+- Three rapid Prepare selections leave Queue usable, run no more than two provider preparations at once, and preserve the third durably.
+- Browser commands for a later role are not leased until the earlier active application reaches review-required or action-required.
+- Restart preserves queued work and converts an interrupted active provider invocation into a truthful action-required state.
+- No browser path or test can submit, finalize, or activate the terminal page control.
+
+Vault decision: this is a stable implementation contract and belongs in repository documentation. The Obsidian product notebook only needs a concise decision mirror; it must not contain operational job data or generated artifacts.
+
 ## Later — Trusted-user distribution
 
 Deferred until the personal proof is accepted:

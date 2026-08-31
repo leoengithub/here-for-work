@@ -124,6 +124,8 @@ pub struct PrepareRoleOutcome {
 #[derive(Debug, Clone)]
 pub struct PreparationWork {
     pub id: String,
+    pub role_id: String,
+    pub provider: String,
     pub role: AdapterRoleContext,
 }
 
