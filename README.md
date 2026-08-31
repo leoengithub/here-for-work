@@ -36,7 +36,7 @@ authorized fill/read-back/release paths now pass. Only verified Name and Email w
 all other fields and the user-owned terminal action remained untouched. Greenhouse and
 Lever still require separate live no-finalization observations.
 
-The first integration will use career-ops as the engine for verified profile data, evaluation, application artifacts, grounded answers, and canonical tracking. HereForWork will own orchestration, the unified review queue, user-triggered preparation, notifications, retries, and the browser workflow.
+The first integration uses career-ops as the sole authority for verified profile data, native 1–5 match scoring, application artifacts and their provenance, grounded answers, and canonical tracking. HereForWork owns orchestration, the unified review queue, user-triggered preparation, notifications, retries, and the browser workflow. Scheduling is an end-state HereForWork responsibility; the existing scheduled tasks remain the authoritative executors until each source completes the staged, explicitly approved migration in [SCHEDULING_MIGRATION.md](SCHEDULING_MIGRATION.md).
 
 ## Product boundaries
 
@@ -52,7 +52,7 @@ The first integration will use career-ops as the engine for verified profile dat
 - The browser extension is a focused form-inspection, filling, and verification companion, not the primary interface.
 - Any public HTTPS application URL is accepted; source listings receive best-effort application-link resolution and unknown sites use conservative generic inspection.
 - ATS-specific adapters improve reliability but never act as a support allowlist.
-- Verified CV/profile facts including phone, LinkedIn, GitHub, portfolio, and location are safe when directly grounded. The extension may attach only the manifest-verified tailored career-ops PDF to one unambiguous CV/resume control and preserves a file the user already selected; sensitive, unknown, ambiguous, unsupported, or unverifiable fields are skipped while safe fields continue.
+- Verified profile facts including phone, LinkedIn, GitHub, portfolio, and location are safe when directly grounded. The extension may attach only the manifest-matched tailored career-ops PDF to one unambiguous CV/resume control and preserves a file the user already selected; sensitive, unknown, ambiguous, unsupported, or unverifiable fields are skipped while safe fields continue. A CV may be described as having passed bounded career-ops fact checks, but not as fully verified or proven truthful until structured, source-backed change provenance exists.
 - HereForWork never submits an application or sends a message for the user.
 
 Read [PRODUCT.md](PRODUCT.md) before making product or interface decisions.
@@ -80,7 +80,7 @@ corepack pnpm build:extension
 corepack pnpm tauri build
 ```
 
-career-ops' verified PDF writer also requires the Chromium revision pinned by its
+career-ops' PDF writer also requires the Chromium revision pinned by its
 installed Playwright package:
 
 ```sh

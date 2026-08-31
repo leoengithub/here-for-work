@@ -13,7 +13,8 @@ This plan implements a personal proof before distribution. Every iteration must 
   Ashby application page completed the inspect/release connection proof with zero fills
   and no terminal action.
 - Iteration 4 completed a real Codex preparation through career-ops, producing canonical
-  Evaluated row 103 and verified report/PDF artifacts with matching hashes.
+  Evaluated row 103 and report/PDF artifacts with matching hashes. Those hashes establish
+  artifact identity, not complete content truth.
 - Under specific user authorization, the Ashby vertical slice filled and verified only
   Name and Email, persisted those observed values through career-ops, and released the
   page at `review_required`. LinkedIn, GitHub, declarations, sensitive controls, and
@@ -26,8 +27,8 @@ This plan implements a personal proof before distribution. Every iteration must 
 
 ## Cross-cutting rules
 
-- career-ops remains canonical for verified facts, evaluation, generated artifacts, grounded answers, and application history.
-- HereForWork owns operational persistence, scheduling, queue UX, preparation state, retries, notifications, and browser handoff.
+- career-ops remains canonical for verified facts, native 1–5 match scoring, generated artifacts and their provenance, grounded answers, and application history. HereForWork does not rescore or convert match output into a percentage or probability.
+- HereForWork owns operational persistence, queue UX, preparation state, retries, notifications, and browser handoff. Scheduling is its end-state responsibility; current executor authority remains with the existing tasks until the per-source migration contract passes and the user approves cutover.
 - The extension only inspects, fills allowlisted safe fields, and verifies. It never performs the final page action.
 - Exact answers are drafted only after a live form snapshot is inspected.
 - Untrusted job, company, recruiter, and form content is data, never instructions.
@@ -162,7 +163,7 @@ Vault decision: authentication remains in provider-owned storage. Record only pe
 
 ## Iteration 5 — Scheduling and source ownership
 
-Objective: demonstrate consolidated catch-up without prematurely disabling either current workflow.
+Objective: demonstrate consolidated catch-up and migration evidence without prematurely disabling either current workflow. [SCHEDULING_MIGRATION.md](SCHEDULING_MIGRATION.md) is the authoritative contract for stages, per-source authority, promotion, and rollback.
 
 Deliverables:
 
@@ -182,9 +183,11 @@ Gate:
 
 Cutover checkpoint requiring user approval:
 
-- Compare at least one parallel observation period.
-- Reconcile duplicates and misses.
-- Explicitly choose which old scheduled task to pause or retain. HereForWork never changes it implicitly.
+- Establish versioned typed result ingestion from the authoritative executor.
+- Complete a 14-day strictly read-only shadow with all expected windows accounted for, zero silent loss, zero duplicate notifications or shadow-caused Gmail/canonical effects, crash/retry idempotency, safe cursor behavior, and catch-up evidence.
+- Reconcile every duplicate, miss, and result difference before promotion.
+- Canary Frontend Role Scan first. Canary EU Job Radar only after typed, idempotent Gmail-effect receipts exist.
+- Explicitly approve the source handoff and choose which legacy task to pause. Preserve its configuration and cursor for rollback; HereForWork never changes it implicitly.
 
 Vault decision: source credentials and private mailbox setup belong in the vault or Keychain-backed onboarding, while schedule semantics remain in the repository.
 

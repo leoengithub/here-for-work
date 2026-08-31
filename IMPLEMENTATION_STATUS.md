@@ -86,8 +86,9 @@ Stage: generic public-HTTPS path live-proven; Greenhouse and Lever live observat
   compatible fields appear, the application is released for manual review with zero fills
   instead of being rejected; the connection diagnostic still reports an empty page as a failure.
 - The packaged app completed a real Codex preparation for that role. career-ops owns
-  report `reports/103-ashby-2026-08-30.md`, a two-page A4 verified PDF, canonical
-  Evaluated tracker row 103, and matching SHA-256 references in HereForWork.
+  report `reports/103-ashby-2026-08-30.md`, a two-page A4 PDF that passed bounded
+  career-ops fact checks, canonical Evaluated tracker row 103, and matching SHA-256
+  references in HereForWork. The hashes establish artifact identity, not complete truth.
 - Provider result context is bound by HereForWork to the exact synchronous invocation
   context instead of relying on a model to reproduce a 64-character hash. The adapter
   still recomputes the context before committing, so a real career-ops source change
@@ -117,6 +118,13 @@ Stage: generic public-HTTPS path live-proven; Greenhouse and Lever live observat
   the form.
 
 ## Current validation
+
+The current adapter persists artifact and context hashes and reports bounded validation
+outcomes. It does not yet carry structured, source-backed CV change provenance with
+classified changes, source references, unresolved additions, and an explicit review or
+block result. Therefore the implementation may not describe a CV as fully verified or
+proven truthful. Match scoring remains career-ops-owned and must be presented on its native
+1–5 scale without percentage or probability conversion.
 
 - React and extension TypeScript checks pass.
 - Thirty extension-focused Vitest tests and ten adapter tests pass, including hidden
@@ -182,7 +190,14 @@ their own scoped authority before transmitting personal data.
 
 ## Deliberately not cut over
 
-- The two existing scheduled workflows are not paused or edited.
+- The two existing Codex/ChatGPT scheduled workflows are not paused or edited. They remain
+  the operationally authoritative executors for their respective sources; HereForWork's
+  local scheduling, cursor, lease, and catch-up machinery is migration-readiness evidence,
+  not active executor authority.
+- No source has completed the approved versioned-result baseline, 14-day read-only shadow,
+  per-source canary, and explicit promotion in `SCHEDULING_MIGRATION.md`. Frontend Role Scan
+  must canary first. EU Job Radar additionally requires typed, idempotent Gmail-effect
+  receipts before its canary.
 - No Gmail state, career-ops profile source, credentials, or scheduled task was mutated.
   Canonical history changed only through the explicit Prepare action described above.
 - Real report/CV generation plus Ashby and generic KoreLabs inspect, draft, fill, verify,
@@ -195,7 +210,9 @@ The typed writable adapter runs only fixed career-ops entry points. The generic 
 path is live-proven with per-field fallback. The next checkpoints are observed Greenhouse
 and Lever variants, each ending at review without submission.
 Scheduled workflows, Gmail, credentials, and career-ops profile facts remain outside
-automated test mutation.
+automated test mutation. The required 14-day shadow, promotion evidence, and rollback
+exercise have not been completed, so no scheduling cutover may be inferred from the
+implemented scheduler machinery.
 
 ## Obsidian decision
 

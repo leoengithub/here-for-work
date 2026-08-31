@@ -100,6 +100,11 @@ Rust owns:
 - Notification delivery and deep-link routing.
 - The Unix socket used by the Chrome native host.
 
+These are end-state component responsibilities, not evidence that scheduling authority has
+already moved. Per-source executor authority remains with the existing scheduled tasks
+until the stages, gates, and explicit cutover in
+[SCHEDULING_MIGRATION.md](SCHEDULING_MIGRATION.md) are complete.
+
 ### SQLite
 
 Use `rusqlite`, not the Tauri SQL plugin. SQL must not be exposed to the renderer. One database actor serializes writes; WAL mode may support non-blocking read projections after its packaged-filesystem behavior is verified. Migrations are embedded, transactional, backed up first, and integrity-checked.

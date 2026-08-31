@@ -64,7 +64,7 @@ Selecting the role title opens the source listing. Selecting **Prepare** starts 
 
 Shows one current row per application: active preparation, browser work waiting for review, recoverable blockers, and recently completed applications. It is progress visibility, not a second canonical tracker or an event log.
 
-Selecting **Details** opens a right-side panel with a formatted preview of the career-ops Markdown report and links to the original report and verified CV. Form-question and answer logs do not appear in this surface.
+Selecting **Details** opens a right-side panel with a formatted preview of the career-ops Markdown report and links to the original report and career-ops CV. Form-question and answer logs do not appear in this surface.
 
 ### System
 
@@ -88,7 +88,7 @@ Shows the career-ops report, tailored CV, full evidence and uncertainty, prepara
 8. HereForWork automatically opens the application in a new tab of the user-selected ordinary Chrome profile.
 9. The extension inspects the live form and returns typed field descriptions.
 10. career-ops drafts answers grounded in verified profile sources and the inspected questions.
-11. The extension fills and verifies supported safe fields and attaches the exact manifest-verified tailored career-ops PDF to one unambiguous CV/resume control. An existing user-selected file is preserved. Other file controls, ambiguous CV controls, unsupported types, and unverifiable fields are skipped.
+11. The extension fills and verifies supported safe fields and attaches the exact manifest-matched tailored career-ops PDF to one unambiguous CV/resume control. An existing user-selected file is preserved. Other file controls, ambiguous CV controls, unsupported types, and unverifiable fields are skipped.
 12. HereForWork notifies the user that the live form is ready for review.
 13. The user reviews the live page, completes missing fields, and physically clicks Submit.
 14. The user confirms the outcome in HereForWork.
@@ -154,11 +154,19 @@ Dismiss immediately records Discarded through the career-ops adapter, removes th
 
 ## Adapter Boundary
 
-career-ops remains the source of truth for verified profile facts, preferences, authorization-aware evaluation, reports, tailored documents, grounded answers, and canonical application history.
+career-ops remains the sole source of truth for verified profile facts, preferences, authorization-aware evaluation and match scoring, reports, tailored documents and their provenance, grounded answers, and canonical application history.
 
-HereForWork owns scheduling, queue presentation, preparation orchestration, notifications, retries, browser-session state, optional dismissal context, and progress UX.
+HereForWork owns queue presentation, preparation orchestration, notifications, retries, browser-session state, optional dismissal context, and progress UX. Scheduling is its approved end-state product responsibility. During migration, each existing Codex/ChatGPT scheduled task retains operational executor authority until the per-source gates and explicit cutover in [SCHEDULING_MIGRATION.md](SCHEDULING_MIGRATION.md) are complete.
 
 The adapter exposes typed, idempotent operations for discovery, normalized role reads, history checks, preparation, answer drafting from inspected fields, and canonical Discarded and Applied transitions. External job and form content crosses this boundary as untrusted data, never as instructions.
+
+## Match scoring and CV provenance
+
+HereForWork displays career-ops match output without recomputing or translating it. The native match scale is 1–5. The product must never convert that score into a percentage, probability, or independently derived confidence label.
+
+career-ops also remains the sole authority for CV content and provenance. A truthful current status may say that an artifact passed bounded career-ops fact checks when that result is available. It must not call a CV fully verified, proven truthful, or equivalent language until career-ops emits structured, source-backed change provenance that supports that claim.
+
+The future adapter enhancement should carry source and output hashes, persisted validation diagnostics, classified changes, source references, unresolved additions, and an explicit review or block status. This is an approved contract direction, not a claim that the current adapter exposes those fields.
 
 ## Extension Boundary
 

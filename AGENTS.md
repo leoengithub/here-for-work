@@ -18,7 +18,9 @@ The project is in product discovery. Do not choose a stack, scaffold an applicat
 
 HereForWork is a separate companion application. The first adapter uses career-ops as the source of truth for profile facts, evaluation, generated artifacts, and canonical application tracking. Do not create a second independent profile, scoring engine, CV generator, or canonical tracker.
 
-HereForWork owns orchestration, the unified review queue, user-triggered preparation, notifications, retries, browser handoff state, and product UX.
+Display career-ops match scores only on their native 1–5 scale; never translate them into a percentage or probability. Treat a CV as having passed bounded career-ops fact checks only when that result exists. Do not describe it as fully verified or proven truthful until career-ops provides the structured, source-backed change provenance defined in `MVP_SHAPE.md`.
+
+HereForWork owns orchestration, the unified review queue, user-triggered preparation, notifications, retries, browser handoff state, and product UX. Scheduling is an approved end-state responsibility, not evidence of current executor authority: existing scheduled tasks remain authoritative per source until the migration contract in `SCHEDULING_MIGRATION.md` is satisfied and the user explicitly approves cutover.
 
 ## Documentation boundary
 
