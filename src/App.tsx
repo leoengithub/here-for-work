@@ -34,6 +34,7 @@ import { Textarea } from "@/components/ui/textarea";
 import {
   Toaster,
   createDismissalNoticeController,
+  createOutcomeNoticeController,
   createToastManager,
 } from "@/components/ui/toast";
 import {
@@ -56,6 +57,7 @@ import {
   continueInBrowser,
   confirmApplicationApplied,
   getPreparationDetail,
+  focusReviewForm,
   openPreparationArtifact,
   quitApp,
   cancelPreparation,
@@ -63,6 +65,7 @@ import {
   saveQueueFilters,
   setBackgroundEnabled,
   startBrowserConnectionCheck,
+  takeInAppOutcomeNotifications,
   undoPreparation,
   undoDismissal,
 } from "./api";
@@ -84,6 +87,7 @@ import { formatPublicationAge } from "./lib/publication-age";
 const groupOrder: QueueGroup[] = ["strong_match", "other_new", "needs_decision"];
 const dismissalToast = createToastManager();
 const dismissalNotices = createDismissalNoticeController(dismissalToast);
+const outcomeNotices = createOutcomeNoticeController(dismissalToast);
 
 const groupCopy: Record<QueueGroup, string> = {
   strong_match: "Strong matches",
@@ -798,6 +802,7 @@ export function App() {
   const [maintenanceResult, setMaintenanceResult] = useState<MaintenanceResult | null>(null);
   const [restorePreflight, setRestorePreflight] = useState<RestorePreflight | null>(null);
   const [preparationDetail, setPreparationDetail] = useState<PreparationDetail | null>(null);
+  const [selectedPreparationId, setSelectedPreparationId] = useState<string | null>(null);
   const [queueFiltersDraft, setQueueFiltersDraft] = useState<QueueFilters | null>(null);
   const [undoPreparationId, setUndoPreparationId] = useState<string | null>(null);
   const [enqueuingRoleIds, setEnqueuingRoleIds] = useState<Set<string>>(() => new Set());
@@ -819,6 +824,96 @@ export function App() {
       active = false;
     };
   }, []);
+
+  useEffect(() => {
+    if (!import.meta.env.DEV) return;
+    const preview = new URLSearchParams(window.location.search).get("notification-preview");
+    const showPreview = () => {
+      if (preview === "failure") {
+        outcomeNotices.show({
+          id: "visual-failure",
+          eventKind: "preparation_failed",
+          title: "Preparation failed",
+          body: "Frontend Engineer at Northstar Tools. CV fact check: One tailored statement needs review.",
+          actionKind: "view_details",
+          actionLabel: "View details",
+          roleId: "visual-role",
+          preparationId: "visual-preparation",
+          browserSessionId: null,
+          createdAt: new Date().toISOString(),
+        }, () => undefined, () => undefined);
+      } else if (preview === "ready") {
+        outcomeNotices.show({
+          id: "visual-ready",
+          eventKind: "application_ready",
+          title: "Application ready for review",
+          body: "Frontend Engineer at Northstar Tools. The live form is released in Chrome. Only you can submit it.",
+          actionKind: "review_form",
+          actionLabel: "Review form",
+          roleId: "visual-role",
+          preparationId: "visual-preparation",
+          browserSessionId: "visual-session",
+          createdAt: new Date().toISOString(),
+        }, () => undefined, () => undefined);
+      }
+    };
+    const previewWindow = window as typeof window & { __showHfwNotificationPreview?: () => void };
+    previewWindow.__showHfwNotificationPreview = showPreview;
+    const previewTimer = window.setTimeout(showPreview, 100);
+    return () => {
+      window.clearTimeout(previewTimer);
+      delete previewWindow.__showHfwNotificationPreview;
+    };
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    const takeNotifications = () => {
+      void takeInAppOutcomeNotifications()
+        .then((notifications) => {
+          if (!active) return;
+          for (const notification of notifications) {
+            outcomeNotices.show(
+              notification,
+              (preparationId) => {
+                setSelectedPreparationId(preparationId);
+                setView("applications");
+                void getPreparationDetail(preparationId)
+                  .then((detail) => {
+                    if (active) setPreparationDetail(detail);
+                  })
+                  .catch((reason: unknown) => {
+                    if (active) setError(reason instanceof Error ? reason.message : String(reason));
+                  });
+              },
+              (sessionId) => {
+                void focusReviewForm(sessionId).catch((reason: unknown) => {
+                  if (active) setError(reason instanceof Error ? reason.message : String(reason));
+                });
+              },
+            );
+          }
+        })
+        .catch(() => {
+          // Applications remains authoritative if notification delivery is unavailable.
+        });
+    };
+    takeNotifications();
+    const interval = window.setInterval(takeNotifications, 750);
+    return () => {
+      active = false;
+      window.clearInterval(interval);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (view !== "applications" || !selectedPreparationId) return;
+    window.requestAnimationFrame(() => {
+      document
+        .getElementById(`preparation-${selectedPreparationId}`)
+        ?.scrollIntoView?.({ block: "nearest" });
+    });
+  }, [selectedPreparationId, view]);
 
   useEffect(() => {
     if (view !== "applications" && view !== "system") return;
@@ -1146,6 +1241,7 @@ export function App() {
   const showPreparationDetail = async (preparationId: string) => {
     setBusy(true);
     setError(null);
+    setSelectedPreparationId(preparationId);
     try {
       setPreparationDetail(await getPreparationDetail(preparationId));
     } catch (reason) {
@@ -1232,6 +1328,11 @@ export function App() {
       </main>
     );
   } else if (view === "applications") {
+    const detailBrowserSession = preparationDetail
+      ? browserSessions
+          .filter((session) => session.purpose === "application" && session.preparationId === preparationDetail.preparationId)
+          .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0]
+      : undefined;
     mainContent = (
       <main className="status-workspace" aria-labelledby="applications-title">
         <p className="eyebrow">Application workflow</p>
@@ -1251,7 +1352,13 @@ export function App() {
               const status = latestSession ? browserStatusLabel[latestSession.status] : item.step.replaceAll("_", " ");
               const browserActive = latestSession && !["review_required", "action_required", "submitted_tracking_pending", "applied_recorded"].includes(latestSession.status);
               return (
-              <li key={item.id}>
+              <li
+                key={item.id}
+                id={`preparation-${item.id}`}
+                data-preparation-id={item.id}
+                data-selected={selectedPreparationId === item.id || undefined}
+                tabIndex={-1}
+              >
                 <div className="preparation-list__identity">
                   <strong>{item.title}</strong>
                   <span>{item.company} · {item.provider}</span>
@@ -1271,12 +1378,8 @@ export function App() {
                 ) : null}
                 {item.status === "action_required" ? (
                   <div className="preparation-list__actions">
-                    <Button
-                      type="button"
-                      onClick={() => void prepareQueueRole(item.roleId, item.provider)}
-                      disabled={enqueuingRoleIds.has(item.roleId)}
-                    >
-                      {enqueuingRoleIds.has(item.roleId) ? "Queueing…" : "Retry preparation"}
+                    <Button variant="outline" type="button" onClick={() => void showPreparationDetail(item.id)} disabled={busy}>
+                      Details
                     </Button>
                   </div>
                 ) : null}
@@ -1320,7 +1423,13 @@ export function App() {
                     ) : null}
                   </div>
                 ) : null}
-                {item.errorClass ? <p className="browser-session-list__error">{item.errorClass.replaceAll("_", " ")}</p> : null}
+                {item.errorDetail ? (
+                  <p className="browser-session-list__error">
+                    {item.errorStage?.replaceAll("_", " ").replaceAll(".", " ")}: {item.errorDetail}
+                  </p>
+                ) : item.errorClass ? (
+                  <p className="browser-session-list__error">{item.errorClass.replaceAll("_", " ")}</p>
+                ) : null}
                 {undoPreparationId === item.id ? (
                   <div className="preparation-list__confirmation" role="alert">
                     <p>Discard this role and permanently delete its generated report and tailored CV files?</p>
@@ -1348,20 +1457,68 @@ export function App() {
         )}
         {preparationDetail ? (
           <Sheet open onOpenChange={(open) => {
-            if (!open) setPreparationDetail(null);
+            if (!open) {
+              const preparationId = preparationDetail.preparationId;
+              setPreparationDetail(null);
+              window.requestAnimationFrame(() => {
+                document.getElementById(`preparation-${preparationId}`)?.focus();
+              });
+            }
           }}>
             <SheetContent className="preparation-detail" aria-labelledby="preparation-detail-title">
               <SheetHeader className="preparation-detail__heading">
               <div>
-                <p className="eyebrow">career-ops report</p>
-                  <SheetTitle id="preparation-detail-title">Preparation details</SheetTitle>
+                <p className="eyebrow">
+                  {preparationDetail.status === "action_required" ? "Preparation failure" : "career-ops report"}
+                </p>
+                  <SheetTitle id="preparation-detail-title">{preparationDetail.title}</SheetTitle>
+                  <p>{preparationDetail.company} · {preparationDetail.provider}</p>
               </div>
               </SheetHeader>
               <div className="preparation-detail__actions">
-                <Button variant="outline" type="button" onClick={() => void openArtifact(preparationDetail.preparationId, "report")}>Open original report</Button>
-                <Button variant="outline" type="button" onClick={() => void openArtifact(preparationDetail.preparationId, "cv")}>Open verified CV</Button>
+                {preparationDetail.reportPath ? (
+                  <Button variant="outline" type="button" onClick={() => void openArtifact(preparationDetail.preparationId, "report")}>Open original report</Button>
+                ) : null}
+                {preparationDetail.cvPdfPath ? (
+                  <Button variant="outline" type="button" onClick={() => void openArtifact(preparationDetail.preparationId, "cv")}>Open verified CV</Button>
+                ) : null}
+                {preparationDetail.status === "action_required"
+                  && ["retry_same_preparation", "repair_runtime_then_retry"].includes(preparationDetail.retryPolicy ?? "retry_same_preparation") ? (
+                  <Button
+                    type="button"
+                    onClick={() => void prepareQueueRole(preparationDetail.roleId, preparationDetail.provider)}
+                    disabled={enqueuingRoleIds.has(preparationDetail.roleId)}
+                  >
+                    {enqueuingRoleIds.has(preparationDetail.roleId) ? "Queueing…" : "Retry preparation"}
+                  </Button>
+                ) : null}
+                {detailBrowserSession?.status === "action_required" ? (
+                  <Button type="button" onClick={() => void retryBrowser(detailBrowserSession.id)} disabled={busy}>
+                    Retry browser step
+                  </Button>
+                ) : null}
               </div>
-              <MarkdownPreview markdown={preparationDetail.reportMarkdown} />
+              {preparationDetail.errorDetail ? (
+                <Alert variant="destructive">
+                  <AlertTitle>{preparationDetail.stage.replaceAll("_", " ").replaceAll(".", " ")}</AlertTitle>
+                  <AlertDescription>{preparationDetail.errorDetail}</AlertDescription>
+                </Alert>
+              ) : null}
+              {preparationDetail.status === "action_required"
+                && ["fresh_preparation_provider_run", "fresh_preparation_id", "manual_repair_required"].includes(preparationDetail.retryPolicy ?? "") ? (
+                <p className="preparation-detail__empty">
+                  This failure needs a fresh preparation or manual repair. HereForWork will not reuse this preparation automatically.
+                </p>
+              ) : null}
+              {detailBrowserSession?.errorCode ? (
+                <Alert variant="destructive">
+                  <AlertTitle>Browser preparation stopped</AlertTitle>
+                  <AlertDescription>{detailBrowserSession.errorCode.replaceAll("_", " ")}</AlertDescription>
+                </Alert>
+              ) : null}
+              {preparationDetail.reportMarkdown ? <MarkdownPreview markdown={preparationDetail.reportMarkdown} /> : (
+                <p className="preparation-detail__empty">No report was committed. Applications keeps this failure available until you decide whether to retry.</p>
+              )}
             </SheetContent>
           </Sheet>
         ) : null}

@@ -3,6 +3,7 @@ import { Toast as ToastPrimitive } from "@base-ui/react/toast"
 
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
+import type { OutcomeNotification } from "@/types"
 
 const toast = ToastPrimitive.createToastManager()
 
@@ -57,6 +58,38 @@ function createDismissalNoticeController(
         actionProps: {
           children: "Try again",
           onClick: onRetry,
+        },
+      })
+    },
+  }
+}
+
+function createOutcomeNoticeController(
+  toastManager: ReturnType<typeof ToastPrimitive.createToastManager>,
+) {
+  return {
+    show(
+      notification: OutcomeNotification,
+      onViewDetails: (preparationId: string) => void,
+      onReviewForm: (sessionId: string) => void,
+    ) {
+      const isFailure = notification.eventKind === "preparation_failed"
+      toastManager.add({
+        id: `outcome-${notification.id}`,
+        title: notification.title,
+        description: notification.body,
+        type: isFailure ? "error" : "success",
+        priority: "high",
+        timeout: isFailure ? 0 : 30_000,
+        actionProps: {
+          children: notification.actionLabel,
+          onClick: () => {
+            if (notification.actionKind === "view_details") {
+              onViewDetails(notification.preparationId)
+            } else if (notification.browserSessionId) {
+              onReviewForm(notification.browserSessionId)
+            }
+          },
         },
       })
     },
@@ -186,5 +219,6 @@ export {
   ToastViewport,
   createToastManager,
   createDismissalNoticeController,
+  createOutcomeNoticeController,
   toast,
 }

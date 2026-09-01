@@ -29,7 +29,7 @@ export type ExtensionMessage =
       error?: string;
     };
 export type ExtensionId = string;
-export type CommandType = "inspect_request" | "fill_plan" | "release_for_review";
+export type CommandType = "inspect_request" | "fill_plan" | "release_for_review" | "focus_review";
 export type AppResponse =
   | {
       protocolVersion: 1;

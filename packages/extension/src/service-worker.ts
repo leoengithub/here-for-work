@@ -2,6 +2,7 @@ import { BROWSER_COMMAND_TYPES } from "./contracts";
 import type { BrowserCommand, FileUploadInstruction, FillPlan } from "./contracts";
 import { createInstallationIdResolver } from "./identity";
 import { retryMessage } from "./message-retry";
+import { focusReviewTab } from "./focus-review";
 import { isConfirmedNativeResponse, postMessageSafely } from "./native-port";
 import { selectExpectedTab } from "./tab-selection";
 
@@ -141,8 +142,21 @@ async function executeCommand(command: BrowserCommand): Promise<unknown> {
       tabId = typeof expectedUrl === "string" ? await expectedTabId(expectedUrl) : await activeTabId();
     }
     const result = await chrome.tabs.sendMessage(tabId, { type: "release_for_review" });
-    await chrome.storage.session.remove(sessionTabKey(command.sessionId));
     return result;
+  }
+  if (command.commandType === "focus_review") {
+    let tabId: number;
+    try {
+      tabId = await rememberedTabId(command.sessionId);
+    } catch {
+      const expectedUrl = command.payload.expectedUrl;
+      tabId = typeof expectedUrl === "string" ? await expectedTabId(expectedUrl) : await activeTabId();
+    }
+    return focusReviewTab(tabId, {
+      getTab: (id) => chrome.tabs.get(id),
+      activateTab: (id) => chrome.tabs.update(id, { active: true }),
+      focusWindow: (windowId) => chrome.windows.update(windowId, { focused: true }),
+    });
   }
   throw new Error("Unsupported browser command.");
 }

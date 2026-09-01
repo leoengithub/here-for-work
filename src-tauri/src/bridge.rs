@@ -11,7 +11,6 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tauri::Manager;
-use tauri_plugin_notification::NotificationExt;
 
 use crate::AppState;
 use crate::domain::BrowserInspection;
@@ -209,7 +208,7 @@ struct FormField {
 }
 
 fn handle_command_result(
-    app: &tauri::AppHandle,
+    _app: &tauri::AppHandle,
     store: &mut crate::store::Store,
     message: &Value,
 ) -> Value {
@@ -223,7 +222,12 @@ fn handle_command_result(
             .and_then(Value::as_str)
             .map(normalize_error_code)
             .unwrap_or_else(|| "extension_command_failed".to_string());
-        return match store.fail_browser_command(command_id, &error_code) {
+        let result = if message.get("commandType").and_then(Value::as_str) == Some("focus_review") {
+            store.fail_focus_review(command_id, &error_code)
+        } else {
+            store.fail_browser_command(command_id, &error_code)
+        };
+        return match result {
             Ok(_) => json!({ "protocolVersion": 1, "ok": true, "type": "result_ack" }),
             Err(_) => {
                 json!({ "protocolVersion": 1, "ok": false, "error": "invalid_command_state" })
@@ -292,15 +296,23 @@ fn handle_command_result(
                 };
             }
             match store.complete_browser_release(command_id) {
-                Ok(session) => {
-                    if session.purpose == "application" {
-                        let _ = app.notification().builder()
-                            .title("Application ready for review")
-                            .body("Verified fields are filled. Review the form in Chrome; only you can submit it.")
-                            .show();
-                    }
-                    json!({ "protocolVersion": 1, "ok": true, "type": "result_ack" })
+                Ok(_) => json!({ "protocolVersion": 1, "ok": true, "type": "result_ack" }),
+                Err(_) => {
+                    json!({ "protocolVersion": 1, "ok": false, "error": "invalid_command_state" })
                 }
+            }
+        }
+        Some("focus_review") => {
+            if result.get("ok").and_then(Value::as_bool) != Some(true) {
+                return match store.fail_focus_review(command_id, "focus_review_failed") {
+                    Ok(_) => json!({ "protocolVersion": 1, "ok": true, "type": "result_ack" }),
+                    Err(_) => {
+                        json!({ "protocolVersion": 1, "ok": false, "error": "invalid_command_state" })
+                    }
+                };
+            }
+            match store.complete_focus_review(command_id) {
+                Ok(_) => json!({ "protocolVersion": 1, "ok": true, "type": "result_ack" }),
                 Err(_) => {
                     json!({ "protocolVersion": 1, "ok": false, "error": "invalid_command_state" })
                 }

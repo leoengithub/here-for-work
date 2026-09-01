@@ -11,12 +11,12 @@ use crate::domain::{
     ActivityEntry, AdapterEffectContext, AdapterRoleContext, BrowserAnswerCommitWork,
     BrowserAnswerWork, BrowserCommand, BrowserInspection, BrowserSessionSummary, DashboardState,
     DiscoveryDataset, DiscoveryFinding, HistoryRecord, ImportResult, LeasedRun,
-    PreparationCleanupWork, PreparationSummary, PreparationWork, QueueFilters, QueueGroup,
-    ReconcileResult, RestorePreflight, RoleSummary, RunSummary, ScheduledRun,
+    OutcomeNotification, PreparationCleanupWork, PreparationSummary, PreparationWork, QueueFilters,
+    QueueGroup, ReconcileResult, RestorePreflight, RoleSummary, RunSummary, ScheduledRun,
     SourceScheduleSummary,
 };
 
-const SCHEMA_VERSION: i64 = 13;
+const SCHEMA_VERSION: i64 = 15;
 const MAX_RUN_ATTEMPTS: i64 = 3;
 const MAX_BROWSER_COMMAND_ATTEMPTS: i64 = 3;
 const MAX_ACTIVE_PREPARATIONS: i64 = 2;
@@ -398,6 +398,36 @@ impl Store {
             )?;
             version = 13;
         }
+        if version < 14 {
+            self.connection.execute_batch(
+                "BEGIN IMMEDIATE;
+                 ALTER TABLE preparation_jobs ADD COLUMN error_stage TEXT;
+                 ALTER TABLE preparation_jobs ADD COLUMN error_detail TEXT;
+                 ALTER TABLE notification_outbox ADD COLUMN event_kind TEXT NOT NULL DEFAULT 'discovery';
+                 ALTER TABLE notification_outbox ADD COLUMN role_id TEXT;
+                 ALTER TABLE notification_outbox ADD COLUMN preparation_id TEXT;
+                 ALTER TABLE notification_outbox ADD COLUMN browser_session_id TEXT;
+                 ALTER TABLE notification_outbox ADD COLUMN action_kind TEXT;
+                 ALTER TABLE notification_outbox ADD COLUMN action_label TEXT;
+                 ALTER TABLE notification_outbox ADD COLUMN delivered_via TEXT;
+                 ALTER TABLE notification_outbox ADD COLUMN delivered_at TEXT;
+                 ALTER TABLE notification_outbox ADD COLUMN last_error TEXT;
+                 CREATE INDEX IF NOT EXISTS notification_outbox_delivery
+                   ON notification_outbox(status, event_kind, created_at);
+                 UPDATE schema_meta SET version = 14;
+                 COMMIT;",
+            )?;
+            version = 14;
+        }
+        if version < 15 {
+            self.connection.execute_batch(
+                "BEGIN IMMEDIATE;
+                 ALTER TABLE preparation_jobs ADD COLUMN retry_policy TEXT;
+                 UPDATE schema_meta SET version = 15;
+                 COMMIT;",
+            )?;
+            version = 15;
+        }
         if version != SCHEMA_VERSION {
             return Err(StoreError::Database(rusqlite::Error::InvalidQuery));
         }
@@ -772,6 +802,58 @@ impl Store {
         Ok(())
     }
 
+    pub fn queue_browser_failure_notification(
+        &mut self,
+        session_id: &str,
+        stage: &str,
+        detail: &str,
+    ) -> Result<(), StoreError> {
+        let detail = sanitize_preparation_error(detail);
+        let notification = self
+            .connection
+            .query_row(
+                "SELECT b.role_id, b.preparation_id, b.updated_at, r.company, r.title
+                   FROM browser_sessions b JOIN roles r ON r.id = b.role_id
+                  WHERE b.id = ?1 AND b.purpose = 'application'
+                    AND b.status = 'action_required'",
+                [session_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((role_id, preparation_id, transition_at, company, title)) = notification else {
+            return Ok(());
+        };
+        self.connection.execute(
+            "INSERT OR IGNORE INTO notification_outbox(
+               id, dedupe_key, title, body, status, attempts, next_attempt_at, created_at,
+               event_kind, role_id, preparation_id, browser_session_id,
+               action_kind, action_label
+             ) VALUES (?1, ?2, 'Preparation failed', ?3, 'pending', 0, ?4, ?4,
+                       'preparation_failed', ?5, ?6, ?7, 'view_details', 'View details')",
+            params![
+                Uuid::new_v4().to_string(),
+                format!("browser-session:{session_id}:action-required:{transition_at}"),
+                format!(
+                    "{title} at {company}. {}: {detail}",
+                    preparation_stage_label(stage)
+                ),
+                Utc::now().to_rfc3339(),
+                role_id,
+                preparation_id,
+                session_id,
+            ],
+        )?;
+        Ok(())
+    }
+
     pub fn browser_sessions(&self) -> Result<Vec<BrowserSessionSummary>, StoreError> {
         let mut statement = self.connection.prepare(
             "SELECT id, purpose, role_id, preparation_id, status, ats, page_title, page_url,
@@ -802,7 +884,9 @@ impl Store {
         transaction.execute(
             "UPDATE browser_sessions SET status = 'action_required', error_code = 'extension_command_expired', updated_at = ?1
               WHERE id IN (
-                SELECT session_id FROM browser_commands WHERE status = 'permanent' AND error_code = 'lease_expired'
+                SELECT session_id FROM browser_commands
+                 WHERE status = 'permanent' AND error_code = 'lease_expired'
+                   AND command_type != 'focus_review'
               )",
             [now_text.clone()],
         )?;
@@ -813,6 +897,8 @@ impl Store {
                    JOIN browser_sessions s ON s.id = c.session_id
                   WHERE c.status = 'pending' AND c.attempt < ?1
                     AND (
+                      (c.command_type = 'focus_review' AND s.status = 'review_required')
+                      OR
                       s.id = (
                         SELECT active.id FROM browser_sessions active
                          WHERE active.purpose = 'application'
@@ -863,6 +949,7 @@ impl Store {
         let session_status = match command_type.as_str() {
             "release_for_review" => "releasing",
             "fill_plan" => "filling",
+            "focus_review" => "review_required",
             _ => "inspecting",
         };
         transaction.execute(
@@ -1245,10 +1332,20 @@ impl Store {
     ) -> Result<BrowserSessionSummary, StoreError> {
         let transaction = self.connection.transaction()?;
         let session_id = leased_browser_command(&transaction, command_id, "release_for_review")?;
-        let purpose = transaction.query_row(
-            "SELECT purpose FROM browser_sessions WHERE id = ?1",
+        let (purpose, role_id, preparation_id, company, title) = transaction.query_row(
+            "SELECT b.purpose, b.role_id, b.preparation_id, r.company, r.title
+               FROM browser_sessions b LEFT JOIN roles r ON r.id = b.role_id
+              WHERE b.id = ?1",
             [&session_id],
-            |row| row.get::<_, String>(0),
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                ))
+            },
         )?;
         let next_status = if purpose == "connection_check" {
             "connection_verified"
@@ -1272,7 +1369,94 @@ impl Store {
                  VALUES (?1, 'browser', 'The extension inspected an HTTPS application page and released it without filling or finalizing anything.', ?2)",
                 params![Uuid::new_v4().to_string(), now],
             )?;
+        } else if let (Some(role_id), Some(preparation_id), Some(company), Some(title)) =
+            (role_id, preparation_id, company, title)
+        {
+            transaction.execute(
+                "INSERT OR IGNORE INTO notification_outbox(
+                   id, dedupe_key, title, body, status, attempts, next_attempt_at, created_at,
+                   event_kind, role_id, preparation_id, browser_session_id,
+                   action_kind, action_label
+                 ) VALUES (?1, ?2, 'Application ready for review', ?3, 'pending', 0, ?4, ?4,
+                           'application_ready', ?5, ?6, ?7, 'review_form', 'Review form')",
+                params![
+                    Uuid::new_v4().to_string(),
+                    format!("browser-session:{session_id}:review-required"),
+                    format!(
+                        "{title} at {company}. The live form is released in Chrome. Only you can submit it."
+                    ),
+                    now,
+                    role_id,
+                    preparation_id,
+                    session_id,
+                ],
+            )?;
         }
+        transaction.commit()?;
+        self.browser_session(&session_id)
+    }
+
+    pub fn queue_focus_review(
+        &mut self,
+        session_id: &str,
+    ) -> Result<BrowserSessionSummary, StoreError> {
+        let expected_url = self
+            .connection
+            .query_row(
+                "SELECT page_url FROM browser_sessions
+                  WHERE id = ?1 AND purpose = 'application' AND status = 'review_required'",
+                [session_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .ok_or_else(|| {
+                StoreError::InvalidBrowserTransition(
+                    "the application form is not released for review".to_string(),
+                )
+            })?;
+        let transaction = self.connection.transaction()?;
+        let now = Utc::now().to_rfc3339();
+        insert_browser_command(
+            &transaction,
+            session_id,
+            "focus_review",
+            &serde_json::json!({ "expectedUrl": expected_url }),
+            &now,
+        )?;
+        transaction.commit()?;
+        self.browser_session(session_id)
+    }
+
+    pub fn complete_focus_review(
+        &mut self,
+        command_id: &str,
+    ) -> Result<BrowserSessionSummary, StoreError> {
+        let transaction = self.connection.transaction()?;
+        let session_id = leased_browser_command(&transaction, command_id, "focus_review")?;
+        let now = Utc::now().to_rfc3339();
+        transaction.execute(
+            "UPDATE browser_commands
+                SET status = 'completed', lease_expires_at = NULL, error_code = NULL, updated_at = ?1
+              WHERE id = ?2",
+            params![now, command_id],
+        )?;
+        transaction.commit()?;
+        self.browser_session(&session_id)
+    }
+
+    pub fn fail_focus_review(
+        &mut self,
+        command_id: &str,
+        error_code: &str,
+    ) -> Result<BrowserSessionSummary, StoreError> {
+        let transaction = self.connection.transaction()?;
+        let session_id = leased_browser_command(&transaction, command_id, "focus_review")?;
+        transaction.execute(
+            "UPDATE browser_commands
+                SET status = 'failed', lease_expires_at = NULL, error_code = ?1, updated_at = ?2
+              WHERE id = ?3",
+            params![error_code, Utc::now().to_rfc3339(), command_id],
+        )?;
         transaction.commit()?;
         self.browser_session(&session_id)
     }
@@ -1283,10 +1467,16 @@ impl Store {
         error_code: &str,
     ) -> Result<BrowserSessionSummary, StoreError> {
         let transaction = self.connection.transaction()?;
-        let (session_id, attempt) = transaction.query_row(
-            "SELECT session_id, attempt FROM browser_commands WHERE id = ?1 AND status = 'leased'",
+        let (session_id, attempt, command_type) = transaction.query_row(
+            "SELECT session_id, attempt, command_type FROM browser_commands WHERE id = ?1 AND status = 'leased'",
             [command_id],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
         )?;
         let command_status = if attempt >= MAX_BROWSER_COMMAND_ATTEMPTS {
             "permanent"
@@ -1304,6 +1494,45 @@ impl Store {
                     updated_at = ?2 WHERE id = ?3",
             params![error_code, now, session_id],
         )?;
+        let application = transaction
+            .query_row(
+                "SELECT b.role_id, b.preparation_id, r.company, r.title
+                   FROM browser_sessions b JOIN roles r ON r.id = b.role_id
+                  WHERE b.id = ?1 AND b.purpose = 'application'",
+                [&session_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
+            )
+            .optional()?;
+        if let Some((role_id, preparation_id, company, title)) = application {
+            transaction.execute(
+                "INSERT OR IGNORE INTO notification_outbox(
+                   id, dedupe_key, title, body, status, attempts, next_attempt_at, created_at,
+                   event_kind, role_id, preparation_id, browser_session_id,
+                   action_kind, action_label
+                 ) VALUES (?1, ?2, 'Preparation failed', ?3, 'pending', 0, ?4, ?4,
+                           'preparation_failed', ?5, ?6, ?7, 'view_details', 'View details')",
+                params![
+                    Uuid::new_v4().to_string(),
+                    format!("browser-command:{command_id}:failed"),
+                    format!(
+                        "{title} at {company}. {}: {}",
+                        preparation_stage_label(&command_type),
+                        sanitize_preparation_error(error_code)
+                    ),
+                    now,
+                    role_id,
+                    preparation_id,
+                    session_id,
+                ],
+            )?;
+        }
         transaction.commit()?;
         self.browser_session(&session_id)
     }
@@ -1662,7 +1891,9 @@ impl Store {
             transaction.execute(
                 "UPDATE preparation_jobs
                     SET status = 'queued', step = 'queued',
-                        error_class = NULL, updated_at = ?1
+                        error_class = NULL, error_stage = NULL, error_detail = NULL,
+                        retry_policy = NULL,
+                        updated_at = ?1
                   WHERE id = ?2",
                 params![now, id],
             )?;
@@ -1747,7 +1978,8 @@ impl Store {
         let changed = transaction.execute(
             "UPDATE preparation_jobs
                 SET status = 'preparing', step = 'preparing_report', attempt = attempt + 1,
-                    error_class = NULL, updated_at = ?1
+                    error_class = NULL, error_stage = NULL, error_detail = NULL,
+                    retry_policy = NULL, updated_at = ?1
               WHERE id = ?2 AND status = 'queued'",
             params![now, id],
         )?;
@@ -1783,7 +2015,10 @@ impl Store {
         )?;
         transaction.execute(
             "UPDATE preparation_jobs
-                SET status = 'action_required', error_class = 'app_interrupted', updated_at = ?1
+                SET status = 'action_required', error_class = 'app_interrupted',
+                    error_stage = step,
+                    error_detail = 'HereForWork quit while this preparation was still running.',
+                    updated_at = ?1
               WHERE status = 'preparing'",
             [now],
         )?;
@@ -1864,6 +2099,40 @@ impl Store {
             })
     }
 
+    pub fn preparation_detail(
+        &self,
+        preparation_id: &str,
+    ) -> Result<crate::domain::PreparationDetail, StoreError> {
+        self.connection
+            .query_row(
+                "SELECT p.id, p.role_id, r.company, r.title, p.provider, p.status, p.step,
+                        p.error_class, p.error_stage, p.error_detail, p.retry_policy,
+                        p.report_path, p.cv_pdf_path
+                   FROM preparation_jobs p JOIN roles r ON r.id = p.role_id
+                  WHERE p.id = ?1 AND p.status != 'cancelled'",
+                [preparation_id],
+                |row| {
+                    Ok(crate::domain::PreparationDetail {
+                        preparation_id: row.get(0)?,
+                        role_id: row.get(1)?,
+                        company: row.get(2)?,
+                        title: row.get(3)?,
+                        provider: row.get(4)?,
+                        status: row.get(5)?,
+                        stage: row.get::<_, Option<String>>(8)?.unwrap_or(row.get(6)?),
+                        error_class: row.get(7)?,
+                        error_detail: row.get(9)?,
+                        retry_policy: row.get(10)?,
+                        report_markdown: None,
+                        report_path: row.get(11)?,
+                        cv_pdf_path: row.get(12)?,
+                    })
+                },
+            )
+            .optional()?
+            .ok_or_else(|| StoreError::InvalidPreparation("preparation not found".to_string()))
+    }
+
     pub fn record_preparation_context(
         &mut self,
         preparation_id: &str,
@@ -1918,7 +2187,8 @@ impl Store {
             "UPDATE preparation_jobs
                 SET status = 'completed', step = 'prepared', tracker_id = ?1,
                     report_path = ?2, report_hash = ?3, cv_pdf_path = ?4, cv_pdf_hash = ?5,
-                    error_class = NULL, updated_at = ?6
+                    error_class = NULL, error_stage = NULL, error_detail = NULL,
+                    retry_policy = NULL, updated_at = ?6
               WHERE id = ?7",
             params![
                 tracker_id,
@@ -1968,7 +2238,9 @@ impl Store {
             })?;
         transaction.execute(
             "UPDATE preparation_jobs SET status = 'cancelled', step = 'needs_decision',
-                    error_class = ?1, updated_at = ?2 WHERE id = ?3",
+                    error_class = ?1, error_stage = NULL, error_detail = NULL,
+                    retry_policy = NULL,
+                    updated_at = ?2 WHERE id = ?3",
             params![reason, now, preparation_id],
         )?;
         transaction.execute(
@@ -2103,26 +2375,82 @@ impl Store {
         &mut self,
         preparation_id: &str,
         error_class: &str,
+        error_stage: &str,
+        error_detail: &str,
     ) -> Result<(), StoreError> {
+        self.fail_preparation_with_policy(
+            preparation_id,
+            error_class,
+            error_stage,
+            error_detail,
+            "retry_same_preparation",
+        )
+    }
+
+    pub fn fail_preparation_with_policy(
+        &mut self,
+        preparation_id: &str,
+        error_class: &str,
+        error_stage: &str,
+        error_detail: &str,
+        retry_policy: &str,
+    ) -> Result<(), StoreError> {
+        let error_detail = sanitize_preparation_error(error_detail);
+        let retry_policy = sanitize_retry_policy(retry_policy);
         let now = Utc::now().to_rfc3339();
         let transaction = self.connection.transaction()?;
-        let role_id = transaction
+        let preparation = transaction
             .query_row(
-                "SELECT role_id FROM preparation_jobs WHERE id = ?1 AND status = 'preparing'",
+                "SELECT p.role_id, p.attempt, r.company, r.title
+                   FROM preparation_jobs p JOIN roles r ON r.id = p.role_id
+                  WHERE p.id = ?1 AND p.status = 'preparing'",
                 [preparation_id],
-                |row| row.get::<_, String>(0),
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
             )
             .optional()?;
-        if let Some(role_id) = role_id {
+        if let Some((role_id, attempt, company, title)) = preparation {
             transaction.execute(
                 "UPDATE preparation_jobs
-                    SET status = 'action_required', error_class = ?1, updated_at = ?2
-                  WHERE id = ?3",
-                params![error_class, now, preparation_id],
+                    SET status = 'action_required', error_class = ?1, error_stage = ?2,
+                        error_detail = ?3, retry_policy = ?4, updated_at = ?5
+                  WHERE id = ?6",
+                params![
+                    error_class,
+                    error_stage,
+                    error_detail,
+                    retry_policy,
+                    now,
+                    preparation_id
+                ],
             )?;
             transaction.execute(
                 "UPDATE roles SET preparation_state = 'failed', updated_at = ?1 WHERE id = ?2",
                 params![now, role_id],
+            )?;
+            transaction.execute(
+                "INSERT OR IGNORE INTO notification_outbox(
+                   id, dedupe_key, title, body, status, attempts, next_attempt_at, created_at,
+                   event_kind, role_id, preparation_id, action_kind, action_label
+                 ) VALUES (?1, ?2, 'Preparation failed', ?3, 'pending', 0, ?4, ?4,
+                           'preparation_failed', ?5, ?6, 'view_details', 'View details')",
+                params![
+                    Uuid::new_v4().to_string(),
+                    format!("preparation:{preparation_id}:attempt:{attempt}:failed"),
+                    format!(
+                        "{title} at {company}. {}: {error_detail}",
+                        preparation_stage_label(error_stage)
+                    ),
+                    now,
+                    role_id,
+                    preparation_id,
+                ],
             )?;
         }
         transaction.commit()?;
@@ -2833,6 +3161,98 @@ impl Store {
         Ok(())
     }
 
+    pub fn expire_undelivered_outcome_notifications(&mut self) -> Result<usize, StoreError> {
+        self.connection
+            .execute(
+                "UPDATE notification_outbox
+                    SET status = 'expired', last_error = 'app_restarted_before_delivery'
+                  WHERE status IN ('pending', 'delivering')
+                    AND event_kind IN ('preparation_failed', 'application_ready')",
+                [],
+            )
+            .map_err(StoreError::from)
+    }
+
+    pub fn take_in_app_outcome_notifications(
+        &mut self,
+        limit: usize,
+    ) -> Result<Vec<OutcomeNotification>, StoreError> {
+        let transaction = self.connection.transaction()?;
+        let mut statement = transaction.prepare(
+            "SELECT id, event_kind, title, body, action_kind, action_label,
+                    role_id, preparation_id, browser_session_id, created_at
+               FROM notification_outbox
+              WHERE status = 'pending'
+                AND event_kind IN ('preparation_failed', 'application_ready')
+              ORDER BY created_at, rowid LIMIT ?1",
+        )?;
+        let notifications = statement
+            .query_map([limit.clamp(1, 20) as i64], outcome_notification_from_row)?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(statement);
+        let now = Utc::now().to_rfc3339();
+        for notification in &notifications {
+            transaction.execute(
+                "UPDATE notification_outbox
+                    SET status = 'delivered', delivered_via = 'in_app', delivered_at = ?1,
+                        attempts = attempts + 1, last_error = NULL
+                  WHERE id = ?2 AND status = 'pending'",
+                params![now, notification.id],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(notifications)
+    }
+
+    pub fn claim_native_outcome_notification(
+        &mut self,
+    ) -> Result<Option<OutcomeNotification>, StoreError> {
+        let transaction = self.connection.transaction()?;
+        let notification = transaction
+            .query_row(
+                "SELECT id, event_kind, title, body, action_kind, action_label,
+                        role_id, preparation_id, browser_session_id, created_at
+                   FROM notification_outbox
+                  WHERE status = 'pending'
+                    AND event_kind IN ('preparation_failed', 'application_ready')
+                  ORDER BY created_at, rowid LIMIT 1",
+                [],
+                outcome_notification_from_row,
+            )
+            .optional()?;
+        let Some(notification) = notification else {
+            transaction.commit()?;
+            return Ok(None);
+        };
+        let changed = transaction.execute(
+            "UPDATE notification_outbox
+                SET status = 'delivering', delivered_via = 'native', attempts = attempts + 1
+              WHERE id = ?1 AND status = 'pending'",
+            [&notification.id],
+        )?;
+        transaction.commit()?;
+        Ok((changed == 1).then_some(notification))
+    }
+
+    pub fn finish_native_outcome_notification(
+        &mut self,
+        notification_id: &str,
+        error: Option<&str>,
+    ) -> Result<(), StoreError> {
+        let now = Utc::now().to_rfc3339();
+        let (status, delivered_at, last_error) = match error {
+            Some(error) => ("failed", None, Some(sanitize_preparation_error(error))),
+            None => ("delivered", Some(now.clone()), None),
+        };
+        self.connection.execute(
+            "UPDATE notification_outbox
+                SET status = ?1, delivered_at = ?2, last_error = ?3
+              WHERE id = ?4 AND status = 'delivering'",
+            params![status, delivered_at, last_error, notification_id],
+        )?;
+        Ok(())
+    }
+
     fn recover_expired_leases(&mut self, now: DateTime<Utc>) -> Result<usize, StoreError> {
         let transaction = self.connection.transaction()?;
         let recovered_steps = transaction.execute(
@@ -2950,7 +3370,8 @@ impl Store {
 
         let mut preparation_statement = self.connection.prepare(
             "SELECT p.id, p.role_id, r.company, r.title, p.provider, p.status, p.step,
-                    p.attempt, p.report_path, p.cv_pdf_path, p.error_class, p.updated_at
+                    p.attempt, p.report_path, p.cv_pdf_path, p.error_class,
+                    p.error_stage, p.error_detail, p.retry_policy, p.updated_at
                FROM preparation_jobs p
                JOIN roles r ON r.id = p.role_id
               WHERE p.status != 'cancelled'
@@ -2975,7 +3396,10 @@ impl Store {
                     report_path: row.get(8)?,
                     cv_pdf_path: row.get(9)?,
                     error_class: row.get(10)?,
-                    updated_at: row.get(11)?,
+                    error_stage: row.get(11)?,
+                    error_detail: row.get(12)?,
+                    retry_policy: row.get(13)?,
+                    updated_at: row.get(14)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -3321,6 +3745,72 @@ fn leased_browser_command(
         )));
     }
     Ok(session_id)
+}
+
+fn outcome_notification_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<OutcomeNotification> {
+    Ok(OutcomeNotification {
+        id: row.get(0)?,
+        event_kind: row.get(1)?,
+        title: row.get(2)?,
+        body: row.get(3)?,
+        action_kind: row.get(4)?,
+        action_label: row.get(5)?,
+        role_id: row.get(6)?,
+        preparation_id: row.get(7)?,
+        browser_session_id: row.get(8)?,
+        created_at: row.get(9)?,
+    })
+}
+
+fn sanitize_preparation_error(value: &str) -> String {
+    let mut sanitized = value
+        .split_whitespace()
+        .map(|token| {
+            if token.starts_with("http://") || token.starts_with("https://") {
+                "[external URL]".to_string()
+            } else if token.starts_with('/') || token.contains("/Users/") {
+                "[local path]".to_string()
+            } else if token.contains('@')
+                && token.chars().all(|character| {
+                    character.is_ascii_alphanumeric() || ".@_+-".contains(character)
+                })
+            {
+                "[email]".to_string()
+            } else if token.len() >= 32
+                && token.chars().all(|character| character.is_ascii_hexdigit())
+            {
+                "[context id]".to_string()
+            } else {
+                token.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    sanitized = sanitized.chars().take(320).collect();
+    if sanitized.is_empty() {
+        "Preparation stopped without a usable error message.".to_string()
+    } else {
+        sanitized
+    }
+}
+
+fn sanitize_retry_policy(value: &str) -> &'static str {
+    match value {
+        "retry_same_preparation" => "retry_same_preparation",
+        "repair_runtime_then_retry" => "repair_runtime_then_retry",
+        "fresh_preparation_provider_run" => "fresh_preparation_provider_run",
+        "fresh_preparation_id" => "fresh_preparation_id",
+        "manual_repair_required" => "manual_repair_required",
+        _ => "manual_repair_required",
+    }
+}
+
+fn preparation_stage_label(stage: &str) -> String {
+    let mut label = stage.replace(['_', '.'], " ");
+    if let Some(first) = label.get_mut(0..1) {
+        first.make_ascii_uppercase();
+    }
+    label
 }
 
 fn browser_session_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<BrowserSessionSummary> {
@@ -3889,7 +4379,12 @@ mod tests {
             )
             .unwrap();
         store
-            .fail_preparation(&first.id, "provider_failed")
+            .fail_preparation(
+                &first.id,
+                "provider_failed",
+                "provider.invoke",
+                "Provider failed.",
+            )
             .unwrap();
         let failed = store.dashboard().unwrap();
         assert_eq!(failed.preparations[0].status, "action_required");
@@ -3995,7 +4490,12 @@ mod tests {
         );
 
         store
-            .fail_preparation(&first.id, "provider_failed")
+            .fail_preparation(
+                &first.id,
+                "provider_failed",
+                "provider.invoke",
+                "Provider failed.",
+            )
             .unwrap();
         assert_eq!(
             store.next_preparation_for_browser_handoff().unwrap(),
@@ -4447,6 +4947,12 @@ mod tests {
             )
             .unwrap();
         assert_eq!(inspected.status, "releasing");
+        assert!(
+            store
+                .take_in_app_outcome_notifications(5)
+                .unwrap()
+                .is_empty()
+        );
 
         let release = store
             .claim_browser_command(chrono::Utc::now(), chrono::Duration::seconds(30))
@@ -4461,6 +4967,153 @@ mod tests {
             "review_required"
         );
         assert!(store.claim_answer_work().unwrap().is_none());
+        let ready = store.take_in_app_outcome_notifications(5).unwrap();
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].event_kind, "application_ready");
+        assert_eq!(ready[0].action_kind, "review_form");
+        assert_eq!(
+            ready[0].browser_session_id.as_deref(),
+            Some(inspected.id.as_str())
+        );
+        assert!(
+            store
+                .take_in_app_outcome_notifications(5)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn preparation_failure_is_sanitized_deduped_and_routed_once() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+        store.import_dataset(DATASET).unwrap();
+        let role_id = store.dashboard().unwrap().roles[0].id.clone();
+        let preparation = queue_and_claim(&mut store, &role_id, "codex");
+        let detail = "Failed at /Users/private/cv.md for person@example.test https://private.test/token abcdefabcdefabcdefabcdefabcdefabcdef";
+        store
+            .fail_preparation_with_policy(
+                &preparation.id,
+                "context_changed",
+                "commit.validate",
+                detail,
+                "fresh_preparation_id",
+            )
+            .unwrap();
+        store
+            .fail_preparation_with_policy(
+                &preparation.id,
+                "context_changed",
+                "commit.validate",
+                detail,
+                "fresh_preparation_id",
+            )
+            .unwrap();
+
+        let summary = &store.dashboard().unwrap().preparations[0];
+        assert_eq!(summary.error_class.as_deref(), Some("context_changed"));
+        assert_eq!(summary.error_stage.as_deref(), Some("commit.validate"));
+        assert_eq!(
+            summary.retry_policy.as_deref(),
+            Some("fresh_preparation_id")
+        );
+        let sanitized = summary.error_detail.as_deref().unwrap();
+        assert!(sanitized.contains("[local path]"));
+        assert!(sanitized.contains("[email]"));
+        assert!(sanitized.contains("[external URL]"));
+        assert!(sanitized.contains("[context id]"));
+        assert!(!sanitized.contains("private.test"));
+
+        let notifications = store.take_in_app_outcome_notifications(5).unwrap();
+        assert_eq!(notifications.len(), 1);
+        assert_eq!(notifications[0].event_kind, "preparation_failed");
+        assert_eq!(notifications[0].action_kind, "view_details");
+        assert_eq!(notifications[0].preparation_id, preparation.id);
+        assert!(
+            store
+                .take_in_app_outcome_notifications(5)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn cancelled_and_needs_decision_preparations_do_not_queue_failure_outcomes() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+        store.import_dataset(DATASET).unwrap();
+        let role_id = store.dashboard().unwrap().roles[0].id.clone();
+        let first = queue_and_claim(&mut store, &role_id, "codex");
+        store
+            .hold_preparation_for_decision(&first.id, "preparation_gate_needs_decision")
+            .unwrap();
+        let second = queue_and_claim(&mut store, &role_id, "claude");
+        store.cancel_preparation(&second.id).unwrap();
+        let outcome_count: i64 = store.connection.query_row(
+            "SELECT COUNT(*) FROM notification_outbox WHERE event_kind IN ('preparation_failed', 'application_ready')",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(outcome_count, 0);
+    }
+
+    #[test]
+    fn native_delivery_failure_and_restart_expiry_do_not_replay_outcomes() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("test.sqlite3");
+        let mut store = Store::open(&database).unwrap();
+        store.import_dataset(DATASET).unwrap();
+        let role_id = store.dashboard().unwrap().roles[0].id.clone();
+        let first = queue_and_claim(&mut store, &role_id, "codex");
+        store
+            .fail_preparation(
+                &first.id,
+                "provider_failed",
+                "provider.invoke",
+                "Provider failed.",
+            )
+            .unwrap();
+        let native = store.claim_native_outcome_notification().unwrap().unwrap();
+        store
+            .finish_native_outcome_notification(&native.id, Some("permission denied"))
+            .unwrap();
+        assert!(
+            store
+                .take_in_app_outcome_notifications(5)
+                .unwrap()
+                .is_empty()
+        );
+
+        let retried = store.begin_preparation(&role_id, "codex").unwrap();
+        let claimed = store.claim_preparation_work().unwrap().unwrap();
+        assert_eq!(claimed.id, retried.id);
+        store
+            .fail_preparation(
+                &claimed.id,
+                "provider_failed",
+                "provider.invoke",
+                "Failed again.",
+            )
+            .unwrap();
+        drop(store);
+
+        let mut reopened = Store::open(&database).unwrap();
+        assert_eq!(
+            reopened.expire_undelivered_outcome_notifications().unwrap(),
+            1
+        );
+        assert!(
+            reopened
+                .take_in_app_outcome_notifications(5)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            reopened
+                .claim_native_outcome_notification()
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

@@ -14,7 +14,7 @@ function fixture(name: string): Document {
 
 describe("ATS trust boundary", () => {
   it("has no terminal browser command", () => {
-    expect(BROWSER_COMMAND_TYPES).toEqual(["inspect_request", "fill_plan", "release_for_review"]);
+    expect(BROWSER_COMMAND_TYPES).toEqual(["inspect_request", "fill_plan", "release_for_review", "focus_review"]);
     expect(BROWSER_COMMAND_TYPES.some((command) => /submit|finalize|send/.test(command))).toBe(false);
   });
 

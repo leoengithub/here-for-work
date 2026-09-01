@@ -76,14 +76,39 @@ export interface PreparationSummary {
   reportPath: string | null;
   cvPdfPath: string | null;
   errorClass: string | null;
+  errorStage: string | null;
+  errorDetail: string | null;
+  retryPolicy: string | null;
   updatedAt: string;
 }
 
 export interface PreparationDetail {
   preparationId: string;
-  reportMarkdown: string;
-  reportPath: string;
-  cvPdfPath: string;
+  roleId: string;
+  company: string;
+  title: string;
+  provider: "codex" | "claude";
+  status: string;
+  stage: string;
+  errorClass: string | null;
+  errorDetail: string | null;
+  retryPolicy: string | null;
+  reportMarkdown: string | null;
+  reportPath: string | null;
+  cvPdfPath: string | null;
+}
+
+export interface OutcomeNotification {
+  id: string;
+  eventKind: "preparation_failed" | "application_ready";
+  title: string;
+  body: string;
+  actionKind: "view_details" | "review_form";
+  actionLabel: "View details" | "Review form";
+  roleId: string;
+  preparationId: string;
+  browserSessionId: string | null;
+  createdAt: string;
 }
 
 export interface SourceScheduleSummary {

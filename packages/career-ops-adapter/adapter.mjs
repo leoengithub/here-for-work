@@ -8,7 +8,7 @@
  * paths from callers. External job data is returned as data only.
  */
 
-import { access, constants, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { access, chmod, constants, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -128,6 +128,68 @@ async function runCareerOpsScript(scriptName, args, extraEnv = {}) {
       resolvePromise({ output, diagnostics });
     });
   });
+}
+
+class PreparationCommitError extends Error {
+  constructor(error) {
+    super(`career-ops preparation commit failed with ${String(error?.code ?? "unknown_error")}.`);
+    this.name = "PreparationCommitError";
+    this.code = String(error?.code ?? "commit_failed");
+    this.stage = String(error?.stage ?? "preparation.result.commit");
+    this.retryPolicy = String(error?.retryPolicy ?? "manual_repair_required");
+    this.diagnosticId = typeof error?.diagnosticId === "string" ? error.diagnosticId : null;
+  }
+}
+
+async function runAtomicPreparationCommit(input, preparationId) {
+  const entrypoint = resolve(root, "hfw-preparation-commit.mjs");
+  if (!(await canRead(entrypoint))) return null;
+  const effectDirectory = resolve(stagingRoot, preparationId);
+  await mkdir(effectDirectory, { recursive: true });
+  const requestPath = resolve(effectDirectory, "private-commit-request.json");
+  await writeFile(requestPath, `${JSON.stringify(input)}\n`, { encoding: "utf8", mode: 0o600 });
+  await chmod(requestPath, 0o600);
+  try {
+    return await new Promise((resolvePromise, reject) => {
+      const child = spawn(process.execPath, [
+        entrypoint,
+        "--input",
+        requestPath,
+        "--staging-dir",
+        effectDirectory,
+      ], {
+        cwd: root,
+        env: process.env,
+        stdio: ["ignore", "pipe", "pipe"],
+        shell: false,
+      });
+      const stdout = [];
+      child.stdout.on("data", (chunk) => stdout.push(chunk));
+      child.stderr.resume();
+      child.on("error", reject);
+      child.on("close", (exitCode) => {
+        const output = Buffer.concat(stdout).toString("utf8").trim();
+        let parsed;
+        try {
+          parsed = JSON.parse(output);
+        } catch {
+          reject(new PreparationCommitError({
+            code: "invalid_commit_response",
+            stage: "preparation.result.commit",
+            retryPolicy: "repair_runtime_then_retry",
+          }));
+          return;
+        }
+        if (exitCode !== 0 || parsed?.outcome === "failed") {
+          reject(new PreparationCommitError(parsed?.error));
+          return;
+        }
+        resolvePromise(parsed);
+      });
+    });
+  } finally {
+    await rm(requestPath, { force: true });
+  }
 }
 
 function sha256(value) {
@@ -1164,6 +1226,8 @@ async function execute(request) {
       if (typeof job.descriptionAvailable !== "boolean") throw new Error("job description availability is invalid.");
       if (normalizeUrl(job.sourceUrl) !== normalizeUrl(role.url)) throw new Error("job source URL no longer matches the requested role.");
       publicHttpsUrl(job.url, "resolved application URL");
+      const atomicCommit = await runAtomicPreparationCommit(request.input, preparationId);
+      if (atomicCommit) return atomicCommit;
       const sources = await preparationSources();
       const hash = contextHash(role, job, sources);
       assertPreparationResult(request.input?.result, hash);
@@ -1378,7 +1442,10 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
         id: typeof request?.id === "string" ? request.id : "unknown",
         ok: false,
         error: {
-          code: "adapter_error",
+          code: typeof error?.code === "string" ? error.code : "adapter_error",
+          stage: typeof error?.stage === "string" ? error.stage : null,
+          retryPolicy: typeof error?.retryPolicy === "string" ? error.retryPolicy : null,
+          diagnosticId: typeof error?.diagnosticId === "string" ? error.diagnosticId : null,
           message: error instanceof Error ? error.message : String(error),
         },
       })}\n`);

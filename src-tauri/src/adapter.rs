@@ -32,8 +32,13 @@ pub enum AdapterError {
     Exit(i32, String),
     #[error("career-ops adapter returned invalid data: {0}")]
     InvalidData(String),
-    #[error("career-ops adapter rejected the request: {0}")]
-    Rejected(String),
+    #[error("career-ops adapter rejected the request at {stage}: {code}: {message}")]
+    Rejected {
+        code: String,
+        stage: String,
+        retry_policy: String,
+        message: String,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -46,7 +51,41 @@ struct ResponseEnvelope {
 
 #[derive(Debug, Deserialize)]
 struct ResponseError {
+    #[serde(default = "default_adapter_error_code")]
+    code: String,
+    #[serde(default)]
+    stage: Option<String>,
+    #[serde(default, rename = "retryPolicy")]
+    retry_policy: Option<String>,
     message: String,
+}
+
+fn default_adapter_error_code() -> String {
+    "adapter_error".to_string()
+}
+
+impl AdapterError {
+    pub fn preparation_failure(&self, fallback_stage: &str) -> (String, String, String, String) {
+        match self {
+            Self::Rejected {
+                code,
+                stage,
+                retry_policy,
+                message,
+            } => (
+                code.clone(),
+                stage.clone(),
+                message.clone(),
+                retry_policy.clone(),
+            ),
+            _ => (
+                "adapter_error".to_string(),
+                fallback_stage.to_string(),
+                self.to_string(),
+                "retry_same_preparation".to_string(),
+            ),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -236,12 +275,20 @@ impl AdapterConfig {
             ));
         }
         if !response.ok {
-            return Err(AdapterError::Rejected(
-                response
-                    .error
-                    .map(|error| error.message)
-                    .unwrap_or_else(|| "unknown adapter error".to_string()),
-            ));
+            let error = response.error.unwrap_or(ResponseError {
+                code: "adapter_error".to_string(),
+                stage: None,
+                retry_policy: None,
+                message: "unknown adapter error".to_string(),
+            });
+            return Err(AdapterError::Rejected {
+                code: error.code,
+                stage: error.stage.unwrap_or_else(|| operation.to_string()),
+                retry_policy: error
+                    .retry_policy
+                    .unwrap_or_else(|| "retry_same_preparation".to_string()),
+                message: error.message,
+            });
         }
         response
             .result

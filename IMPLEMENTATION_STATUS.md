@@ -70,6 +70,14 @@ Stage: generic public-HTTPS path live-proven; Greenhouse and Lever live observat
   failure retries that canonical write without inspecting or filling the page again.
 - JSON Schema contracts generate compiler-checked TypeScript declarations through the
   repository-local `generate:contracts` command.
+- Schema v15 stores sanitized preparation failure stage, detail, and retry policy plus
+  transactional, deduped failure and released-form outcome events. Visible windows use
+  actionable in-app notices; hidden windows use informational macOS delivery, and a
+  fully quit app expires undelivered outcomes rather than replaying them after restart.
+- When career-ops provides `hfw-preparation-commit.mjs`, preparation commits use that
+  atomic entrypoint with a mode-0600 private request. Structured code, stage, and retry
+  policy cross the adapter boundary; the legacy writer is never attempted after an
+  atomic-entrypoint failure.
 - Opening an older personal-proof database creates a pre-migration backup before
   migrating to schema v10. The live database and backup copies pass SQLite integrity
   and restore-preflight checks.

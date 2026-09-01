@@ -59,7 +59,7 @@
       ]
     },
     "commandType": {
-      "enum": ["inspect_request", "fill_plan", "release_for_review"]
+      "enum": ["inspect_request", "fill_plan", "release_for_review", "focus_review"]
     },
     "appResponse": {
       "oneOf": [

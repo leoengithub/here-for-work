@@ -153,6 +153,9 @@ pub struct PreparationSummary {
     pub report_path: Option<String>,
     pub cv_pdf_path: Option<String>,
     pub error_class: Option<String>,
+    pub error_stage: Option<String>,
+    pub error_detail: Option<String>,
+    pub retry_policy: Option<String>,
     pub updated_at: String,
 }
 
@@ -160,9 +163,33 @@ pub struct PreparationSummary {
 #[serde(rename_all = "camelCase")]
 pub struct PreparationDetail {
     pub preparation_id: String,
-    pub report_markdown: String,
-    pub report_path: String,
-    pub cv_pdf_path: String,
+    pub role_id: String,
+    pub company: String,
+    pub title: String,
+    pub provider: String,
+    pub status: String,
+    pub stage: String,
+    pub error_class: Option<String>,
+    pub error_detail: Option<String>,
+    pub retry_policy: Option<String>,
+    pub report_markdown: Option<String>,
+    pub report_path: Option<String>,
+    pub cv_pdf_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct OutcomeNotification {
+    pub id: String,
+    pub event_kind: String,
+    pub title: String,
+    pub body: String,
+    pub action_kind: String,
+    pub action_label: String,
+    pub role_id: String,
+    pub preparation_id: String,
+    pub browser_session_id: Option<String>,
+    pub created_at: String,
 }
 
 #[derive(Debug, Clone)]

@@ -12,8 +12,8 @@ use std::sync::{Arc, Mutex};
 use adapter::{AdapterConfig, CanonicalRoleInput, PreparationRoleInput, discover_executable};
 use domain::{
     BrowserSessionSummary, BrowserSetup, CheckResult, ChromeProfile, DashboardState, ImportResult,
-    IntegrationHealth, MaintenanceResult, PreparationDetail, PreparationWork, PrepareRoleOutcome,
-    QueueFilters, ReconcileResult, RestorePreflight, ScheduledRun,
+    IntegrationHealth, MaintenanceResult, OutcomeNotification, PreparationDetail, PreparationWork,
+    PrepareRoleOutcome, QueueFilters, ReconcileResult, RestorePreflight, ScheduledRun,
 };
 use sha2::Digest;
 use store::Store;
@@ -154,6 +154,80 @@ fn send_test_notification(app: tauri::AppHandle) -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
+fn main_window_is_visible(app: &tauri::AppHandle) -> bool {
+    app.get_webview_window("main")
+        .and_then(|window| window.is_visible().ok())
+        .unwrap_or(false)
+}
+
+fn deliver_native_outcome(
+    permission_granted: bool,
+    send: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    if !permission_granted {
+        return Err("notification_permission_denied".to_string());
+    }
+    send().map_err(|error| format!("native_notification_failed: {error}"))
+}
+
+fn start_outcome_notification_worker(app: tauri::AppHandle) -> Result<(), String> {
+    std::thread::Builder::new()
+        .name("here-for-work-outcome-notification-worker".to_string())
+        .spawn(move || {
+            loop {
+                if main_window_is_visible(&app) {
+                    std::thread::sleep(std::time::Duration::from_millis(250));
+                    continue;
+                }
+                let notification = app
+                    .state::<AppState>()
+                    .store
+                    .lock()
+                    .ok()
+                    .and_then(|mut store| store.claim_native_outcome_notification().ok().flatten());
+                let Some(notification) = notification else {
+                    std::thread::sleep(std::time::Duration::from_millis(250));
+                    continue;
+                };
+                let permission_granted = app.notification().permission_state().is_ok_and(|state| {
+                    state == tauri_plugin_notification::PermissionState::Granted
+                });
+                let delivery = deliver_native_outcome(permission_granted, || {
+                    app.notification()
+                        .builder()
+                        .title(&notification.title)
+                        .body(&notification.body)
+                        .show()
+                        .map_err(|error| error.to_string())
+                });
+                if let Ok(mut store) = app.state::<AppState>().store.lock() {
+                    let _ = store.finish_native_outcome_notification(
+                        &notification.id,
+                        delivery.as_ref().err().map(String::as_str),
+                    );
+                }
+            }
+        })
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn take_in_app_outcome_notifications(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<OutcomeNotification>, String> {
+    if !main_window_is_visible(&app) {
+        return Ok(Vec::new());
+    }
+    state
+        .store
+        .lock()
+        .map_err(|_| "Operational store lock was poisoned".to_string())?
+        .take_in_app_outcome_notifications(5)
+        .map_err(|error| error.to_string())
+}
+
 #[tauri::command]
 fn queue_manual_discovery(
     source_id: String,
@@ -251,6 +325,19 @@ fn prepare_role(
     })
 }
 
+fn classify_preparation_error<'a>(fallback: &'a str, detail: &str) -> &'a str {
+    let detail = detail.to_ascii_lowercase();
+    if detail.contains("context does not match")
+        || detail.contains("source url no longer matches")
+        || detail.contains("idempotency key was reused with different input")
+        || detail.contains("artifact changed during preparation recovery")
+    {
+        "context_changed"
+    } else {
+        fallback
+    }
+}
+
 fn process_preparation_work(app: &tauri::AppHandle, work: PreparationWork) -> Result<(), String> {
     let state = app.state::<AppState>();
     let provider = match work.provider.as_str() {
@@ -258,7 +345,12 @@ fn process_preparation_work(app: &tauri::AppHandle, work: PreparationWork) -> Re
         "claude" => provider::ProviderKind::Claude,
         _ => {
             if let Ok(mut store) = state.store.lock() {
-                let _ = store.fail_preparation(&work.id, "invalid_provider");
+                let _ = store.fail_preparation(
+                    &work.id,
+                    "invalid_provider",
+                    "provider.selection",
+                    "The stored preparation provider is not supported.",
+                );
             }
             return Err("Stored preparation provider is invalid".to_string());
         }
@@ -295,14 +387,24 @@ fn process_preparation_work(app: &tauri::AppHandle, work: PreparationWork) -> Re
         Ok(context) => context,
         Err(error) => {
             if let Ok(mut store) = state.store.lock() {
-                let _ = store.fail_preparation(&work.id, "context_unavailable");
+                let _ = store.fail_preparation(
+                    &work.id,
+                    classify_preparation_error("context_unavailable", &error.to_string()),
+                    "preparation.context.get",
+                    &error.to_string(),
+                );
             }
             return Err(error.to_string());
         }
     };
     if context.preparation_id != work.id || context.context_hash.len() != 64 {
         if let Ok(mut store) = state.store.lock() {
-            let _ = store.fail_preparation(&work.id, "invalid_context");
+            let _ = store.fail_preparation(
+                &work.id,
+                "invalid_context",
+                "preparation.context.get",
+                "career-ops returned an invalid preparation context.",
+            );
         }
         return Err("career-ops returned an invalid preparation context".to_string());
     }
@@ -334,7 +436,12 @@ fn process_preparation_work(app: &tauri::AppHandle, work: PreparationWork) -> Re
         Ok(None) => {
             let Some(executable) = executable else {
                 if let Ok(mut store) = state.store.lock() {
-                    let _ = store.fail_preparation(&work.id, "provider_not_configured");
+                    let _ = store.fail_preparation(
+                        &work.id,
+                        "provider_not_configured",
+                        "provider.configuration",
+                        &format!("The selected {provider_name} CLI is not configured."),
+                    );
                 }
                 return Err(format!(
                     "The selected {provider_name} CLI is not configured"
@@ -353,7 +460,12 @@ fn process_preparation_work(app: &tauri::AppHandle, work: PreparationWork) -> Re
                     Ok(result) => result,
                     Err(error) => {
                         if let Ok(mut store) = state.store.lock() {
-                            let _ = store.fail_preparation(&work.id, "invalid_provider_result");
+                            let _ = store.fail_preparation(
+                                &work.id,
+                                "invalid_provider_result",
+                                "provider.result.bind",
+                                &error,
+                            );
                         }
                         return Err(error);
                     }
@@ -363,7 +475,12 @@ fn process_preparation_work(app: &tauri::AppHandle, work: PreparationWork) -> Re
                         if cancellation.load(Ordering::Relaxed) {
                             let _ = store.cancel_preparation(&work.id);
                         } else {
-                            let _ = store.fail_preparation(&work.id, "provider_failed");
+                            let _ = store.fail_preparation(
+                                &work.id,
+                                "provider_failed",
+                                "provider.invoke",
+                                &error,
+                            );
                         }
                     }
                     return Err(error);
@@ -372,7 +489,13 @@ fn process_preparation_work(app: &tauri::AppHandle, work: PreparationWork) -> Re
         }
         Err(error) => {
             if let Ok(mut store) = state.store.lock() {
-                let _ = store.fail_preparation(&work.id, "recovery_failed");
+                let detail = error.to_string();
+                let _ = store.fail_preparation(
+                    &work.id,
+                    classify_preparation_error("recovery_failed", &detail),
+                    "preparation.result.recover",
+                    &detail,
+                );
             }
             return Err(error.to_string());
         }
@@ -389,11 +512,26 @@ fn process_preparation_work(app: &tauri::AppHandle, work: PreparationWork) -> Re
         != Some(context.context_hash.as_str())
     {
         if let Ok(mut store) = state.store.lock() {
-            let _ = store.fail_preparation(&work.id, "stale_provider_result");
+            let _ = store.fail_preparation(
+                &work.id,
+                "stale_provider_result",
+                "provider.result.validation",
+                "The provider result does not match the current preparation context.",
+            );
         }
         return Err("Provider result does not match the current preparation context".to_string());
     }
-    match preparation_gate(&result)? {
+    let gate = preparation_gate(&result).inspect_err(|error| {
+        if let Ok(mut store) = state.store.lock() {
+            let _ = store.fail_preparation(
+                &work.id,
+                "invalid_provider_result",
+                "evaluation.gate",
+                error,
+            );
+        }
+    })?;
+    match gate {
         PreparationGate::Proceed => {}
         PreparationGate::NeedsDecision(message) => {
             let mut store = state
@@ -444,7 +582,16 @@ fn process_preparation_work(app: &tauri::AppHandle, work: PreparationWork) -> Re
             Ok(committed) => committed,
             Err(error) => {
                 if let Ok(mut store) = state.store.lock() {
-                    let _ = store.fail_preparation(&work.id, "artifact_commit_failed");
+                    let (code, stage, detail, retry_policy) =
+                        error.preparation_failure("preparation.result.commit");
+                    let error_class = classify_preparation_error(&code, &detail).to_string();
+                    let _ = store.fail_preparation_with_policy(
+                        &work.id,
+                        &error_class,
+                        &stage,
+                        &detail,
+                        &retry_policy,
+                    );
                 }
                 return Err(error.to_string());
             }
@@ -452,7 +599,12 @@ fn process_preparation_work(app: &tauri::AppHandle, work: PreparationWork) -> Re
     };
     if committed.preparation_id != work.id || committed.context_hash != context.context_hash {
         if let Ok(mut store) = state.store.lock() {
-            let _ = store.fail_preparation(&work.id, "commit_identity_mismatch");
+            let _ = store.fail_preparation(
+                &work.id,
+                "commit_identity_mismatch",
+                "preparation.result.commit",
+                "career-ops committed artifacts for a different preparation context.",
+            );
         }
         return Err("career-ops committed a mismatched preparation".to_string());
     }
@@ -467,7 +619,12 @@ fn process_preparation_work(app: &tauri::AppHandle, work: PreparationWork) -> Re
             || !artifact.sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
         {
             if let Ok(mut store) = state.store.lock() {
-                let _ = store.fail_preparation(&work.id, "invalid_artifact_reference");
+                let _ = store.fail_preparation(
+                    &work.id,
+                    "invalid_artifact_reference",
+                    "artifact.validation",
+                    "career-ops returned an invalid artifact reference.",
+                );
             }
             return Err("career-ops returned an invalid artifact reference".to_string());
         }
@@ -496,30 +653,21 @@ fn start_preparation_workers(app: tauri::AppHandle) -> Result<(), String> {
         let worker_app = app.clone();
         std::thread::Builder::new()
             .name(format!("here-for-work-preparation-worker-{worker_index}"))
-            .spawn(move || loop {
-                let work = {
-                    let state = worker_app.state::<AppState>();
-                    state
-                        .store
-                        .lock()
-                        .ok()
-                        .and_then(|mut store| store.claim_preparation_work().ok().flatten())
-                };
-                let Some(work) = work else {
-                    std::thread::sleep(std::time::Duration::from_millis(350));
-                    continue;
-                };
-                let preparation_id = work.id.clone();
-                if process_preparation_work(&worker_app, work).is_err() {
-                    if let Ok(mut store) = worker_app.state::<AppState>().store.lock() {
-                        let _ = store.fail_preparation(&preparation_id, "preparation_failed");
-                    }
-                    let _ = worker_app
-                        .notification()
-                        .builder()
-                        .title("Application preparation needs attention")
-                        .body("One role stopped safely. Later queued roles will continue; open Applications for details or retry.")
-                        .show();
+            .spawn(move || {
+                loop {
+                    let work = {
+                        let state = worker_app.state::<AppState>();
+                        state
+                            .store
+                            .lock()
+                            .ok()
+                            .and_then(|mut store| store.claim_preparation_work().ok().flatten())
+                    };
+                    let Some(work) = work else {
+                        std::thread::sleep(std::time::Duration::from_millis(350));
+                        continue;
+                    };
+                    let _ = process_preparation_work(&worker_app, work);
                 }
             })
             .map_err(|error| error.to_string())?;
@@ -530,27 +678,20 @@ fn start_preparation_workers(app: tauri::AppHandle) -> Result<(), String> {
 fn start_browser_handoff_worker(app: tauri::AppHandle) -> Result<(), String> {
     std::thread::Builder::new()
         .name("here-for-work-browser-handoff-worker".to_string())
-        .spawn(move || loop {
-            let preparation_id = {
+        .spawn(move || {
+            loop {
+                let preparation_id = {
+                    let state = app.state::<AppState>();
+                    state.store.lock().ok().and_then(|store| {
+                        store.next_preparation_for_browser_handoff().ok().flatten()
+                    })
+                };
+                let Some(preparation_id) = preparation_id else {
+                    std::thread::sleep(std::time::Duration::from_millis(350));
+                    continue;
+                };
                 let state = app.state::<AppState>();
-                state
-                    .store
-                    .lock()
-                    .ok()
-                    .and_then(|store| store.next_preparation_for_browser_handoff().ok().flatten())
-            };
-            let Some(preparation_id) = preparation_id else {
-                std::thread::sleep(std::time::Duration::from_millis(350));
-                continue;
-            };
-            let state = app.state::<AppState>();
-            if start_application_browser_session(&preparation_id, &state).is_err() {
-                let _ = app
-                    .notification()
-                    .builder()
-                    .title("Browser handoff needs attention")
-                    .body("The application materials are ready, but its Chrome tab could not start. Later roles will continue.")
-                    .show();
+                let _ = start_application_browser_session(&preparation_id, &state);
             }
         })
         .map(|_| ())
@@ -645,24 +786,37 @@ fn get_preparation_detail(
     preparation_id: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<PreparationDetail, String> {
-    let (report_path, cv_pdf_path) = state
+    let mut detail = state
         .store
         .lock()
         .map_err(|_| "Operational store lock was poisoned".to_string())?
-        .preparation_artifact_paths(&preparation_id)
+        .preparation_detail(&preparation_id)
         .map_err(|error| error.to_string())?;
-    let report = checked_career_ops_artifact(&state.adapter.career_ops_root, &report_path)?;
-    let _cv = checked_career_ops_artifact(&state.adapter.career_ops_root, &cv_pdf_path)?;
-    if report.metadata().map_err(|error| error.to_string())?.len() > 500_000 {
-        return Err("The career-ops report exceeds the 500 KB display limit.".to_string());
+    if let (Some(report_path), Some(cv_pdf_path)) =
+        (detail.report_path.as_deref(), detail.cv_pdf_path.as_deref())
+    {
+        let report = checked_career_ops_artifact(&state.adapter.career_ops_root, report_path)?;
+        let _cv = checked_career_ops_artifact(&state.adapter.career_ops_root, cv_pdf_path)?;
+        if report.metadata().map_err(|error| error.to_string())?.len() > 500_000 {
+            return Err("The career-ops report exceeds the 500 KB display limit.".to_string());
+        }
+        detail.report_markdown =
+            Some(std::fs::read_to_string(report).map_err(|error| error.to_string())?);
     }
-    let report_markdown = std::fs::read_to_string(report).map_err(|error| error.to_string())?;
-    Ok(PreparationDetail {
-        preparation_id,
-        report_markdown,
-        report_path,
-        cv_pdf_path,
-    })
+    Ok(detail)
+}
+
+#[tauri::command]
+fn focus_review_form(
+    session_id: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<BrowserSessionSummary, String> {
+    state
+        .store
+        .lock()
+        .map_err(|_| "Operational store lock was poisoned".to_string())?
+        .queue_focus_review(&session_id)
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -833,6 +987,11 @@ fn start_application_browser_session(
     if !chrome.is_dir() {
         if let Ok(mut store) = state.store.lock() {
             let _ = store.fail_browser_session_start(&session.id, "chrome_not_installed");
+            let _ = store.queue_browser_failure_notification(
+                &session.id,
+                "browser.launch",
+                "Google Chrome is not installed in Applications.",
+            );
         }
         return Err("Google Chrome is not installed in /Applications.".to_string());
     }
@@ -840,6 +999,11 @@ fn start_application_browser_session(
         if let Err(error) = background_chrome_command(&profile_id, url).spawn() {
             if let Ok(mut store) = state.store.lock() {
                 let _ = store.fail_browser_session_start(&session.id, "chrome_launch_failed");
+                let _ = store.queue_browser_failure_notification(
+                    &session.id,
+                    "browser.launch",
+                    &format!("Could not open the selected Chrome profile: {error}"),
+                );
             }
             return Err(format!(
                 "Could not open the selected Chrome profile: {error}"
@@ -957,16 +1121,18 @@ fn start_answer_worker(app: tauri::AppHandle) -> Result<(), String> {
                                 .canonical_write_lock
                                 .lock()
                                 .map_err(|_| "answer_persistence_failed".to_string())?;
-                            state.adapter.commit_answers(
-                                &work.preparation_id,
-                                &work.report_path,
-                                &work.cv_pdf_path,
-                                &work.context_hash,
-                                work.review_items.clone(),
-                                work.fill_results.clone(),
-                                &madrid_today(),
-                            )
-                            .map_err(|_| "answer_persistence_failed".to_string())?
+                            state
+                                .adapter
+                                .commit_answers(
+                                    &work.preparation_id,
+                                    &work.report_path,
+                                    &work.cv_pdf_path,
+                                    &work.context_hash,
+                                    work.review_items.clone(),
+                                    work.fill_results.clone(),
+                                    &madrid_today(),
+                                )
+                                .map_err(|_| "answer_persistence_failed".to_string())?
                         };
                         if committed.preparation_id != work.preparation_id
                             || committed.context_hash != work.context_hash
@@ -990,13 +1156,12 @@ fn start_answer_worker(app: tauri::AppHandle) -> Result<(), String> {
                     if let Err(error_code) = outcome {
                         if let Ok(mut store) = app.state::<AppState>().store.lock() {
                             let _ = store.fail_answer_commit(&work.session_id, &error_code);
+                            let _ = store.queue_browser_failure_notification(
+                                &work.session_id,
+                                "answers.persist",
+                                &error_code,
+                            );
                         }
-                        let _ = app
-                            .notification()
-                            .builder()
-                            .title("Application answers need attention")
-                            .body("The verified answers were not saved to career-ops. The browser remains locked for review until you retry.")
-                            .show();
                     }
                     continue;
                 }
@@ -1056,10 +1221,8 @@ fn start_answer_worker(app: tauri::AppHandle) -> Result<(), String> {
                     {
                         return Err("stale_answer_result".to_string());
                     }
-                    let cv_upload = verified_cv_upload_descriptor(
-                        &state.adapter.career_ops_root,
-                        &work,
-                    )?;
+                    let cv_upload =
+                        verified_cv_upload_descriptor(&state.adapter.career_ops_root, &work)?;
                     let validated = state
                         .adapter
                         .validate_answers(
@@ -1092,13 +1255,12 @@ fn start_answer_worker(app: tauri::AppHandle) -> Result<(), String> {
                 if let Err(error_code) = outcome {
                     if let Ok(mut store) = app.state::<AppState>().store.lock() {
                         let _ = store.fail_answer_work(&work.session_id, &error_code);
+                        let _ = store.queue_browser_failure_notification(
+                            &work.session_id,
+                            "answers.prepare",
+                            &error_code,
+                        );
                     }
-                    let _ = app
-                    .notification()
-                    .builder()
-                    .title("Application preparation needs attention")
-                    .body("The live-form answer step stopped safely. Open HereForWork to retry it.")
-                    .show();
                 }
             }
         })
@@ -1514,6 +1676,7 @@ pub fn run() {
             let app_data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&app_data_dir)?;
             let mut store = Store::open(app_data_dir.join("here-for-work.sqlite3"))?;
+            store.expire_undelivered_outcome_notifications()?;
             store.recover_interrupted_preparations()?;
             let _ = store.reconcile_due_runs(chrono::Utc::now())?;
             let home_dir = app.path().home_dir()?;
@@ -1625,6 +1788,7 @@ pub fn run() {
             start_preparation_workers(app.handle().clone())?;
             start_browser_handoff_worker(app.handle().clone())?;
             start_answer_worker(app.handle().clone())?;
+            start_outcome_notification_worker(app.handle().clone())?;
             if launch_in_background {
                 if let Some(window) = app.get_webview_window("main") {
                     let _ = window.hide();
@@ -1645,6 +1809,7 @@ pub fn run() {
             save_queue_filters,
             request_notification_permission,
             send_test_notification,
+            take_in_app_outcome_notifications,
             queue_manual_discovery,
             run_provider_probe,
             prepare_role,
@@ -1656,6 +1821,7 @@ pub fn run() {
             get_browser_sessions,
             start_browser_connection_check,
             retry_browser_session,
+            focus_review_form,
             continue_in_browser,
             confirm_application_applied,
             quit_app,
@@ -1690,11 +1856,37 @@ mod tests {
     use super::PreparationGate;
 
     #[test]
-    fn chrome_handoff_opens_the_selected_profile_without_automation_or_focus_flags() {
-        let command = super::background_chrome_command(
-            "Profile 1",
-            "https://jobs.example.test/application",
+    fn native_outcome_delivery_reports_permission_and_send_failures() {
+        let denied = super::deliver_native_outcome(false, || Ok(()));
+        assert_eq!(denied.unwrap_err(), "notification_permission_denied");
+
+        let failed = super::deliver_native_outcome(true, || Err("system unavailable".to_string()));
+        assert_eq!(
+            failed.unwrap_err(),
+            "native_notification_failed: system unavailable"
         );
+        assert!(super::deliver_native_outcome(true, || Ok(())).is_ok());
+    }
+
+    #[test]
+    fn context_change_classification_is_specific() {
+        assert_eq!(
+            super::classify_preparation_error(
+                "artifact_commit_failed",
+                "job source URL no longer matches the requested role"
+            ),
+            "context_changed"
+        );
+        assert_eq!(
+            super::classify_preparation_error("artifact_commit_failed", "runtime unavailable"),
+            "artifact_commit_failed"
+        );
+    }
+
+    #[test]
+    fn chrome_handoff_opens_the_selected_profile_without_automation_or_focus_flags() {
+        let command =
+            super::background_chrome_command("Profile 1", "https://jobs.example.test/application");
         let arguments = command
             .get_args()
             .map(|argument| argument.to_string_lossy().into_owned())

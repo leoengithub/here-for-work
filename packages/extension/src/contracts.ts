@@ -49,7 +49,7 @@ export interface FileUploadInstruction {
   classification: "safe_verified";
 }
 
-export const BROWSER_COMMAND_TYPES = ["inspect_request", "fill_plan", "release_for_review"] as const;
+export const BROWSER_COMMAND_TYPES = ["inspect_request", "fill_plan", "release_for_review", "focus_review"] as const;
 export type BrowserCommandType = typeof BROWSER_COMMAND_TYPES[number];
 
 export interface BrowserCommand {

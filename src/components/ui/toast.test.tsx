@@ -5,12 +5,70 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 import {
   Toaster,
   createDismissalNoticeController,
+  createOutcomeNoticeController,
   createToastManager,
 } from "./toast"
 
 afterEach(() => {
   cleanup()
   vi.useRealTimers()
+})
+
+describe("preparation outcome notifications", () => {
+  it("keeps failures persistent and routes View details to the preparation", () => {
+    vi.useFakeTimers()
+    const manager = createToastManager()
+    const notices = createOutcomeNoticeController(manager)
+    const viewDetails = vi.fn()
+    render(<Toaster toastManager={manager} />)
+    act(() => notices.show({
+      id: "failure-1", eventKind: "preparation_failed", title: "Preparation failed",
+      body: "Frontend Engineer at Example Co. Provider invoke: Provider unavailable.",
+      actionKind: "view_details", actionLabel: "View details", roleId: "role-1",
+      preparationId: "preparation-1", browserSessionId: null, createdAt: "2026-09-01T10:00:00Z",
+    }, viewDetails, vi.fn()))
+
+    act(() => vi.advanceTimersByTime(120_000))
+    expect(screen.getAllByText("Preparation failed").length).toBeGreaterThan(0)
+    fireEvent.click(screen.getByText("View details"))
+    expect(viewDetails).toHaveBeenCalledWith("preparation-1")
+  })
+
+  it("routes Review form to the released session", () => {
+    vi.useFakeTimers()
+    const manager = createToastManager()
+    const notices = createOutcomeNoticeController(manager)
+    const reviewForm = vi.fn()
+    render(<Toaster toastManager={manager} />)
+    act(() => notices.show({
+      id: "ready-1", eventKind: "application_ready", title: "Application ready for review",
+      body: "The live form is released in Chrome. Only you can submit it.",
+      actionKind: "review_form", actionLabel: "Review form", roleId: "role-1",
+      preparationId: "preparation-1", browserSessionId: "session-1", createdAt: "2026-09-01T10:00:00Z",
+    }, vi.fn(), reviewForm))
+
+    fireEvent.click(screen.getByText("Review form"))
+    expect(reviewForm).toHaveBeenCalledWith("session-1")
+  })
+
+  it("expires ready notices after 30 seconds", () => {
+    vi.useFakeTimers()
+    const manager = createToastManager()
+    const notices = createOutcomeNoticeController(manager)
+    render(<Toaster toastManager={manager} />)
+    act(() => notices.show({
+      id: "ready-expiry", eventKind: "application_ready", title: "Ready notice expiry",
+      body: "The live form is released in Chrome. Only you can submit it.",
+      actionKind: "review_form", actionLabel: "Review form", roleId: "role-1",
+      preparationId: "preparation-1", browserSessionId: "session-1", createdAt: "2026-09-01T10:00:00Z",
+    }, vi.fn(), vi.fn()))
+
+    const toastRoot = screen.getAllByText("Ready notice expiry")[0].closest('[data-slot="toast"]')
+    act(() => vi.advanceTimersByTime(29_999))
+    expect(toastRoot).not.toHaveAttribute("data-ending-style")
+    act(() => vi.advanceTimersByTime(1))
+    expect(toastRoot).toHaveAttribute("data-ending-style")
+  })
 })
 
 function activeToastRoots() {

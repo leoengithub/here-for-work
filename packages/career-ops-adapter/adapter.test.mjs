@@ -42,6 +42,101 @@ test("capabilities expose the fixed safety boundary", async () => {
   assert.equal(response.result.sourceOfTruth.applicationHistory, "career-ops");
 });
 
+test("atomic preparation commit uses a private request and never invokes legacy writers", async () => {
+  const fixture = await fakeCareerOps();
+  await writeFile(join(fixture.root, "hfw-preparation-commit.mjs"), `
+    import { readFile, stat } from "node:fs/promises";
+    const inputPath = process.argv[process.argv.indexOf("--input") + 1];
+    const stagingDir = process.argv[process.argv.indexOf("--staging-dir") + 1];
+    const input = JSON.parse(await readFile(inputPath, "utf8"));
+    const mode = (await stat(inputPath)).mode & 0o777;
+    if (mode !== 0o600 || !stagingDir.endsWith(input.preparationId)) process.exit(9);
+    process.stdout.write(JSON.stringify({
+      preparationId: input.preparationId,
+      contextHash: input.result.contextHash,
+      trackerId: 42,
+      artifacts: {
+        report: { path: "reports/atomic.md", sha256: "a".repeat(64) },
+        cvHtml: { path: "generated/atomic.html", sha256: "b".repeat(64) },
+        cvPdf: { path: "generated/atomic.pdf", sha256: "c".repeat(64) },
+        cvChanges: { path: "generated/atomic-changes.md", sha256: "d".repeat(64) }
+      }
+    }));
+  `);
+  const preparationId = "77777777-7777-4777-8777-777777777777";
+  const response = await request({
+    id: "atomic-commit",
+    protocolVersion: 1,
+    operation: "preparation.result.commit",
+    input: {
+      preparationId,
+      eventDate: "2026-09-01",
+      company: "Example Co",
+      title: "Frontend Engineer",
+      location: "Remote Europe",
+      url: "https://jobs.ashbyhq.com/example/role-1",
+      job: {
+        title: "Frontend Engineer",
+        company: "Example Co",
+        location: "Remote Europe",
+        url: "https://jobs.ashbyhq.com/example/role-1",
+        sourceUrl: "https://jobs.ashbyhq.com/example/role-1",
+        description: "A sufficiently long fixture describing React, TypeScript, accessibility, testing, collaboration, and reliable product delivery across a distributed European team.",
+        descriptionAvailable: true,
+        postedAt: null,
+        provider: "ashby",
+      },
+      result: { contextHash: "e".repeat(64) },
+    },
+  }, fixture.env);
+  assert.equal(response.ok, true);
+  assert.equal(response.result.artifacts.report.path, "reports/atomic.md");
+  await assert.rejects(stat(join(fixture.staging, preparationId, "private-commit-request.json")), { code: "ENOENT" });
+  assert.equal(JSON.parse(await readFile(join(fixture.root, "state.json"), "utf8")).length, 0);
+});
+
+test("atomic preparation commit preserves structured failure metadata", async () => {
+  const fixture = await fakeCareerOps();
+  await writeFile(join(fixture.root, "hfw-preparation-commit.mjs"), `
+    process.stderr.write("hfw-preparation-commit:context_changed:commit.validate");
+    process.stdout.write(JSON.stringify({ outcome: "failed", error: {
+      code: "context_changed", stage: "commit.validate",
+      retryPolicy: "fresh_preparation_id", diagnosticId: "11111111-1111-4111-8111-111111111111"
+    }}));
+    process.exit(3);
+  `);
+  const response = await request({
+    id: "atomic-failure",
+    protocolVersion: 1,
+    operation: "preparation.result.commit",
+    input: {
+      preparationId: "88888888-8888-4888-8888-888888888888",
+      eventDate: "2026-09-01", company: "Example Co", title: "Frontend Engineer",
+      location: "Remote Europe", url: "https://jobs.ashbyhq.com/example/role-1",
+      job: {
+        title: "Frontend Engineer", company: "Example Co", location: "Remote Europe",
+        url: "https://jobs.ashbyhq.com/example/role-1", sourceUrl: "https://jobs.ashbyhq.com/example/role-1",
+        description: "A sufficiently long fixture describing React, TypeScript, accessibility, testing, collaboration, and reliable product delivery across a distributed European team.",
+        descriptionAvailable: true, postedAt: null, provider: "ashby",
+      },
+      result: { contextHash: "f".repeat(64) },
+    },
+  }, fixture.env);
+  assert.equal(response.ok, false);
+  assert.deepEqual(response.error, {
+    code: "context_changed",
+    stage: "commit.validate",
+    retryPolicy: "fresh_preparation_id",
+    diagnosticId: "11111111-1111-4111-8111-111111111111",
+    message: "career-ops preparation commit failed with context_changed.",
+  });
+  assert.equal(JSON.parse(await readFile(join(fixture.root, "state.json"), "utf8")).length, 0);
+  await assert.rejects(
+    stat(join(fixture.staging, "88888888-8888-4888-8888-888888888888", "private-commit-request.json")),
+    { code: "ENOENT" },
+  );
+});
+
 test("generic discovery resolves a source listing to its application form", async (context) => {
   const requested = [];
   context.mock.method(globalThis, "fetch", async (input) => {

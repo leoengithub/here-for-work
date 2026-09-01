@@ -923,6 +923,15 @@ a.role-card__title:hover {
   border-bottom: 1px solid var(--line);
 }
 
+.preparation-list > li[data-selected] {
+  background: var(--surface-muted);
+}
+
+.preparation-list > li:focus-visible {
+  outline: 3px solid color-mix(in oklch, var(--accent) 55%, transparent);
+  outline-offset: -3px;
+}
+
 .preparation-list__identity {
   display: grid;
   gap: 0.2rem;
@@ -995,6 +1004,17 @@ a.role-card__title:hover {
   margin: 1rem 0 1.5rem;
   padding-bottom: 1rem;
   border-bottom: 1px solid var(--line);
+}
+
+.preparation-detail [data-slot="alert"] {
+  margin-bottom: 1rem;
+}
+
+.preparation-detail__empty {
+  max-width: 60ch;
+  color: var(--text-muted);
+  font-size: 0.88rem !important;
+  line-height: 1.55;
 }
 
 .markdown-preview {

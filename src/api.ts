@@ -13,6 +13,7 @@ import type {
   PreparationDetail,
   PrepareRoleOutcome,
   QueueFilters,
+  OutcomeNotification,
 } from "./types";
 
 const isTauri = (): boolean => "__TAURI_INTERNALS__" in window;
@@ -75,6 +76,11 @@ export async function requestNotificationPermission(): Promise<boolean> {
 export async function sendTestNotification(): Promise<void> {
   if (!isTauri()) throw new Error("Native notifications are available in the desktop app.");
   return invoke<void>("send_test_notification");
+}
+
+export async function takeInAppOutcomeNotifications(): Promise<OutcomeNotification[]> {
+  if (!isTauri()) return [];
+  return invoke<OutcomeNotification[]>("take_in_app_outcome_notifications");
 }
 
 export async function queueManualDiscovery(sourceId: "frontend-role-scan" | "eu-job-radar"): Promise<ScheduledRun> {
@@ -152,6 +158,11 @@ export async function startBrowserConnectionCheck(): Promise<BrowserSessionSumma
 export async function retryBrowserSession(sessionId: string): Promise<BrowserSessionSummary> {
   if (!isTauri()) throw new Error("Browser session recovery is available in the desktop app.");
   return invoke<BrowserSessionSummary>("retry_browser_session", { sessionId });
+}
+
+export async function focusReviewForm(sessionId: string): Promise<BrowserSessionSummary> {
+  if (!isTauri()) throw new Error("Review-form focus is available in the desktop app.");
+  return invoke<BrowserSessionSummary>("focus_review_form", { sessionId });
 }
 
 export async function continueInBrowser(preparationId: string): Promise<BrowserSessionSummary> {
