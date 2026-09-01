@@ -8,7 +8,12 @@
 export interface HereForWorkDiscoveryRun {
   contract: "hereforwork.discovery-run";
   schemaVersion: 1;
+  /** Stable identity for one source coverage window; retained across attempts. */
+  windowId: string;
+  /** Immutable identity for this published attempt; retries use a new value. */
   runId: string;
+  /** Immediately preceding attempt for the same window, when this artifact is a retry. */
+  supersedesRunId?: string;
   source: Source;
   coverage: Coverage;
   generatedAt: string;

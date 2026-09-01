@@ -1,7 +1,9 @@
 {
   "contract": "hereforwork.discovery-run",
   "schemaVersion": 1,
+  "windowId": "01990de0-5790-74ea-9cee-0ec9cc19dc00",
   "runId": "01990df0-4d80-7ab0-b4f1-7d83a11b2c00",
+  "supersedesRunId": "01990dea-0270-73b4-9ded-457badf76500",
   "source": {
     "sourceId": "eu-job-radar",
     "displayName": "EU Job Radar",
@@ -40,6 +42,14 @@
           "url": "https://example.test/jobs/001",
           "observedAt": "2026-09-01T12:30:00+02:00",
           "summary": "Synthetic contract fixture; no personal data."
+        },
+        {
+          "evidenceId": "authorization:example-001",
+          "kind": "authorization",
+          "reference": "public hiring-location statement for example-001",
+          "url": "https://example.test/jobs/001",
+          "observedAt": "2026-09-01T12:31:00+02:00",
+          "summary": "Synthetic contract fixture; Spain is explicitly listed."
         }
       ],
       "matchScore": {
@@ -91,6 +101,6 @@
     "algorithm": "sha256",
     "canonicalization": "hfw-discovery-run-v1",
     "coverage": "all_top_level_fields_except_integrity",
-    "digest": "90d0d108ee48b5e38661129f16c0c3df98bf9f6e43dc7d547fcfa340877fdefe"
+    "digest": "864e6cb7309642a64ea93dcc7b95b9a829b45caca6f9783d512c557b921fa5ad"
   }
 }

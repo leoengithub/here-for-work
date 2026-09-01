@@ -41,18 +41,28 @@ of the legacy dataset's version 1.
 - `source.producer` identifies the emitting workflow or adapter. `producerVersion` is a
   reproducible workflow/configuration revision, preferably a Git revision or content
   digest rather than a mutable label such as `latest`.
-- `runId` is stable for one logical source coverage window and retained across retries.
-  The consumer idempotency key is `(sourceId, runId)`.
+- `windowId` is stable for one logical source coverage window and is retained across
+  attempts, including recovery from `partial` or `failed` to `completed`.
+- `runId` identifies one immutable published attempt. Every retry uses a new `runId` and
+  sets `supersedesRunId` to the immediately preceding attempt for the same `windowId`.
+  The consumer replay-idempotency key is `(sourceId, runId)`.
 - `findingId` is stable for the same source occurrence across runs. The consumer identity
   is `(sourceId, findingId)`.
 - `sourceRoleId` is the source-provided requisition identifier. `normalizedKey` is the
   producer's cross-source deduplication candidate. Neither may be silently replaced by a
   title/company guess during replay.
 
-Replaying the same `(sourceId, runId)` and digest is a no-op. Reusing that identity with a
-different digest is a conflict that must be quarantined and surfaced; the newer payload
-must not silently overwrite the original run. Repeated findings in later run identities
-reconcile by `(sourceId, findingId)` and then by the explicit deduplication identifiers.
+Replaying the same `(sourceId, runId)` and digest is a no-op. Reusing that attempt identity
+with a different digest is a conflict that must be quarantined and surfaced; the newer
+payload must not silently overwrite the original attempt. A retry instead publishes a new
+`runId` with the same `(sourceId, windowId)` and the prior `runId` in `supersedesRunId`.
+The referenced attempt must exist for that same source and window, and one attempt may not
+supersede itself. Its `coverage.windowStart`, `coverage.windowEnd`, and `coverage.timezone`
+must exactly match the referenced attempt; changing coverage creates a new `windowId`
+instead. A completed retry supersedes the earlier partial or failed attempt for coverage
+advancement without deleting its diagnostic evidence. Repeated findings across attempts
+or later windows reconcile by `(sourceId, findingId)` and then by the explicit
+deduplication identifiers.
 
 ## Evidence and provenance
 
@@ -99,6 +109,9 @@ second scoring engine, or score-only approximation is introduced by this contrac
 
 ## Run completion
 
+- All date-times include `Z` or an explicit UTC offset and must represent real calendar
+  instants. `coverage.windowStart` must not follow `coverage.windowEnd`, and `generatedAt`
+  must not precede `coverage.windowEnd`.
 - `completed` accounts for the whole declared coverage window. Zero findings is a valid
   successful result and `issues` may be empty.
 - `partial` requires at least one issue and may carry findings already observed. The
@@ -116,7 +129,8 @@ separate scheduling migration gates and explicit user approval are satisfied.
 `integrity.digest` is lowercase SHA-256 over UTF-8 bytes produced by
 `hfw-discovery-run-v1` canonicalization:
 
-1. Remove the complete top-level `integrity` object.
+1. Remove the complete top-level `integrity` object. `windowId`, `runId`, and optional
+   `supersedesRunId` remain covered like every other non-integrity field.
 2. Sort findings by `findingId`, each finding's evidence by `evidenceId`, and issues by
    `issueId`, using ascending UTF-8 byte order.
 3. Recursively serialize object keys in ascending UTF-8 byte order with no
@@ -140,7 +154,8 @@ The producer writes one immutable file named from the stable source and run iden
 Consumers ignore `.partial` files and read only final `.json` names. After opening, they
 validate the contract/version, exact shape, cross-field invariants, and digest before
 recording the run. A producer never edits a published run file in place; corrected output
-uses a new run identity and links the operational diagnosis outside this contract.
+uses a new `runId`, retains the `windowId`, and points `supersedesRunId` at the prior
+attempt.
 
 ## Gradual ingestion migration
 

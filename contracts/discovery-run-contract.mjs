@@ -3,7 +3,9 @@ import { createHash } from "node:crypto";
 const topLevelKeys = [
   "contract",
   "schemaVersion",
+  "windowId",
   "runId",
+  "supersedesRunId",
   "source",
   "coverage",
   "generatedAt",
@@ -12,6 +14,7 @@ const topLevelKeys = [
   "issues",
   "integrity",
 ];
+const requiredTopLevelKeys = topLevelKeys.filter((key) => key !== "supersedesRunId");
 
 function fail(message) {
   throw new Error(`Invalid discovery artifact: ${message}`);
@@ -36,11 +39,26 @@ function text(value, path, { min = 1, max = 4000 } = {}) {
   }
 }
 
+function legacyText(value, path, min = 1) {
+  if (typeof value !== "string" || value.length < min) {
+    fail(`${path} must be a string of at least ${min} characters.`);
+  }
+}
+
 function dateTime(value, path) {
   text(value, path, { max: 100 });
-  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(value)
-      || !Number.isFinite(Date.parse(value))) {
+  const match = /^(\d{4}-\d{2}-\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|[+-](\d{2}):(\d{2}))$/.exec(value);
+  if (!match) {
     fail(`${path} must be an ISO date-time with a timezone.`);
+  }
+  date(match[1], path);
+  const [, , hours, minutes, seconds, offsetHours, offsetMinutes] = match;
+  if (Number(hours) > 23
+      || Number(minutes) > 59
+      || Number(seconds) > 59
+      || (offsetHours !== undefined && (Number(offsetHours) > 23 || Number(offsetMinutes) > 59))
+      || !Number.isFinite(Date.parse(value))) {
+    fail(`${path} must be a real ISO date-time with a valid timezone offset.`);
   }
 }
 
@@ -196,10 +214,15 @@ export function computeDiscoveryRunDigest(run) {
 
 export function validateDiscoveryRun(run) {
   object(run, "run");
-  exactKeys(run, topLevelKeys, topLevelKeys, "run");
+  exactKeys(run, topLevelKeys, requiredTopLevelKeys, "run");
   if (run.contract !== "hereforwork.discovery-run") fail("run.contract is unsupported.");
   if (run.schemaVersion !== 1) fail("run.schemaVersion is unsupported.");
+  identifier(run.windowId, "run.windowId", { min: 8, max: 128 });
   identifier(run.runId, "run.runId", { min: 8, max: 128 });
+  if (Object.hasOwn(run, "supersedesRunId")) {
+    identifier(run.supersedesRunId, "run.supersedesRunId", { min: 8, max: 128 });
+    if (run.supersedesRunId === run.runId) fail("run.supersedesRunId must differ from run.runId.");
+  }
 
   object(run.source, "run.source");
   const sourceKeys = ["sourceId", "displayName", "producer", "producerVersion"];
@@ -219,6 +242,9 @@ export function validateDiscoveryRun(run) {
     fail("run.coverage.windowStart must not be after windowEnd.");
   }
   dateTime(run.generatedAt, "run.generatedAt");
+  if (Date.parse(run.generatedAt) < Date.parse(run.coverage.windowEnd)) {
+    fail("run.generatedAt must not be before run.coverage.windowEnd.");
+  }
   if (!Array.isArray(run.findings)) fail("run.findings must be an array.");
   if (!Array.isArray(run.issues)) fail("run.issues must be an array.");
   if (!["completed", "partial", "failed"].includes(run.status)) fail("run.status is unsupported.");
@@ -246,6 +272,30 @@ function validateLegacyDataset(dataset) {
   if (dataset.schemaVersion !== 1) fail("dataset.schemaVersion is unsupported.");
   dateTime(dataset.generatedAt, "dataset.generatedAt");
   if (!Array.isArray(dataset.findings)) fail("dataset.findings must be an array.");
+  dataset.findings.forEach((finding, index) => {
+    const path = `dataset.findings[${index}]`;
+    object(finding, path);
+    const required = [
+      "sourceId", "source", "sourceRoleId", "company", "title", "location",
+      "discoveredAt", "applicationUrl", "normalizedKey", "queueGroup",
+      "eligibilitySummary", "uncertainty",
+    ];
+    exactKeys(finding, [...required, "postedAt", "legitimacy"], required, path);
+    for (const key of ["sourceId", "source", "sourceRoleId", "company", "title", "location", "normalizedKey", "eligibilitySummary"]) {
+      legacyText(finding[key], `${path}.${key}`, key === "normalizedKey" ? 3 : 1);
+    }
+    dateTime(finding.discoveredAt, `${path}.discoveredAt`);
+    if (Object.hasOwn(finding, "postedAt")) postedAt(finding.postedAt, `${path}.postedAt`);
+    nullableHttps(finding.applicationUrl, `${path}.applicationUrl`);
+    if (!["strong_match", "other_new", "needs_decision"].includes(finding.queueGroup)) {
+      fail(`${path}.queueGroup is unsupported.`);
+    }
+    if (finding.uncertainty !== null) legacyText(finding.uncertainty, `${path}.uncertainty`);
+    if (Object.hasOwn(finding, "legitimacy")
+        && !["high_confidence", "proceed_with_caution", "suspicious"].includes(finding.legitimacy)) {
+      fail(`${path}.legitimacy is unsupported.`);
+    }
+  });
   return dataset;
 }
 

@@ -34,6 +34,16 @@ test("the unchanged schema-v1 dataset remains a supported legacy artifact", () =
   assert.equal(parsed.value.findings.length, 1);
 });
 
+test("legacy parsing validates the complete schema-v1 finding shape", () => {
+  const missingField = clone(legacyFixture);
+  delete missingField.findings[0].sourceRoleId;
+  assert.throws(() => parseDiscoveryArtifact(missingField), /missing sourceRoleId/);
+
+  const unknownField = clone(legacyFixture);
+  unknownField.findings[0].matchScore = { status: "not_scored" };
+  assert.throws(() => parseDiscoveryArtifact(unknownField), /unknown property matchScore/);
+});
+
 test("a discovery run preserves scored and explicitly unscored career-ops states", () => {
   const parsed = parseDiscoveryArtifact(runFixture);
 
@@ -44,11 +54,19 @@ test("a discovery run preserves scored and explicitly unscored career-ops states
   assert.equal(parsed.value.findings[1].matchScore.value, undefined);
 });
 
-test("integrity is deterministic across object and finding order", () => {
-  const reordered = reverseObjectKeys(clone(runFixture));
+test("integrity is deterministic across object, finding, evidence, and issue order", () => {
+  const baseline = clone(runFixture);
+  baseline.issues = [
+    { issueId: "warning:b", code: "warning_b", message: "Second synthetic warning.", retryable: false },
+    { issueId: "warning:a", code: "warning_a", message: "First synthetic warning.", retryable: false },
+  ];
+  seal(baseline);
+  const reordered = reverseObjectKeys(clone(baseline));
   reordered.findings.reverse();
+  reordered.findings.forEach((finding) => finding.evidence.reverse());
+  reordered.issues.reverse();
 
-  assert.equal(computeDiscoveryRunDigest(reordered), runFixture.integrity.digest);
+  assert.equal(computeDiscoveryRunDigest(reordered), baseline.integrity.digest);
 });
 
 test("integrity fails closed when covered content changes", () => {
@@ -80,6 +98,52 @@ test("scored provenance is required and not_scored cannot carry a value", () => 
   inventedValue.findings[1].matchScore.value = 4;
   seal(inventedValue);
   assert.throws(() => validateDiscoveryRun(inventedValue), /unknown property value/);
+});
+
+test("published attempt identity supports partial-to-completed retry without weakening replay identity", () => {
+  const partial = clone(runFixture);
+  partial.runId = runFixture.supersedesRunId;
+  delete partial.supersedesRunId;
+  partial.status = "partial";
+  partial.issues = [{ issueId: "source-timeout", code: "source_timeout", message: "One source page timed out.", retryable: true }];
+  assert.doesNotThrow(() => validateDiscoveryRun(seal(partial)));
+
+  assert.equal(runFixture.windowId, partial.windowId);
+  assert.notEqual(runFixture.runId, partial.runId);
+  assert.equal(runFixture.supersedesRunId, partial.runId);
+  assert.doesNotThrow(() => validateDiscoveryRun(runFixture));
+
+  const selfSuperseding = clone(runFixture);
+  selfSuperseding.supersedesRunId = selfSuperseding.runId;
+  seal(selfSuperseding);
+  assert.throws(() => validateDiscoveryRun(selfSuperseding), /must differ from run.runId/);
+});
+
+test("duplicate stable ids are rejected at every scoped collection", () => {
+  const duplicateFinding = clone(runFixture);
+  duplicateFinding.findings[1].findingId = duplicateFinding.findings[0].findingId;
+  assert.throws(() => validateDiscoveryRun(seal(duplicateFinding)), /duplicate findingId/);
+
+  const duplicateEvidence = clone(runFixture);
+  duplicateEvidence.findings[0].evidence[1].evidenceId = duplicateEvidence.findings[0].evidence[0].evidenceId;
+  assert.throws(() => validateDiscoveryRun(seal(duplicateEvidence)), /duplicate evidenceId/);
+
+  const duplicateIssue = clone(runFixture);
+  duplicateIssue.issues = [
+    { issueId: "warning:same", code: "warning_a", message: "First warning.", retryable: false },
+    { issueId: "warning:same", code: "warning_b", message: "Second warning.", retryable: false },
+  ];
+  assert.throws(() => validateDiscoveryRun(seal(duplicateIssue)), /duplicate issueId/);
+});
+
+test("calendar-impossible timestamps and premature generation are rejected", () => {
+  const impossibleDate = clone(runFixture);
+  impossibleDate.generatedAt = "2026-02-30T13:05:00+02:00";
+  assert.throws(() => validateDiscoveryRun(seal(impossibleDate)), /real ISO date/);
+
+  const generatedBeforeCoverage = clone(runFixture);
+  generatedBeforeCoverage.generatedAt = "2026-09-01T12:59:59+02:00";
+  assert.throws(() => validateDiscoveryRun(seal(generatedBeforeCoverage)), /must not be before/);
 });
 
 test("partial and failed runs remain explicit and non-successful", () => {

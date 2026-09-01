@@ -7,6 +7,7 @@
   "required": [
     "contract",
     "schemaVersion",
+    "windowId",
     "runId",
     "source",
     "coverage",
@@ -19,7 +20,22 @@
   "properties": {
     "contract": { "const": "hereforwork.discovery-run" },
     "schemaVersion": { "const": 1 },
+    "windowId": {
+      "description": "Stable identity for one source coverage window; retained across attempts.",
+      "type": "string",
+      "minLength": 8,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+    },
     "runId": {
+      "description": "Immutable identity for this published attempt; retries use a new value.",
+      "type": "string",
+      "minLength": 8,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+    },
+    "supersedesRunId": {
+      "description": "Immediately preceding attempt for the same window, when this artifact is a retry.",
       "type": "string",
       "minLength": 8,
       "maxLength": 128,
