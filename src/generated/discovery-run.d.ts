@@ -5,14 +5,20 @@
  * and run json-schema-to-typescript to regenerate this file.
  */
 
-export interface HereForWorkDiscoveryRun {
+export type HereForWorkDiscoveryRun = {
   contract: "hereforwork.discovery-run";
   schemaVersion: 1;
-  /** Stable identity for one source coverage window; retained across attempts. */
+  /**
+   * Stable identity for one source coverage window; retained across attempts.
+   */
   windowId: string;
-  /** Immutable identity for this published attempt; retries use a new value. */
+  /**
+   * Immutable identity for this published attempt; retries use a new value.
+   */
   runId: string;
-  /** Immediately preceding attempt for the same window, when this artifact is a retry. */
+  /**
+   * Immediately preceding attempt for the same window, when this artifact is a retry.
+   */
   supersedesRunId?: string;
   source: Source;
   coverage: Coverage;
@@ -21,7 +27,9 @@ export interface HereForWorkDiscoveryRun {
   findings: Finding[];
   issues: Issue[];
   integrity: Integrity;
-}
+};
+export type MatchScore = Scored | NotScored;
+
 export interface Source {
   sourceId: string;
   displayName: string;
@@ -42,7 +50,9 @@ export interface Finding {
   title: string;
   location: string;
   discoveredAt: string;
-  /** Source-backed publication date or timestamp. Omit or use null when unavailable. */
+  /**
+   * Source-backed publication date or timestamp. Omit or use null when unavailable.
+   */
   postedAt?: string | null;
   applicationUrl: string | null;
   normalizedKey: string;
@@ -50,8 +60,11 @@ export interface Finding {
   eligibilitySummary: string;
   uncertainty: string | null;
   legitimacy?: "high_confidence" | "proceed_with_caution" | "suspicious";
-  evidence: Evidence[];
-  matchScore: Scored | NotScored;
+  /**
+   * @minItems 1
+   */
+  evidence: [Evidence, ...Evidence[]];
+  matchScore: MatchScore;
 }
 export interface Evidence {
   evidenceId: string;
