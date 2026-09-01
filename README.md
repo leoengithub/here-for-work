@@ -46,6 +46,7 @@ The first integration uses career-ops as the sole authority for verified profile
 - Every viable role remains available without an arbitrary daily cap.
 - The desktop-first queue is a direct list without a lightweight detail pane.
 - Queue roles use compact, non-expandable cards with the title on its own line, wrapping metadata below, and quiet Dismiss before primary Prepare. They omit ATS, scoring, preparation state, and source-count hygiene; a real source publication date may appear as `Today`, `1 day ago`, or `N days ago`, and disappears when missing, invalid, future-dated, or conflicting.
+- Queue, Applications, and System remain available in a fixed 56-pixel header. Dismiss records canonical Discarded state immediately, then offers a session-only 30-second Undo in a fixed stack of up to three independent notices; notices pause while hovered or keyboard focused and never return after restart.
 - Preparation provider, background checks, and Queue filters live in System. Filters start from verified career-ops profile preferences and apply to current unprepared roles and future imports.
 - Queue's upload icon opens a file picker and imports the selected discovery JSON; it does not imply automatic refresh.
 - Applications keeps one current row per role; Details opens a formatted career-ops report preview instead of exposing a question-answer log.

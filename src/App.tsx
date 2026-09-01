@@ -32,6 +32,11 @@ import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sh
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import {
+  Toaster,
+  createDismissalNoticeController,
+  createToastManager,
+} from "@/components/ui/toast";
+import {
   checkIntegrations,
   configureBrowserBridge,
   createOperationalBackup,
@@ -77,6 +82,8 @@ import type {
 import { formatPublicationAge } from "./lib/publication-age";
 
 const groupOrder: QueueGroup[] = ["strong_match", "other_new", "needs_decision"];
+const dismissalToast = createToastManager();
+const dismissalNotices = createDismissalNoticeController(dismissalToast);
 
 const groupCopy: Record<QueueGroup, string> = {
   strong_match: "Strong matches",
@@ -1022,10 +1029,17 @@ export function App() {
   };
 
   const dismissQueueRole = async (roleId: string) => {
+    const role = dashboard?.roles.find((item) => item.id === roleId);
+    if (!role) return;
     setBusy(true);
     setError(null);
     try {
       setDashboard(await dismissRole(roleId));
+      dismissalNotices.show(
+        role.id,
+        role.title,
+        () => void restoreDismissedRole(role.id, role.title),
+      );
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
     } finally {
@@ -1076,13 +1090,20 @@ export function App() {
     }
   };
 
-  const restoreDismissedRole = async (roleId: string) => {
+  const restoreDismissedRole = async (roleId: string, roleTitle: string) => {
     setBusy(true);
-    setError(null);
+    dismissalNotices.undoing(roleId, roleTitle);
     try {
       setDashboard(await undoDismissal(roleId));
+      dismissalNotices.completed(roleId, roleTitle);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
+      const detail = reason instanceof Error ? reason.message : String(reason);
+      dismissalNotices.failed(
+        roleId,
+        roleTitle,
+        detail,
+        () => void restoreDismissedRole(roleId, roleTitle),
+      );
     } finally {
       setBusy(false);
     }
@@ -1383,16 +1404,6 @@ export function App() {
             />
           </div>
 
-          {dashboard.recentlyDismissed[0] ? (
-            <Alert className="undo-strip" role="status" aria-live="polite">
-              <AlertDescription><strong>{dashboard.recentlyDismissed[0].title}</strong> was recorded as Discarded in career-ops.</AlertDescription>
-              <AlertAction>
-                <Button variant="outline" type="button" onClick={() => void restoreDismissedRole(dashboard.recentlyDismissed[0].id)} disabled={busy}>
-                  Undo
-                </Button>
-              </AlertAction>
-            </Alert>
-          ) : null}
           {dashboard.roles.length === 0 ? (
             emptyQueueContent
           ) : (
@@ -1498,6 +1509,7 @@ export function App() {
           {mainContent}
         </TabsContent>
       )}
+      <Toaster toastManager={dismissalToast} timeout={30_000} limit={3} />
     </Tabs>
   );
 }

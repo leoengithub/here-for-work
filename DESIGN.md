@@ -180,6 +180,14 @@ Every new component starts with a shadcn registry search. Registry code is adapt
 
 Primary navigation remains compact and familiar. Active state combines Quiet Ink, weight, and a Signal Lime marker. System stays a secondary utility action rather than a third primary destination and uses the established Hugeicons settings icon with an accessible label and 44-pixel target.
 
+The production shell keeps this navigation in a fixed 3.5rem top bar. At narrow widths the descriptive brand line yields first, while Queue, Applications, and System remain visible and keyboard reachable.
+
+### Dismissal Undo Notifications
+
+Dismissal feedback uses a fixed, bottom-centered stack so it never reflows Queue or Applications. Each role gets its own 30-second Undo action and recovery state, with no more than three notices visible. The stack pauses its independent timers while a pointer or keyboard focus is within it, stays mounted across primary-route changes, and resets when the application session ends. Motion is limited to short opacity and vertical-transform transitions, with a reduced-motion alternative.
+
+The shadcn registry's current Base UI `toast` and Sonner patterns were inspected before implementation. The Base UI toast was adapted because the project already depends on `@base-ui/react` and its provider supplies the required polite live region, focus management, per-toast timeout, pause-on-hover/focus behavior, action semantics, and display limit. Sonner was not added because its registry wrapper would introduce `sonner` and `next-themes` without improving the required behavior.
+
 ### Queue Role Card
 
 The compact queue role card is the signature working component. Cards remain a single vertical list, with a flat Clean Surface, one-pixel Cool Border, gentle radius, and no shadow, expansion, whole-card click, or nested card. The linked role title occupies the top line alone. Company, location, optional source-backed age, and one decision-changing uncertainty share the secondary line below and wrap when required. Only actions occupy the right edge: quiet ghost Dismiss first, then primary Prepare. ATS, score, internal source counts, and preparation state stay out of Queue. Narrow layouts reflow actions beneath the content without hiding age, location, or uncertainty.
