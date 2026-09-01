@@ -799,7 +799,19 @@ fn start_browser_handoff_worker(app: tauri::AppHandle) -> Result<(), String> {
             loop {
                 let preparation_id = {
                     let state = app.state::<AppState>();
-                    state.store.lock().ok().and_then(|store| {
+                    state.store.lock().ok().and_then(|mut store| {
+                        if let Ok(stalled_sessions) = store.recover_stalled_browser_commands(
+                            chrono::Utc::now(),
+                            chrono::Duration::seconds(15),
+                        ) {
+                            for session_id in stalled_sessions {
+                                let _ = store.queue_browser_failure_notification(
+                                    &session_id,
+                                    "browser.extension",
+                                    "The approved Chrome extension did not acknowledge the browser command in time.",
+                                );
+                            }
+                        }
                         store.next_preparation_for_browser_handoff().ok().flatten()
                     })
                 };
@@ -1058,13 +1070,24 @@ fn retry_browser_session(
     session_id: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<BrowserSessionSummary, String> {
-    let mut store = state
-        .store
-        .lock()
-        .map_err(|_| "Operational store lock was poisoned".to_string())?;
-    store
-        .retry_browser_session(&session_id)
-        .map_err(|error| error.to_string())
+    let (session, profile_id) = {
+        let mut store = state
+            .store
+            .lock()
+            .map_err(|_| "Operational store lock was poisoned".to_string())?;
+        let session = store
+            .retry_browser_session(&session_id)
+            .map_err(|error| error.to_string())?;
+        let profile_id = store
+            .selected_chrome_profile()
+            .map_err(|error| error.to_string())?;
+        (session, profile_id)
+    };
+    if session.purpose == "application" && session.status == "waiting_for_extension" {
+        let profile_id = profile_id.ok_or("Select and connect a Chrome profile first")?;
+        launch_application_page(&profile_id, &session, &state)?;
+    }
+    Ok(session)
 }
 
 #[tauri::command]
@@ -1096,12 +1119,39 @@ fn start_application_browser_session(
             .map_err(|error| error.to_string())?;
         (profile_id, session, reuse_existing_page)
     };
+    if !reuse_existing_page {
+        launch_application_page(&profile_id, &session, state)?;
+    }
+    Ok(session)
+}
+
+fn launch_application_page(
+    profile_id: &str,
+    session: &BrowserSessionSummary,
+    state: &AppState,
+) -> Result<(), String> {
     let url = session
         .page_url
         .as_deref()
         .ok_or("The application session has no URL")?;
-    let chrome = PathBuf::from("/Applications/Google Chrome.app");
-    if !chrome.is_dir() {
+    if !chrome_profiles(&state.home_dir)
+        .iter()
+        .any(|profile| profile.id == profile_id)
+    {
+        if let Ok(mut store) = state.store.lock() {
+            let _ = store.fail_browser_session_start(&session.id, "chrome_profile_unavailable");
+            let _ = store.queue_browser_failure_notification(
+                &session.id,
+                "browser.launch",
+                "The configured Chrome profile is no longer available on this Mac.",
+            );
+        }
+        return Err(
+            "The configured Chrome profile is no longer available on this Mac.".to_string(),
+        );
+    }
+    let chrome = PathBuf::from("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome");
+    if !chrome.is_file() {
         if let Ok(mut store) = state.store.lock() {
             let _ = store.fail_browser_session_start(&session.id, "chrome_not_installed");
             let _ = store.queue_browser_failure_notification(
@@ -1112,34 +1162,34 @@ fn start_application_browser_session(
         }
         return Err("Google Chrome is not installed in /Applications.".to_string());
     }
-    if !reuse_existing_page {
-        if let Err(error) = background_chrome_command(&profile_id, url).spawn() {
-            if let Ok(mut store) = state.store.lock() {
-                let _ = store.fail_browser_session_start(&session.id, "chrome_launch_failed");
-                let _ = store.queue_browser_failure_notification(
-                    &session.id,
-                    "browser.launch",
-                    &format!("Could not open the selected Chrome profile: {error}"),
-                );
-            }
-            return Err(format!(
-                "Could not open the selected Chrome profile: {error}"
-            ));
+    if let Err(error) = selected_profile_chrome_command(&chrome, profile_id, url).spawn() {
+        if let Ok(mut store) = state.store.lock() {
+            let _ = store.fail_browser_session_start(&session.id, "chrome_launch_failed");
+            let _ = store.queue_browser_failure_notification(
+                &session.id,
+                "browser.launch",
+                &format!("Could not open the selected Chrome profile: {error}"),
+            );
         }
+        return Err(format!(
+            "Could not open the selected Chrome profile: {error}"
+        ));
     }
-    Ok(session)
+    Ok(())
 }
 
-fn background_chrome_command(profile_id: &str, url: &str) -> std::process::Command {
-    let mut command = std::process::Command::new("/usr/bin/open");
+fn selected_profile_chrome_command(
+    executable: &std::path::Path,
+    profile_id: &str,
+    url: &str,
+) -> std::process::Command {
+    let mut command = std::process::Command::new(executable);
     command
-        .arg("-g")
-        .arg("-a")
-        .arg("Google Chrome")
-        .arg("--args")
         .arg(format!("--profile-directory={profile_id}"))
         .arg("--new-tab")
-        .arg(url);
+        .arg(url)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
     command
 }
 
@@ -2012,14 +2062,19 @@ mod tests {
 
     #[test]
     fn chrome_handoff_opens_the_selected_profile_without_automation_or_focus_flags() {
-        let command =
-            super::background_chrome_command("Profile 1", "https://jobs.example.test/application");
+        let executable =
+            std::path::Path::new("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome");
+        let command = super::selected_profile_chrome_command(
+            executable,
+            "Profile 1",
+            "https://jobs.example.test/application",
+        );
         let arguments = command
             .get_args()
             .map(|argument| argument.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
 
-        assert_eq!(arguments.first().map(String::as_str), Some("-g"));
+        assert_eq!(command.get_program(), executable);
         assert!(arguments.contains(&"--profile-directory=Profile 1".to_string()));
         assert!(arguments.contains(&"https://jobs.example.test/application".to_string()));
         assert!(!arguments.iter().any(|argument| {

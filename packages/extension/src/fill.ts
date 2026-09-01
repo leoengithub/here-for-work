@@ -66,7 +66,9 @@ export async function applyFillPlan(
     throw new Error("The fill plan does not match the inspected live form.");
   }
   const results = [];
+  const uploadFieldIds = new Set(uploads.map((upload) => upload.fieldId));
   for (const instruction of plan.instructions) {
+    if (uploadFieldIds.has(instruction.fieldId)) continue;
     if (instruction.classification !== "safe_verified") {
       results.push({ fieldId: instruction.fieldId, status: "skipped", reason: "Only safe verified fields may be filled." });
       continue;

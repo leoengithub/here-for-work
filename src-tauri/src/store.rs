@@ -831,11 +831,19 @@ impl Store {
         session_id: &str,
         error_code: &str,
     ) -> Result<(), StoreError> {
-        self.connection.execute(
+        let transaction = self.connection.transaction()?;
+        transaction.execute(
             "UPDATE browser_sessions SET status = 'action_required', error_code = ?1,
                     updated_at = ?2 WHERE id = ?3 AND status = 'waiting_for_extension'",
             params![error_code, Utc::now().to_rfc3339(), session_id],
         )?;
+        transaction.execute(
+            "UPDATE browser_commands SET status = 'permanent', error_code = ?1,
+                    lease_expires_at = NULL, updated_at = ?2
+              WHERE session_id = ?3 AND status = 'pending'",
+            params![error_code, Utc::now().to_rfc3339(), session_id],
+        )?;
+        transaction.commit()?;
         Ok(())
     }
 
@@ -849,7 +857,7 @@ impl Store {
         let notification = self
             .connection
             .query_row(
-                "SELECT b.role_id, b.preparation_id, b.updated_at, r.company, r.title
+                "SELECT b.role_id, b.preparation_id, r.company, r.title
                    FROM browser_sessions b JOIN roles r ON r.id = b.role_id
                   WHERE b.id = ?1 AND b.purpose = 'application'
                     AND b.status = 'action_required'",
@@ -860,12 +868,11 @@ impl Store {
                         row.get::<_, String>(1)?,
                         row.get::<_, String>(2)?,
                         row.get::<_, String>(3)?,
-                        row.get::<_, String>(4)?,
                     ))
                 },
             )
             .optional()?;
-        let Some((role_id, preparation_id, transition_at, company, title)) = notification else {
+        let Some((role_id, preparation_id, company, title)) = notification else {
             return Ok(());
         };
         self.connection.execute(
@@ -877,7 +884,7 @@ impl Store {
                        'preparation_failed', ?5, ?6, ?7, 'view_details', 'View details')",
             params![
                 Uuid::new_v4().to_string(),
-                format!("browser-session:{session_id}:action-required:{transition_at}"),
+                format!("browser-session:{session_id}:preparation-failed"),
                 format!(
                     "{title} at {company}. {}: {detail}",
                     preparation_stage_label(stage)
@@ -1005,6 +1012,66 @@ impl Store {
             command_type,
             payload,
         }))
+    }
+
+    pub fn recover_stalled_browser_commands(
+        &mut self,
+        now: DateTime<Utc>,
+        pending_timeout: Duration,
+    ) -> Result<Vec<String>, StoreError> {
+        let transaction = self.connection.transaction()?;
+        let now_text = now.to_rfc3339();
+        transaction.execute(
+            "UPDATE browser_commands
+                SET status = CASE WHEN attempt >= ?1 THEN 'permanent' ELSE 'pending' END,
+                    error_code = 'lease_expired', lease_expires_at = NULL, updated_at = ?2
+              WHERE status = 'leased' AND lease_expires_at < ?2",
+            params![MAX_BROWSER_COMMAND_ATTEMPTS, now_text],
+        )?;
+        transaction.execute(
+            "UPDATE browser_commands
+                SET status = 'permanent', error_code = 'extension_handshake_timeout',
+                    lease_expires_at = NULL, updated_at = ?1
+              WHERE status = 'pending' AND command_type != 'focus_review' AND updated_at < ?2",
+            params![(now).to_rfc3339(), (now - pending_timeout).to_rfc3339()],
+        )?;
+        transaction.execute(
+            "UPDATE browser_sessions
+                SET status = 'action_required',
+                    error_code = CASE
+                      WHEN EXISTS (
+                        SELECT 1 FROM browser_commands c
+                         WHERE c.session_id = browser_sessions.id
+                           AND c.status = 'permanent'
+                           AND c.error_code = 'extension_handshake_timeout'
+                      ) THEN 'extension_handshake_timeout'
+                      ELSE 'extension_command_expired'
+                    END,
+                    updated_at = ?1
+              WHERE id IN (
+                SELECT session_id FROM browser_commands
+                 WHERE status = 'permanent'
+                   AND error_code IN ('lease_expired', 'extension_handshake_timeout')
+                   AND command_type != 'focus_review'
+              )
+                AND status != 'action_required'",
+            [now_text.clone()],
+        )?;
+        let session_ids = {
+            let mut statement = transaction.prepare(
+                "SELECT DISTINCT b.id
+                   FROM browser_sessions b
+                   JOIN browser_commands c ON c.session_id = b.id
+                  WHERE b.status = 'action_required' AND b.updated_at = ?1
+                    AND c.status = 'permanent'
+                    AND c.error_code IN ('lease_expired', 'extension_handshake_timeout')",
+            )?;
+            statement
+                .query_map([now_text], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        transaction.commit()?;
+        Ok(session_ids)
     }
 
     pub fn complete_browser_inspection(
@@ -1232,6 +1299,17 @@ impl Store {
     ) -> Result<BrowserSessionSummary, StoreError> {
         let transaction = self.connection.transaction()?;
         let session_id = leased_browser_command(&transaction, command_id, "fill_plan")?;
+        let payload_json = transaction.query_row(
+            "SELECT payload_json FROM browser_commands WHERE id = ?1",
+            [command_id],
+            |row| row.get::<_, String>(0),
+        )?;
+        let payload: serde_json::Value = serde_json::from_str(&payload_json).map_err(|error| {
+            StoreError::InvalidBrowserTransition(format!(
+                "stored browser payload is invalid: {error}"
+            ))
+        })?;
+        let results = normalized_browser_fill_results(results, &payload)?;
         let now = Utc::now().to_rfc3339();
         transaction.execute(
             "UPDATE browser_commands SET status = 'completed', lease_expires_at = NULL,
@@ -1557,7 +1635,7 @@ impl Store {
                            'preparation_failed', ?5, ?6, ?7, 'view_details', 'View details')",
                 params![
                     Uuid::new_v4().to_string(),
-                    format!("browser-command:{command_id}:failed"),
+                    format!("browser-session:{session_id}:preparation-failed"),
                     format!(
                         "{title} at {company}. {}: {}",
                         preparation_stage_label(&command_type),
@@ -1594,6 +1672,48 @@ impl Store {
                 "only an action-required browser session can be retried".to_string(),
             ));
         }
+        if matches!(
+            error_code.as_deref(),
+            Some("answer_persistence_failed" | "answer_persistence_interrupted")
+        ) {
+            let repair = transaction
+                .query_row(
+                    "SELECT b.fill_results_json, c.payload_json
+                       FROM browser_sessions b
+                       JOIN browser_commands c ON c.session_id = b.id
+                      WHERE b.id = ?1 AND c.command_type = 'fill_plan'
+                      ORDER BY c.created_at DESC, c.rowid DESC LIMIT 1",
+                    [session_id],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                )
+                .optional()?;
+            if let Some((results_json, payload_json)) = repair {
+                let results: serde_json::Value =
+                    serde_json::from_str(&results_json).map_err(|error| {
+                        StoreError::InvalidBrowserTransition(format!(
+                            "stored fill results are invalid: {error}"
+                        ))
+                    })?;
+                let payload: serde_json::Value =
+                    serde_json::from_str(&payload_json).map_err(|error| {
+                        StoreError::InvalidBrowserTransition(format!(
+                            "stored browser payload is invalid: {error}"
+                        ))
+                    })?;
+                let repaired = normalized_browser_fill_results(&results, &payload)?;
+                transaction.execute(
+                    "UPDATE browser_sessions SET fill_results_json = ?1 WHERE id = ?2",
+                    params![repaired.to_string(), session_id],
+                )?;
+            }
+            transaction.execute(
+                "UPDATE browser_sessions SET status = 'persisting_answers', error_code = NULL,
+                        updated_at = ?1 WHERE id = ?2",
+                params![Utc::now().to_rfc3339(), session_id],
+            )?;
+            transaction.commit()?;
+            return self.browser_session(session_id);
+        }
         let failed_command = transaction
             .query_row(
                 "SELECT command_type, payload_json FROM browser_commands
@@ -1604,15 +1724,10 @@ impl Store {
             )
             .optional()?;
         if failed_command.is_none() {
-            let next_status = match error_code.as_deref() {
-                Some("answer_persistence_failed" | "answer_persistence_interrupted") => {
-                    "persisting_answers"
-                }
-                _ => "drafting_answers",
-            };
             transaction.execute(
-                "UPDATE browser_sessions SET status = ?1, error_code = NULL, updated_at = ?2 WHERE id = ?3",
-                params![next_status, Utc::now().to_rfc3339(), session_id],
+                "UPDATE browser_sessions SET status = 'drafting_answers', error_code = NULL,
+                        updated_at = ?1 WHERE id = ?2",
+                params![Utc::now().to_rfc3339(), session_id],
             )?;
             transaction.commit()?;
             return self.browser_session(session_id);
@@ -3765,6 +3880,42 @@ fn insert_browser_command(
     Ok(())
 }
 
+fn normalized_browser_fill_results(
+    results: &serde_json::Value,
+    payload: &serde_json::Value,
+) -> Result<serde_json::Value, StoreError> {
+    let items = results.as_array().ok_or_else(|| {
+        StoreError::InvalidBrowserTransition("browser fill results are not an array".to_string())
+    })?;
+    let upload_field_id = payload
+        .pointer("/cvUpload/fieldId")
+        .and_then(serde_json::Value::as_str);
+    let mut normalized = Vec::<serde_json::Value>::with_capacity(items.len());
+    for item in items {
+        let field_id = item
+            .get("fieldId")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                StoreError::InvalidBrowserTransition(
+                    "browser fill result is missing its field id".to_string(),
+                )
+            })?;
+        if let Some(position) = normalized.iter().position(|existing| {
+            existing.get("fieldId").and_then(serde_json::Value::as_str) == Some(field_id)
+        }) {
+            if upload_field_id == Some(field_id) {
+                normalized[position] = item.clone();
+                continue;
+            }
+            return Err(StoreError::InvalidBrowserTransition(
+                "browser fill results contain a duplicate field id".to_string(),
+            ));
+        }
+        normalized.push(item.clone());
+    }
+    Ok(serde_json::Value::Array(normalized))
+}
+
 fn leased_browser_command(
     transaction: &Transaction<'_>,
     command_id: &str,
@@ -4197,7 +4348,7 @@ fn missed_nominal_times(
 #[cfg(test)]
 mod tests {
     use super::{PreparationCompletion, QueueFilters, Store};
-    use crate::domain::PreparationWork;
+    use crate::domain::{BrowserSessionSummary, PreparationWork};
 
     const DATASET: &str = r#"{
       "schemaVersion": 1,
@@ -4226,6 +4377,40 @@ mod tests {
         let claimed = store.claim_preparation_work().unwrap().unwrap();
         assert_eq!(claimed.id, queued.id);
         claimed
+    }
+
+    fn queue_completed_application_session(store: &mut Store) -> BrowserSessionSummary {
+        store.import_dataset(DATASET).unwrap();
+        let role_id = store.dashboard().unwrap().roles[0].id.clone();
+        let preparation = queue_and_claim(store, &role_id, "codex");
+        store
+            .record_preparation_context(
+                &preparation.id,
+                &"a".repeat(64),
+                "https://example.test/jobs/1",
+            )
+            .unwrap();
+        store
+            .complete_preparation(
+                &preparation.id,
+                &PreparationCompletion {
+                    tracker_id: 42,
+                    report_path: "reports/042-example.md",
+                    report_hash: &"b".repeat(64),
+                    cv_pdf_path: "output/042-example/cv.pdf",
+                    cv_pdf_hash: &"c".repeat(64),
+                    cv_source: "tailored_generated",
+                },
+            )
+            .unwrap();
+        store
+            .configure_browser(
+                "abcdefghijklmnopabcdefghijklmnop",
+                "019d0000-0000-7000-8000-000000000001",
+                "Profile 1",
+            )
+            .unwrap();
+        store.queue_application_session(&preparation.id).unwrap()
     }
 
     #[test]
@@ -5299,9 +5484,11 @@ mod tests {
         store
             .complete_browser_fill(
                 &fill.command_id,
-                &serde_json::json!([{
-                    "fieldId": "email", "status": "verified", "reason": null
-                }]),
+                &serde_json::json!([
+                    { "fieldId": "resume", "status": "skipped", "reason": "File controls use the verified upload path." },
+                    { "fieldId": "email", "status": "verified", "reason": null },
+                    { "fieldId": "resume", "status": "verified", "reason": null }
+                ]),
             )
             .unwrap();
         assert_eq!(
@@ -5320,6 +5507,18 @@ mod tests {
         assert_eq!(commit_work.cv_pdf_path, "output/042-example/cv.pdf");
         assert_eq!(commit_work.review_items[0]["decision"], "fill");
         assert_eq!(commit_work.fill_results[0]["status"], "verified");
+        assert_eq!(commit_work.fill_results.as_array().unwrap().len(), 2);
+        store
+            .connection
+            .execute(
+                "INSERT INTO browser_commands(
+                   id, session_id, command_type, payload_json, status, attempt,
+                   error_code, created_at, updated_at
+                 ) VALUES ('historical-inspect-failure', ?1, 'inspect_request', '{}',
+                           'failed', 1, 'application_tab_recovery_failed', ?2, ?2)",
+                rusqlite::params![&session.id, chrono::Utc::now().to_rfc3339()],
+            )
+            .unwrap();
         store
             .fail_answer_commit(&session.id, "answer_persistence_failed")
             .unwrap();
@@ -5409,6 +5608,105 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(retry_command.command_type, "inspect_request");
+    }
+
+    #[test]
+    fn delayed_extension_handshake_expires_boundedly_and_retries_the_same_session() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+        let session = queue_completed_application_session(&mut store);
+        let stalled = store
+            .recover_stalled_browser_commands(
+                chrono::Utc::now() + chrono::Duration::seconds(16),
+                chrono::Duration::seconds(15),
+            )
+            .unwrap();
+
+        assert_eq!(stalled, vec![session.id.clone()]);
+        assert_eq!(
+            store
+                .browser_session(&session.id)
+                .unwrap()
+                .error_code
+                .as_deref(),
+            Some("extension_handshake_timeout")
+        );
+        store
+            .queue_browser_failure_notification(
+                &session.id,
+                "browser.extension",
+                "The approved extension did not connect in time.",
+            )
+            .unwrap();
+        let retried = store.retry_browser_session(&session.id).unwrap();
+        assert_eq!(retried.id, session.id);
+        assert_eq!(retried.status, "waiting_for_extension");
+        assert_eq!(store.browser_sessions().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn expired_command_ack_releases_after_three_bounded_leases() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+        let session = queue_completed_application_session(&mut store);
+        let mut now = chrono::Utc::now();
+
+        for attempt in 1..=3 {
+            let command = store
+                .claim_browser_command(now, chrono::Duration::seconds(30))
+                .unwrap()
+                .unwrap();
+            assert_eq!(command.session_id, session.id);
+            now += chrono::Duration::seconds(31);
+            let expired = store
+                .recover_stalled_browser_commands(now, chrono::Duration::seconds(15))
+                .unwrap();
+            if attempt < 3 {
+                assert!(expired.is_empty());
+            } else {
+                assert_eq!(expired, vec![session.id.clone()]);
+            }
+        }
+        assert_eq!(
+            store
+                .browser_session(&session.id)
+                .unwrap()
+                .error_code
+                .as_deref(),
+            Some("extension_command_expired")
+        );
+    }
+
+    #[test]
+    fn retry_failures_do_not_duplicate_the_session_or_failure_notification() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+        let session = queue_completed_application_session(&mut store);
+
+        for _ in 0..2 {
+            let command = store
+                .claim_browser_command(chrono::Utc::now(), chrono::Duration::seconds(30))
+                .unwrap()
+                .unwrap();
+            store
+                .fail_browser_command(&command.command_id, "application_tab_recovery_failed")
+                .unwrap();
+            if store.browser_session(&session.id).unwrap().status == "action_required" {
+                let _ = store.retry_browser_session(&session.id).unwrap();
+            }
+        }
+
+        assert_eq!(store.browser_sessions().unwrap().len(), 1);
+        let failures: i64 = store
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM notification_outbox
+                  WHERE browser_session_id = ?1 AND event_kind = 'preparation_failed'",
+                [&session.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(failures, 1);
     }
 
     #[test]

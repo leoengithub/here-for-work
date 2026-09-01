@@ -4,7 +4,7 @@ import { createInstallationIdResolver } from "./identity";
 import { retryMessage } from "./message-retry";
 import { focusReviewTab } from "./focus-review";
 import { isConfirmedNativeResponse, postMessageSafely } from "./native-port";
-import { selectExpectedTab } from "./tab-selection";
+import { EXPECTED_TAB_POLL_INTERVAL_MS, resolveExpectedTabId } from "./tab-recovery";
 
 const HOST_NAME = "com.hereforwork.bridge";
 const POLL_INTERVAL_MS = 750;
@@ -92,13 +92,11 @@ async function activeTabId(): Promise<number> {
 }
 
 async function expectedTabId(expectedUrl: string): Promise<number> {
-  for (let attempt = 0; attempt < 20; attempt += 1) {
-    const tabs = await chrome.tabs.query({ url: ["https://*/*"] });
-    const match = selectExpectedTab(tabs, expectedUrl);
-    if (match?.id) return match.id;
-    await new Promise((resolve) => setTimeout(resolve, 250));
-  }
-  throw new Error("The selected role is not open in this Chrome profile.");
+  return resolveExpectedTabId(expectedUrl, {
+    queryHttpsTabs: () => chrome.tabs.query({ url: ["https://*/*"] }),
+    createBackgroundTab: (url) => chrome.tabs.create({ url, active: false }),
+    delay: () => new Promise((resolve) => setTimeout(resolve, EXPECTED_TAB_POLL_INTERVAL_MS)),
+  });
 }
 
 function sessionTabKey(sessionId: string): string {

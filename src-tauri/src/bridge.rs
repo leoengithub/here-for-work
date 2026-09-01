@@ -477,6 +477,11 @@ fn normalize_error_code(error: &str) -> String {
     if normalized.contains("message port closed") {
         return "extension_message_interrupted".to_string();
     }
+    if normalized.contains("approved chrome profile could not open")
+        || normalized.contains("approved chrome profile did not return")
+    {
+        return "application_tab_recovery_failed".to_string();
+    }
     "extension_command_failed".to_string()
 }
 
@@ -574,6 +579,12 @@ mod tests {
         assert_eq!(
             super::normalize_error_code("https://private.example.test/sensitive"),
             "extension_command_failed"
+        );
+        assert_eq!(
+            super::normalize_error_code(
+                "The approved Chrome profile did not return the expected application tab."
+            ),
+            "application_tab_recovery_failed"
         );
     }
 }

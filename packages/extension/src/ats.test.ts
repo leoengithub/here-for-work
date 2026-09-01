@@ -157,7 +157,11 @@ describe("ATS trust boundary", () => {
     const plan: FillPlan = {
       protocolVersion: 1,
       snapshotFingerprint: snapshot.fingerprint,
-      instructions: [],
+      instructions: [{
+        fieldId: "resume",
+        value: "output/role/cv.pdf",
+        classification: "safe_verified",
+      }],
     };
 
     const results = await applyFillPlan(plan, snapshot.fingerprint, doc, [upload], (element, file) => {
@@ -168,6 +172,7 @@ describe("ATS trust boundary", () => {
     });
 
     expect(results).toEqual([{ fieldId: "resume", status: "verified", reason: null }]);
+    expect(results.filter((item) => item.fieldId === "resume")).toHaveLength(1);
     expect(doc.querySelector<HTMLInputElement>("#resume")?.files?.item(0)?.name).toBe("HereForWork-tailored-CV.pdf");
   });
 
