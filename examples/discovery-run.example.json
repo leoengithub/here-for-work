@@ -1,0 +1,96 @@
+{
+  "contract": "hereforwork.discovery-run",
+  "schemaVersion": 1,
+  "runId": "01990df0-4d80-7ab0-b4f1-7d83a11b2c00",
+  "source": {
+    "sourceId": "eu-job-radar",
+    "displayName": "EU Job Radar",
+    "producer": "career-ops-exporter",
+    "producerVersion": "contract-fixture-v1"
+  },
+  "coverage": {
+    "windowStart": "2026-09-01T09:00:00+02:00",
+    "windowEnd": "2026-09-01T13:00:00+02:00",
+    "timezone": "Europe/Madrid"
+  },
+  "generatedAt": "2026-09-01T13:05:00+02:00",
+  "status": "completed",
+  "findings": [
+    {
+      "findingId": "eu-job-radar:example-001",
+      "sourceId": "eu-job-radar",
+      "source": "EU Job Radar",
+      "sourceRoleId": "example-001",
+      "company": "Northstar Tools",
+      "title": "Frontend Engineer",
+      "location": "Remote, Europe",
+      "discoveredAt": "2026-09-01T12:30:00+02:00",
+      "postedAt": "2026-08-30",
+      "applicationUrl": "https://example.test/jobs/001",
+      "normalizedKey": "northstar-tools/frontend-engineer",
+      "queueGroup": "strong_match",
+      "eligibilitySummary": "The role is open to candidates working from Spain.",
+      "uncertainty": null,
+      "legitimacy": "high_confidence",
+      "evidence": [
+        {
+          "evidenceId": "listing:example-001",
+          "kind": "source_listing",
+          "reference": "public company careers listing example-001",
+          "url": "https://example.test/jobs/001",
+          "observedAt": "2026-09-01T12:30:00+02:00",
+          "summary": "Synthetic contract fixture; no personal data."
+        }
+      ],
+      "matchScore": {
+        "status": "scored",
+        "scale": "career_ops_1_to_5",
+        "value": 4.5,
+        "authority": "career-ops",
+        "sourceVersion": "career-ops-score-contract-v1",
+        "scoredAt": "2026-09-01T12:45:00+02:00"
+      }
+    },
+    {
+      "findingId": "eu-job-radar:example-002",
+      "sourceId": "eu-job-radar",
+      "source": "EU Job Radar",
+      "sourceRoleId": "example-002",
+      "company": "Harbor Systems",
+      "title": "Product Engineer",
+      "location": "Madrid, Spain",
+      "discoveredAt": "2026-09-01T12:40:00+02:00",
+      "postedAt": null,
+      "applicationUrl": "https://example.test/jobs/002",
+      "normalizedKey": "harbor-systems/product-engineer",
+      "queueGroup": "other_new",
+      "eligibilitySummary": "The location is compatible; detailed evaluation was deferred.",
+      "uncertainty": "Match strength has not been evaluated.",
+      "legitimacy": "high_confidence",
+      "evidence": [
+        {
+          "evidenceId": "listing:example-002",
+          "kind": "source_listing",
+          "reference": "public company careers listing example-002",
+          "url": "https://example.test/jobs/002",
+          "observedAt": "2026-09-01T12:40:00+02:00",
+          "summary": "Synthetic contract fixture; no personal data."
+        }
+      ],
+      "matchScore": {
+        "status": "not_scored",
+        "reason": "deferred",
+        "authority": "career-ops",
+        "sourceVersion": "career-ops-score-contract-v1",
+        "checkedAt": "2026-09-01T12:45:00+02:00"
+      }
+    }
+  ],
+  "issues": [],
+  "integrity": {
+    "algorithm": "sha256",
+    "canonicalization": "hfw-discovery-run-v1",
+    "coverage": "all_top_level_fields_except_integrity",
+    "digest": "90d0d108ee48b5e38661129f16c0c3df98bf9f6e43dc7d547fcfa340877fdefe"
+  }
+}

@@ -207,6 +207,8 @@ export interface ImportResult {
   unchanged: number;
 }
 import type { HereForWorkDiscoveryDataset } from "./generated/discovery-dataset";
+import type { HereForWorkDiscoveryRun } from "./generated/discovery-run";
 import type { ProviderProbeSchema } from "./generated/provider-probe";
 
 export type DiscoveryDataset = HereForWorkDiscoveryDataset;
+export type DiscoveryRun = HereForWorkDiscoveryRun;

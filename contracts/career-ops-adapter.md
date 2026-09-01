@@ -37,6 +37,12 @@ re-imported without a date. Merged roles expose it only when non-null occurrence
 conflicts stay absent rather than selecting an earliest or latest value. Discovery time
 is never used as publication time.
 
+The legacy dataset and current importer remain unchanged. The separately named
+`hereforwork.discovery-run` contract in [`discovery-run.md`](discovery-run.md) adds run,
+source, evidence, integrity, completion, and native career-ops score provenance for the
+gradual Refresh/shadow migration. Defining that file contract does not add an adapter
+operation, exporter, scheduler authority, or automatic ingestion path.
+
 ## Writable personal-proof operations
 
 Writable operations require a matching, explicitly approved entry point in the

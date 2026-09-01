@@ -61,6 +61,11 @@ Read [PRODUCT.md](PRODUCT.md) before making product or interface decisions.
 
 Read [MVP_SHAPE.md](MVP_SHAPE.md) before proposing technical architecture or implementation.
 
+Discovery producers use the versioned [discovery-run contract](contracts/discovery-run.md).
+The existing schema-v1 snapshot remains supported by the current manual importer while
+manual Refresh, shadow consumption, and optional automatic sync are introduced in that
+order. Typed ingestion does not transfer scheduled-task authority.
+
 ## Local validation
 
 Use Corepack pnpm and the shared store configured in `pnpm-workspace.yaml`:
@@ -71,6 +76,7 @@ corepack pnpm typecheck:extension
 corepack pnpm check:contracts
 corepack pnpm test
 corepack pnpm test:adapter
+corepack pnpm test:discovery-contract
 cargo test --manifest-path src-tauri/Cargo.toml --all-targets
 cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 ```

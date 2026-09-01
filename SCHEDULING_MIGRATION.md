@@ -51,7 +51,12 @@ executor's mutating path until the other executor's equivalent path is confirmed
 ### 2. Typed result ingestion
 
 - HereForWork consumes the versioned typed results produced by the authoritative scheduled
-  task.
+  task. The contract is defined in `contracts/discovery-run.md` and
+  `contracts/discovery-run.schema.json`.
+- Begin with user-triggered manual Refresh while the existing selected-file schema-v1
+  importer remains available. Then shadow-consume the same immutable run files. Optional
+  automatic file consumption is considered only after the shadow evidence is accepted;
+  consumption alone never transfers executor authority.
 - Replayed or retried results must be idempotent in HereForWork-owned state.
 - Invalid, unsupported, incomplete, or missing results remain visible and do not advance a
   successful-coverage cursor.
@@ -135,6 +140,7 @@ state; retain it for diagnosis and a later promotion decision.
 
 ## Deferred implementation work
 
-This decision does not define or implement the typed run-result contract, Gmail-effect
-receipt schema, adapter changes, task controls, or migration UI. Those require separately
-scoped work.
+The typed discovery-run result contract is now defined in `contracts/discovery-run.md`.
+This decision still does not implement its career-ops exporter or HereForWork ingestion,
+the Gmail-effect receipt schema, adapter changes, task controls, or migration UI. Those
+require separately scoped work.
