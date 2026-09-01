@@ -156,6 +156,9 @@ Safe fields continue even when another field needs the user. Partial completion 
 
 Safe verified fields include direct profile facts such as name, email, phone, current location, LinkedIn, GitHub, portfolio, and other discrete values that career-ops can trace exactly to verified profile or CV sources. The exact preparation PDF is also safe for an unambiguous CV/resume file control when its manifest hash matches; its provenance distinguishes fact-checked tailored output from a user-reviewed untailored fallback. HereForWork preserves any file the user already selected. Work authorization, sponsorship, demographic, consent, other sensitive or uncertain answers, ambiguous attachment controls, and unsupported file types remain skipped for the user.
 
+Both tailored output and the user-reviewed fallback use the truthful public upload filename
+`Leonardo_Gomez_Frontend_Engineer.pdf`; internal provenance continues to distinguish them.
+
 Common narrative prompts may receive an editable draft only after career-ops grounds every
 claim in the prepared report, CV, verified profile, or other supplied career-ops sources.
 The draft follows detected form language and length constraints, is filled and read back,

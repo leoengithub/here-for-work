@@ -82,7 +82,7 @@ HereForWork should feel like a well-prepared desk at the start of a focused work
 
 The physical scene is a job seeker reviewing several viable roles on a Mac during a concentrated daytime session. A light Mist canvas supports long reading and comparison. Signal Lime appears only where the interface is ready for a deliberate action or where current selection must be unmistakable.
 
-The system uses shadcn components as its first source, with Base UI semantics, Hugeicons, Manrope for working text, and Space Grotesk for concise hierarchy. HereForWork-specific components exist only when the shadcn registry has no suitable semantic pattern.
+The system uses shadcn components as its first source, with Base UI semantics, Hugeicons, Manrope for working text, and Space Grotesk for concise hierarchy. A suitable registry component is used as provided. HereForWork-specific components exist only when the shadcn registry has no suitable semantic pattern and must reuse the existing tokens and primitives.
 
 **Key Characteristics:**
 
@@ -147,7 +147,7 @@ The system is flat by default. Depth comes from tonal separation, dividers, and 
 
 ## Components
 
-Every new component starts with a shadcn registry search. Registry code is adapted to HereForWork tokens and safety constraints; it is not wrapped in a second generic component system.
+Every new component starts with a shadcn registry search. When the registry provides the required semantics and interaction, its implementation is used as provided rather than adapted, forked, or rewritten. If product safety, accessibility, or required behavior would require changing registry code, implementation stops until the user explicitly approves that adaptation. A project-owned component is permitted only when no suitable registry component exists; the change must document why and reuse the existing tokens and primitives.
 
 ### Buttons
 
@@ -172,7 +172,7 @@ Every new component starts with a shadcn registry search. Registry code is adapt
 
 ### Inputs / Fields
 
-- **Style:** Native inputs enhanced through the corresponding shadcn field component, with Cool Border, Clean Surface, and a 0.5rem to 0.625rem radius.
+- **Style:** Use the corresponding shadcn field component as provided and compose it within the existing Cool Border, Clean Surface, and spacing system without changing its registry implementation.
 - **Focus:** Shared three-pixel ring with a visible border shift.
 - **Error / Disabled:** Error text is explicit and adjacent. Disabled fields remain legible and never imply successful completion.
 
@@ -186,7 +186,7 @@ The production shell keeps this navigation in a fixed 3.5rem top bar. At narrow 
 
 Dismissal feedback uses a fixed, bottom-centered stack so it never reflows Queue or Applications. Each role gets its own 30-second Undo action and recovery state, with no more than three notices visible. The stack pauses its independent timers while a pointer or keyboard focus is within it, stays mounted across primary-route changes, and resets when the application session ends. Motion is limited to short opacity and vertical-transform transitions, with a reduced-motion alternative.
 
-The shadcn registry's current Base UI `toast` and Sonner patterns were inspected before implementation. The Base UI toast was adapted because the project already depends on `@base-ui/react` and its provider supplies the required polite live region, focus management, per-toast timeout, pause-on-hover/focus behavior, action semantics, and display limit. Sonner was not added because its registry wrapper would introduce `sonner` and `next-themes` without improving the required behavior.
+Historical implementation note: the shadcn registry's Base UI `toast` and Sonner patterns were inspected, and the Base UI toast was adapted because the project already depended on `@base-ui/react` and its provider supplied the required polite live region, focus management, per-toast timeout, pause-on-hover/focus behavior, action semantics, and display limit. Sonner was not added because its registry wrapper would have introduced `sonner` and `next-themes` without improving the required behavior. This records a past implementation decision; it does not authorize future registry adaptation. Any further adaptation requires explicit user approval first.
 
 ### Queue Role Card
 
@@ -199,6 +199,7 @@ The shadcn Card registry primitive was inspected before this pattern was impleme
 ### Do:
 
 - **Do** search the shadcn registry before implementing every new component.
+- **Do** use a suitable shadcn registry implementation as provided and ask for explicit approval before adapting it.
 - **Do** keep one obvious primary action in each action group.
 - **Do** keep uncertainty, blockers, and skipped work visible in plain language.
 - **Do** use semantic lists, headings, buttons, fields, and progress elements with complete keyboard behavior.
@@ -213,4 +214,5 @@ The shadcn Card registry primitive was inspected before this pattern was impleme
 - **Don't** use gradient text, decorative glassmorphism, hero-metric layouts, or identical card grids.
 - **Don't** use colored side-stripe borders or shadows on ordinary rows and sections.
 - **Don't** create a component from scratch when the shadcn registry already provides the required semantics.
+- **Don't** adapt, fork, or rewrite a shadcn registry implementation without explicit user approval.
 - **Don't** use a modal as the first solution when inline disclosure, a drawer, or progressive reveal can preserve context.

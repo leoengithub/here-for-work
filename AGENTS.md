@@ -30,5 +30,6 @@ The private product notebook is maintained in the owner’s Obsidian vault. Stab
 
 - Use the shadcn registry as the first source for every new UI component.
 - Before creating a component from scratch, search or inspect the shadcn registry for an existing component that covers the required semantics and interaction.
-- Add and adapt the shadcn component when one exists. Create a project-owned component from scratch only when the registry has no suitable component, and document that decision in the change.
-- Preserve HereForWork's product safety, accessibility, and visual-system rules when adapting registry code.
+- When a suitable shadcn component exists, use the registry implementation as provided; do not adapt, fork, or rewrite its implementation.
+- If product safety, accessibility, or required behavior cannot be met without adapting a registry component, stop and obtain explicit user approval before changing it.
+- Create a project-owned component only when the registry has no suitable component. Document why no registry component fits, and build it with the project's existing tokens and primitives.
