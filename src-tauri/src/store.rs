@@ -826,6 +826,20 @@ impl Store {
         Ok(count > 0)
     }
 
+    pub fn has_active_application_session(&self, preparation_id: &str) -> Result<bool, StoreError> {
+        let count = self.connection.query_row(
+            "SELECT COUNT(*) FROM browser_sessions
+              WHERE preparation_id = ?1 AND purpose = 'application'
+                AND status IN (
+                  'waiting_for_extension', 'inspecting', 'drafting_answers', 'answering',
+                  'filling', 'persisting_answers', 'saving_answers', 'releasing'
+                )",
+            [preparation_id],
+            |row| row.get::<_, i64>(0),
+        )?;
+        Ok(count > 0)
+    }
+
     pub fn fail_browser_session_start(
         &mut self,
         session_id: &str,
@@ -2200,28 +2214,45 @@ impl Store {
             .map_err(StoreError::from)
     }
 
-    pub fn cancel_queued_preparation_for_role(
+    pub fn cancel_inactive_preparation_for_role(
         &mut self,
         role_id: &str,
     ) -> Result<bool, StoreError> {
         let transaction = self.connection.transaction()?;
-        let preparation_id = transaction
+        let preparation = transaction
             .query_row(
-                "SELECT id FROM preparation_jobs
-                  WHERE role_id = ?1 AND status = 'queued'
-                  ORDER BY created_at DESC LIMIT 1",
+                "SELECT id, status, error_class FROM preparation_jobs
+                  WHERE role_id = ?1
+                  ORDER BY updated_at DESC, id DESC LIMIT 1",
                 [role_id],
-                |row| row.get::<_, String>(0),
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
             )
             .optional()?;
-        let Some(preparation_id) = preparation_id else {
+        let Some((preparation_id, status, error_class)) = preparation else {
             transaction.commit()?;
             return Ok(false);
         };
+        if status == "cancelled" {
+            transaction.commit()?;
+            return Ok(true);
+        }
+        let cancellable = matches!(status.as_str(), "queued" | "preparing")
+            || (status == "action_required" && error_class.as_deref() == Some("app_interrupted"));
+        if !cancellable {
+            transaction.commit()?;
+            return Ok(false);
+        }
         let now = Utc::now().to_rfc3339();
         transaction.execute(
             "UPDATE preparation_jobs SET status = 'cancelled', step = 'cancelled',
-                    error_class = NULL, updated_at = ?1 WHERE id = ?2 AND status = 'queued'",
+                    error_class = NULL, error_stage = NULL, error_detail = NULL,
+                    retry_policy = NULL, updated_at = ?1 WHERE id = ?2",
             params![now, preparation_id],
         )?;
         transaction.execute(
@@ -4664,13 +4695,83 @@ mod tests {
         let role_id = store.dashboard().unwrap().roles[0].id.clone();
         let work = store.begin_preparation(&role_id, "codex").unwrap();
 
-        assert!(store.cancel_queued_preparation_for_role(&role_id).unwrap());
+        assert!(
+            store
+                .cancel_inactive_preparation_for_role(&role_id)
+                .unwrap()
+        );
+        assert!(
+            store
+                .cancel_inactive_preparation_for_role(&role_id)
+                .unwrap()
+        );
 
         let dashboard = store.dashboard().unwrap();
         assert_eq!(dashboard.roles[0].preparation_state, "not_started");
         assert!(dashboard.preparations.is_empty());
         let restarted = store.begin_preparation(&role_id, "claude").unwrap();
         assert_ne!(restarted.id, work.id);
+    }
+
+    #[test]
+    fn interrupted_preparation_can_return_to_queue_without_canonical_effect() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+        store.import_dataset(DATASET).unwrap();
+        let role_id = store.dashboard().unwrap().roles[0].id.clone();
+        store.begin_preparation(&role_id, "codex").unwrap();
+        store.claim_preparation_work().unwrap().unwrap();
+        store.recover_interrupted_preparations().unwrap();
+
+        let interrupted = &store.dashboard().unwrap().preparations[0];
+        assert_eq!(interrupted.status, "action_required");
+        assert_eq!(interrupted.error_class.as_deref(), Some("app_interrupted"));
+        assert!(
+            store
+                .cancel_inactive_preparation_for_role(&role_id)
+                .unwrap()
+        );
+        assert!(
+            store
+                .cancel_inactive_preparation_for_role(&role_id)
+                .unwrap()
+        );
+
+        let dashboard = store.dashboard().unwrap();
+        assert!(dashboard.preparations.is_empty());
+        assert_eq!(dashboard.roles[0].preparation_state, "not_started");
+        let canonical_effects: i64 = store
+            .connection
+            .query_row("SELECT COUNT(*) FROM adapter_effects", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(canonical_effects, 0);
+    }
+
+    #[test]
+    fn ordinary_preparation_failure_cannot_be_cancelled_as_interrupted_work() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+        store.import_dataset(DATASET).unwrap();
+        let role_id = store.dashboard().unwrap().roles[0].id.clone();
+        let work = queue_and_claim(&mut store, &role_id, "codex");
+        store
+            .fail_preparation(
+                &work.id,
+                "artifact_commit_failed",
+                "preparation.result.commit",
+                "The artifact could not be committed.",
+            )
+            .unwrap();
+
+        assert!(
+            !store
+                .cancel_inactive_preparation_for_role(&role_id)
+                .unwrap()
+        );
+        assert_eq!(
+            store.dashboard().unwrap().preparations[0].status,
+            "action_required"
+        );
     }
 
     #[test]
@@ -5581,6 +5682,33 @@ mod tests {
         let refill = store.queue_application_session(&preparation.id).unwrap();
         assert_ne!(refill.id, session.id);
         assert_eq!(refill.status, "waiting_for_extension");
+        assert!(
+            store
+                .has_active_application_session(&preparation.id)
+                .unwrap()
+        );
+        let refill_inspect = store
+            .claim_browser_command(chrono::Utc::now(), chrono::Duration::seconds(30))
+            .unwrap()
+            .unwrap();
+        assert_eq!(refill_inspect.command_type, "inspect_request");
+        let refill_inspection = crate::domain::BrowserInspection {
+            ats: "ashby".to_string(),
+            page_title: "Frontend Engineer".to_string(),
+            page_url: "https://jobs.ashbyhq.com/northstar/frontend/application".to_string(),
+            snapshot_fingerprint: "9".repeat(64),
+            fields: serde_json::json!([{
+                "id": "email", "label": "Email", "control": "input", "inputType": "email",
+                "required": true, "options": [], "classification": "safe_verified", "reason": "verified"
+            }]),
+            safe_field_count: 1,
+            needs_user_count: 0,
+        };
+        let reinspected = store
+            .complete_browser_inspection(&refill_inspect.command_id, &refill_inspection)
+            .unwrap();
+        assert_eq!(reinspected.status, "drafting_answers");
+        assert_eq!(reinspected.snapshot_fingerprint, Some("9".repeat(64)));
         store.mark_submitted_tracking_pending(&session.id).unwrap();
         assert_eq!(
             store.browser_session(&session.id).unwrap().status,
@@ -5589,10 +5717,18 @@ mod tests {
         let (role_id, effect) = store.begin_applied_effect_for_session(&session.id).unwrap();
         assert_eq!(effect.tracker_id, Some(42));
         store
+            .fail_adapter_effect(&effect.idempotency_key, "canonical_write_failed")
+            .unwrap();
+        store.mark_submitted_tracking_pending(&session.id).unwrap();
+        let (retry_role_id, retry_effect) =
+            store.begin_applied_effect_for_session(&session.id).unwrap();
+        assert_eq!(retry_role_id, role_id);
+        assert_eq!(retry_effect.idempotency_key, effect.idempotency_key);
+        store
             .complete_applied_effect(
                 &session.id,
                 &role_id,
-                &effect.idempotency_key,
+                &retry_effect.idempotency_key,
                 42,
                 "Applied",
             )

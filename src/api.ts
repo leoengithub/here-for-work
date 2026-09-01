@@ -16,6 +16,12 @@ import type {
   OutcomeNotification,
   CvFallbackSetting,
 } from "./types";
+import {
+  applicationsPreviewBrowserSetup,
+  applicationsPreviewDashboard,
+  applicationsPreviewSessions,
+  isApplicationsPreview,
+} from "./dev/applications-preview";
 
 const isTauri = (): boolean => "__TAURI_INTERNALS__" in window;
 
@@ -49,6 +55,7 @@ const browserFallback: DashboardState = {
 };
 
 export async function getDashboard(): Promise<DashboardState> {
+  if (isApplicationsPreview()) return applicationsPreviewDashboard;
   if (!isTauri()) return browserFallback;
   return invoke<DashboardState>("get_dashboard");
 }
@@ -140,6 +147,7 @@ export async function quitApp(): Promise<void> {
 }
 
 export async function getBrowserSetup(): Promise<BrowserSetup> {
+  if (isApplicationsPreview()) return applicationsPreviewBrowserSetup;
   if (!isTauri()) {
     return {
       profiles: [],
@@ -157,6 +165,7 @@ export async function getBrowserSetup(): Promise<BrowserSetup> {
 }
 
 export async function getBrowserSessions(): Promise<BrowserSessionSummary[]> {
+  if (isApplicationsPreview()) return applicationsPreviewSessions;
   if (!isTauri()) return [];
   return invoke<BrowserSessionSummary[]>("get_browser_sessions");
 }
@@ -179,6 +188,11 @@ export async function focusReviewForm(sessionId: string): Promise<BrowserSession
 export async function continueInBrowser(preparationId: string): Promise<BrowserSessionSummary> {
   if (!isTauri()) throw new Error("Browser continuation is available in the desktop app.");
   return invoke<BrowserSessionSummary>("continue_in_browser", { preparationId });
+}
+
+export async function reopenApplicationForm(preparationId: string): Promise<BrowserSessionSummary> {
+  if (!isTauri()) throw new Error("Application recovery is available in the desktop app.");
+  return invoke<BrowserSessionSummary>("reopen_application_form", { preparationId });
 }
 
 export async function confirmApplicationApplied(sessionId: string): Promise<BrowserSessionSummary> {

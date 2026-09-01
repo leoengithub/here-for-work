@@ -1,10 +1,200 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
-import { App, BrowserSessions, RoleRow } from "./App";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { App, BrowserSessions, RoleRow, deriveApplicationState } from "./App";
+import type { BrowserSessionSummary, PreparationSummary } from "./types";
+import {
+  applicationsPreviewBrowserSetup,
+  applicationsPreviewDashboard,
+  applicationsPreviewSessions,
+} from "./dev/applications-preview";
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  window.history.replaceState({}, "", "/");
+  delete (window as typeof window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+  vi.restoreAllMocks();
+});
+
+const preparationFixture: PreparationSummary = {
+  id: "preparation-1",
+  roleId: "role-1",
+  company: "Acme",
+  title: "Frontend Engineer",
+  provider: "codex",
+  status: "completed",
+  step: "completed",
+  attempt: 1,
+  reportPath: "reports/1.md",
+  cvPdfPath: "output/1/cv.pdf",
+  cvSource: "tailored_generated",
+  errorClass: null,
+  errorStage: null,
+  errorDetail: null,
+  retryPolicy: null,
+  updatedAt: "2026-09-01T12:00:00Z",
+};
+
+const browserSessionFixture: BrowserSessionSummary = {
+  id: "session-1",
+  purpose: "application",
+  roleId: "role-1",
+  preparationId: "preparation-1",
+  status: "review_required",
+  ats: "ashby",
+  pageTitle: "Frontend Engineer",
+  pageUrl: "https://example.test/application",
+  snapshotFingerprint: "a".repeat(64),
+  fieldCount: 3,
+  safeFieldCount: 2,
+  needsUserCount: 1,
+  errorCode: null,
+  reviewItems: null,
+  fillResults: null,
+  updatedAt: "2026-09-01T12:00:00Z",
+};
 
 describe("App", () => {
+  it("derives terminal and attention states before stale preparation steps", () => {
+    expect(deriveApplicationState({
+      ...preparationFixture,
+      status: "action_required",
+      step: "preparing_cv",
+      errorClass: "artifact_commit_failed",
+    }, undefined, false)).toMatchObject({
+      label: "Preparation failed",
+      tone: "attention",
+    });
+    expect(deriveApplicationState(preparationFixture, browserSessionFixture, false)).toMatchObject({
+      label: "Ready for review",
+      tone: "success",
+    });
+    expect(deriveApplicationState(preparationFixture, {
+      ...browserSessionFixture,
+      status: "applied_recorded",
+    }, false)).toMatchObject({
+      label: "Application recorded",
+      tone: "success",
+    });
+    expect(deriveApplicationState({
+      ...preparationFixture,
+      status: "action_required",
+      step: "preparing_cv",
+      errorClass: "app_interrupted",
+    }, {
+      ...browserSessionFixture,
+      status: "applied_recorded",
+    }, false)).toMatchObject({
+      label: "Application recorded",
+      tone: "success",
+    });
+  });
+
+  it("uses explicit waiting, progress, and tracking recovery states", () => {
+    expect(deriveApplicationState({ ...preparationFixture, status: "queued", step: "queued" }, undefined, false).label)
+      .toBe("Waiting");
+    expect(deriveApplicationState({ ...preparationFixture, status: "preparing", step: "preparing_cv" }, undefined, false))
+      .toMatchObject({ label: "Preparing CV", active: true });
+    expect(deriveApplicationState(preparationFixture, {
+      ...browserSessionFixture,
+      status: "waiting_for_extension",
+    }, false)).toMatchObject({ label: "Opening form", active: true });
+    expect(deriveApplicationState(preparationFixture, {
+      ...browserSessionFixture,
+      status: "filling",
+    }, false)).toMatchObject({ label: "Filling form", active: true });
+    expect(deriveApplicationState(preparationFixture, browserSessionFixture, true))
+      .toMatchObject({ label: "Recording application…", active: true });
+    expect(deriveApplicationState(preparationFixture, {
+      ...browserSessionFixture,
+      status: "submitted_tracking_pending",
+      errorCode: "canonical_write_failed",
+    }, false)).toMatchObject({ label: "Tracking update failed", tone: "attention" });
+  });
+
+  it("renders truthful fixture states and direct recovery actions", async () => {
+    window.history.replaceState({}, "", "/?application-preview=states");
+    const { container } = render(<App />);
+    await screen.findByRole("heading", { name: "Review queue" });
+    fireEvent.click(screen.getByRole("tab", { name: "applications" }));
+
+    expect(await screen.findByText("Preparation failed")).toBeInTheDocument();
+    expect(screen.getByText("Waiting")).toBeInTheDocument();
+    expect(screen.getByText("Preparing CV")).toBeInTheDocument();
+    expect(screen.getByText("Ready for review")).toBeInTheDocument();
+    expect(screen.getByText("Recording application…")).toBeInTheDocument();
+    expect(screen.getByText("Application recorded")).toBeInTheDocument();
+    expect(screen.getByText("Tracking update failed")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Retry preparation" })).toBeEnabled();
+    expect(screen.getAllByRole("button", { name: "Reopen and refill" })).toHaveLength(2);
+    expect(screen.getAllByRole("button", { name: "Reopen and refill" })[0]).toBeEnabled();
+    expect(screen.getAllByRole("button", { name: "Cancel and return to Queue" })).toHaveLength(2);
+    expect(container.querySelector('[data-preparation-id="failed"]')).not.toHaveTextContent("preparing cv");
+    expect(container.querySelector('[data-preparation-id="recording"]')).not.toHaveTextContent("Undo preparation");
+    expect(container.querySelector('[data-preparation-id="tracking"]')).not.toHaveTextContent("Undo preparation");
+  });
+
+  it("records an already-submitted application with one click and no browser confirmation gate", async () => {
+    let applied = false;
+    const invoke = vi.fn(async (command: string) => {
+      if (command === "get_dashboard") return applicationsPreviewDashboard;
+      if (command === "get_cv_fallback_setting") return { path: null, sha256: null };
+      if (command === "take_in_app_outcome_notifications") return [];
+      if (command === "get_browser_setup") return applicationsPreviewBrowserSetup;
+      if (command === "get_browser_sessions") {
+        return applicationsPreviewSessions
+          .filter((session) => session.id === "session-review")
+          .map((session) => applied ? { ...session, status: "applied_recorded" } : session);
+      }
+      if (command === "confirm_application_applied") {
+        applied = true;
+        return { ...applicationsPreviewSessions[0], status: "applied_recorded" };
+      }
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    (window as typeof window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = { invoke };
+    const confirm = vi.spyOn(window, "confirm");
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "Review queue" });
+    fireEvent.click(screen.getByRole("tab", { name: "applications" }));
+    fireEvent.click(await screen.findByRole("button", { name: "I submitted this application" }));
+
+    expect(await screen.findByText("Application recorded")).toBeInTheDocument();
+    expect(confirm).not.toHaveBeenCalled();
+    expect(invoke).toHaveBeenCalledWith(
+      "confirm_application_applied",
+      { sessionId: "session-review", userConfirmed: true },
+      undefined,
+    );
+  });
+
+  it("starts an explicit refill attempt from a ready application", async () => {
+    const invoke = vi.fn(async (command: string) => {
+      if (command === "get_dashboard") return applicationsPreviewDashboard;
+      if (command === "get_cv_fallback_setting") return { path: null, sha256: null };
+      if (command === "take_in_app_outcome_notifications") return [];
+      if (command === "get_browser_setup") return applicationsPreviewBrowserSetup;
+      if (command === "get_browser_sessions") {
+        return applicationsPreviewSessions.filter((session) => session.id === "session-review");
+      }
+      if (command === "reopen_application_form") {
+        return { ...browserSessionFixture, id: "session-refill", status: "waiting_for_extension" };
+      }
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    (window as typeof window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = { invoke };
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "Review queue" });
+    fireEvent.click(screen.getByRole("tab", { name: "applications" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Reopen and refill" }));
+
+    expect(invoke).toHaveBeenCalledWith(
+      "reopen_application_form",
+      { preparationId: "review" },
+      undefined,
+    );
+  });
   it("shows the operational empty state in browser preview", async () => {
     render(<App />);
     expect(await screen.findByRole("heading", { name: "Review queue" })).toBeInTheDocument();

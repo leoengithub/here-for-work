@@ -1,9 +1,16 @@
 import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { FileUploadIcon, Settings01Icon } from "@hugeicons/core-free-icons";
+import {
+  Alert02Icon,
+  CheckmarkCircle02Icon,
+  Clock01Icon,
+  FileUploadIcon,
+  Settings01Icon,
+} from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Spinner } from "@/components/ui/spinner";
 import { Alert, AlertAction, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
@@ -54,6 +61,7 @@ import {
   requestNotificationPermission,
   runProviderProbe,
   retryBrowserSession,
+  reopenApplicationForm,
   continueInBrowser,
   confirmApplicationApplied,
   getPreparationDetail,
@@ -82,10 +90,12 @@ import type {
   RoleSummary,
   BrowserSessionSummary,
   PreparationDetail,
+  PreparationSummary,
   QueueFilters,
   CvFallbackSetting,
 } from "./types";
 import { formatPublicationAge } from "./lib/publication-age";
+import { isApplicationsPreview } from "./dev/applications-preview";
 
 const groupOrder: QueueGroup[] = ["strong_match", "other_new", "needs_decision"];
 const dismissalToast = createToastManager();
@@ -229,6 +239,122 @@ const browserStatusLabel: Record<BrowserSessionSummary["status"], string> = {
   applied_recorded: "Applied recorded",
   action_required: "Needs your attention",
 };
+
+type ApplicationState = {
+  label: string;
+  tone: "neutral" | "active" | "attention" | "success";
+  active: boolean;
+  explanation: string | null;
+};
+
+const activeBrowserStatuses = new Set<BrowserSessionSummary["status"]>([
+  "waiting_for_extension",
+  "inspecting",
+  "drafting_answers",
+  "answering",
+  "filling",
+  "persisting_answers",
+  "saving_answers",
+  "releasing",
+]);
+
+function browserFailureExplanation(errorCode: string | null): string {
+  if (errorCode === "answer_persistence_failed" || errorCode === "answer_persistence_interrupted") {
+    return "The filled answers could not be saved. Retry resumes local saving without touching the form.";
+  }
+  if (errorCode === "application_tab_recovery_failed") {
+    return "The application tab could not be restored. Retry opens the application again.";
+  }
+  return "HereForWork could not finish the browser step. Check the selected Chrome profile, then retry.";
+}
+
+function preparationFailureExplanation(item: PreparationSummary): string {
+  if (item.errorClass === "app_interrupted") {
+    return "HereForWork closed while this was running. Retry it, or cancel it and return the role to Queue.";
+  }
+  if (item.errorClass === "artifact_commit_failed" || item.errorStage?.includes("commit")) {
+    return "The prepared files could not be saved. Retry uses the same preparation.";
+  }
+  return "Preparation stopped before the application was ready. Retry uses the saved preparation.";
+}
+
+export function deriveApplicationState(
+  item: PreparationSummary,
+  latestSession: BrowserSessionSummary | undefined,
+  recordingApplication: boolean,
+): ApplicationState {
+  if (recordingApplication) {
+    return { label: "Recording application…", tone: "active", active: true, explanation: null };
+  }
+  if (latestSession?.status === "applied_recorded") {
+    return { label: "Application recorded", tone: "success", active: false, explanation: null };
+  }
+  if (latestSession?.status === "submitted_tracking_pending") {
+    return {
+      label: "Tracking update failed",
+      tone: "attention",
+      active: false,
+      explanation: "The form is not touched again. Retry only the career-ops tracking update.",
+    };
+  }
+  if (item.status === "queued") {
+    return { label: "Waiting", tone: "neutral", active: false, explanation: null };
+  }
+  if (item.status === "preparing") {
+    return { label: "Preparing CV", tone: "active", active: true, explanation: null };
+  }
+  if (!latestSession) {
+    if (item.status === "action_required") {
+      return {
+        label: "Preparation failed",
+        tone: "attention",
+        active: false,
+        explanation: preparationFailureExplanation(item),
+      };
+    }
+    return { label: "Waiting", tone: "neutral", active: false, explanation: null };
+  }
+  if (latestSession.status === "action_required") {
+    return {
+      label: "Preparation failed",
+      tone: "attention",
+      active: false,
+      explanation: browserFailureExplanation(latestSession.errorCode),
+    };
+  }
+  if (latestSession.status === "review_required") {
+    return { label: "Ready for review", tone: "success", active: false, explanation: null };
+  }
+  if (latestSession.status === "waiting_for_extension" || latestSession.status === "inspecting") {
+    return { label: "Opening form", tone: "active", active: true, explanation: null };
+  }
+  if (activeBrowserStatuses.has(latestSession.status)) {
+    return { label: "Filling form", tone: "active", active: true, explanation: null };
+  }
+  return { label: browserStatusLabel[latestSession.status], tone: "neutral", active: false, explanation: null };
+}
+
+function ApplicationStatus({ state }: { state: ApplicationState }) {
+  const icon = state.active ? (
+    <Spinner className="motion-reduce:animate-none" />
+  ) : state.tone === "attention" ? (
+    <HugeiconsIcon icon={Alert02Icon} strokeWidth={2} aria-hidden="true" />
+  ) : state.tone === "success" ? (
+    <HugeiconsIcon icon={CheckmarkCircle02Icon} strokeWidth={2} aria-hidden="true" />
+  ) : (
+    <HugeiconsIcon icon={Clock01Icon} strokeWidth={2} aria-hidden="true" />
+  );
+  return (
+    <Badge
+      className="application-state"
+      data-tone={state.tone}
+      variant={state.tone === "attention" ? "destructive" : "outline"}
+    >
+      {icon}
+      {state.label}
+    </Badge>
+  );
+}
 
 export function BrowserSessions({
   sessions,
@@ -841,6 +967,10 @@ export function App() {
   const [undoPreparationId, setUndoPreparationId] = useState<string | null>(null);
   const [enqueuingRoleIds, setEnqueuingRoleIds] = useState<Set<string>>(() => new Set());
   const [cancellationRequestedRoleIds, setCancellationRequestedRoleIds] = useState<Set<string>>(() => new Set());
+  const [reopeningPreparationIds, setReopeningPreparationIds] = useState<Set<string>>(() => new Set());
+  const [recordingSessionIds, setRecordingSessionIds] = useState<Set<string>>(() => (
+    isApplicationsPreview() ? new Set(["session-recording"]) : new Set()
+  ));
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -1171,13 +1301,32 @@ export function App() {
     }
   };
 
-  const confirmApplied = async (sessionId: string) => {
-    const session = browserSessions.find((item) => item.id === sessionId);
-    if (session?.status !== "submitted_tracking_pending") {
-      const confirmed = window.confirm("Confirm that you physically clicked Submit and the application was accepted by the site. HereForWork will record Applied in canonical career-ops history.");
-      if (!confirmed) return;
+  const reopenPreparedRole = async (preparationId: string) => {
+    if (reopeningPreparationIds.has(preparationId)) return;
+    setReopeningPreparationIds((current) => new Set(current).add(preparationId));
+    setError(null);
+    try {
+      await reopenApplicationForm(preparationId);
+      setBrowserSessions(await getBrowserSessions());
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+      try {
+        setBrowserSessions(await getBrowserSessions());
+      } catch {
+        // Preserve the recovery error when refreshing browser state also fails.
+      }
+    } finally {
+      setReopeningPreparationIds((current) => {
+        const next = new Set(current);
+        next.delete(preparationId);
+        return next;
+      });
     }
-    setBusy(true);
+  };
+
+  const confirmApplied = async (sessionId: string) => {
+    if (recordingSessionIds.has(sessionId)) return;
+    setRecordingSessionIds((current) => new Set(current).add(sessionId));
     setError(null);
     try {
       await confirmApplicationApplied(sessionId);
@@ -1186,8 +1335,19 @@ export function App() {
       setBrowserSessions(nextSessions);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
+      try {
+        const [nextDashboard, nextSessions] = await Promise.all([getDashboard(), getBrowserSessions()]);
+        setDashboard(nextDashboard);
+        setBrowserSessions(nextSessions);
+      } catch {
+        // Preserve the canonical tracking error if the follow-up refresh also fails.
+      }
     } finally {
-      setBusy(false);
+      setRecordingSessionIds((current) => {
+        const next = new Set(current);
+        next.delete(sessionId);
+        return next;
+      });
     }
   };
 
@@ -1421,14 +1581,22 @@ export function App() {
               const latestSession = browserSessions
                 .filter((session) => session.purpose === "application" && session.preparationId === item.id)
                 .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0];
-              const status = latestSession ? browserStatusLabel[latestSession.status] : item.step.replaceAll("_", " ");
-              const browserActive = latestSession && !["review_required", "action_required", "submitted_tracking_pending", "applied_recorded"].includes(latestSession.status);
+              const recordingApplication = Boolean(latestSession && recordingSessionIds.has(latestSession.id));
+              const applicationState = deriveApplicationState(item, latestSession, recordingApplication);
+              const browserActive = Boolean(latestSession && activeBrowserStatuses.has(latestSession.status));
+              const canRetryPreparation = item.status === "action_required"
+                && item.step !== "undo_cleanup"
+                && ["retry_same_preparation", "repair_runtime_then_retry"].includes(item.retryPolicy ?? "retry_same_preparation");
+              const canCancelPreparation = item.status === "queued"
+                || item.status === "preparing"
+                || (item.status === "action_required" && item.errorClass === "app_interrupted");
               return (
               <li
                 key={item.id}
                 id={`preparation-${item.id}`}
                 data-preparation-id={item.id}
                 data-selected={selectedPreparationId === item.id || undefined}
+                aria-busy={applicationState.active || undefined}
                 tabIndex={-1}
               >
                 <div className="preparation-list__identity">
@@ -1438,8 +1606,11 @@ export function App() {
                     {item.cvSource === "user_reviewed_fallback" ? " · User-reviewed CV" : ""}
                   </span>
                 </div>
-                <Badge variant="outline">{status}</Badge>
-                {item.status === "queued" || item.status === "preparing" ? (
+                <ApplicationStatus state={applicationState} />
+                {applicationState.explanation ? (
+                  <p className="preparation-list__explanation">{applicationState.explanation}</p>
+                ) : null}
+                {canCancelPreparation ? (
                   <div className="preparation-list__actions">
                     <Button
                       variant="outline"
@@ -1447,7 +1618,7 @@ export function App() {
                       onClick={() => void cancelQueuePreparation(item.roleId)}
                       disabled={cancellationRequestedRoleIds.has(item.roleId)}
                     >
-                      {cancellationRequestedRoleIds.has(item.roleId) ? "Cancelling…" : "Cancel preparation"}
+                      {cancellationRequestedRoleIds.has(item.roleId) ? "Cancelling…" : "Cancel and return to Queue"}
                     </Button>
                   </div>
                 ) : null}
@@ -1456,6 +1627,15 @@ export function App() {
                     <Button variant="outline" type="button" onClick={() => void showPreparationDetail(item.id)} disabled={busy}>
                       Details
                     </Button>
+                    {canRetryPreparation ? (
+                      <Button
+                        type="button"
+                        onClick={() => void prepareQueueRole(item.roleId, item.provider)}
+                        disabled={enqueuingRoleIds.has(item.roleId)}
+                      >
+                        {enqueuingRoleIds.has(item.roleId) ? "Queueing…" : "Retry preparation"}
+                      </Button>
+                    ) : null}
                   </div>
                 ) : null}
                 {item.status === "completed" ? (
@@ -1477,33 +1657,40 @@ export function App() {
                     </Button>
                     ) : null}
                     {latestSession?.status === "action_required" ? (
-                      <Button  type="button" onClick={() => void retryBrowser(latestSession.id)} disabled={busy}>
-                        Retry browser
+                      <Button type="button" onClick={() => void retryBrowser(latestSession.id)} disabled={busy}>
+                        Retry browser step
                       </Button>
                     ) : null}
                     {latestSession?.status === "review_required" ? (
-                      <Button  type="button" onClick={() => void confirmApplied(latestSession.id)} disabled={busy}>
-                        I submitted this application
-                      </Button>
+                      <>
+                        <Button
+                          variant="outline"
+                          type="button"
+                          onClick={() => void reopenPreparedRole(item.id)}
+                          disabled={busy || reopeningPreparationIds.has(item.id) || recordingApplication}
+                        >
+                          {reopeningPreparationIds.has(item.id) ? "Reopening…" : "Reopen and refill"}
+                        </Button>
+                        <Button
+                          type="button"
+                          onClick={() => void confirmApplied(latestSession.id)}
+                          disabled={busy || recordingApplication}
+                        >
+                          {recordingApplication ? "Recording…" : "I submitted this application"}
+                        </Button>
+                      </>
                     ) : null}
                     {latestSession?.status === "submitted_tracking_pending" ? (
-                      <Button  type="button" onClick={() => void confirmApplied(latestSession.id)} disabled={busy}>
-                        Retry tracking update
+                      <Button type="button" onClick={() => void confirmApplied(latestSession.id)} disabled={busy || recordingApplication}>
+                        {recordingApplication ? "Recording…" : "Retry tracking update"}
                       </Button>
                     ) : null}
-                    {latestSession?.status !== "applied_recorded" ? (
+                    {!recordingApplication && !["submitted_tracking_pending", "applied_recorded"].includes(latestSession?.status ?? "") ? (
                       <Button variant="destructive" type="button" onClick={() => setUndoPreparationId(item.id)} disabled={busy || Boolean(browserActive)}>
                         Undo preparation
                       </Button>
                     ) : null}
                   </div>
-                ) : null}
-                {item.errorDetail ? (
-                  <p className="browser-session-list__error">
-                    {item.errorStage?.replaceAll("_", " ").replaceAll(".", " ")}: {item.errorDetail}
-                  </p>
-                ) : item.errorClass ? (
-                  <p className="browser-session-list__error">{item.errorClass.replaceAll("_", " ")}</p>
                 ) : null}
                 {undoPreparationId === item.id ? (
                   <div className="preparation-list__confirmation" role="alert">

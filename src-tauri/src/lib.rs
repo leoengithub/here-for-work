@@ -822,7 +822,7 @@ fn start_browser_handoff_worker(app: tauri::AppHandle) -> Result<(), String> {
                     continue;
                 };
                 let state = app.state::<AppState>();
-                let _ = start_application_browser_session(&preparation_id, &state);
+                let _ = start_application_browser_session(&preparation_id, false, &state);
             }
         })
         .map(|_| ())
@@ -845,7 +845,7 @@ fn cancel_preparation(role_id: String, state: tauri::State<'_, AppState>) -> Res
         .store
         .lock()
         .map_err(|_| "Operational store lock was poisoned".to_string())?
-        .cancel_queued_preparation_for_role(&role_id)
+        .cancel_inactive_preparation_for_role(&role_id)
         .map_err(|error| error.to_string())
 }
 
@@ -1097,14 +1097,23 @@ fn continue_in_browser(
     preparation_id: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<BrowserSessionSummary, String> {
-    start_application_browser_session(&preparation_id, &state)
+    start_application_browser_session(&preparation_id, false, &state)
+}
+
+#[tauri::command]
+fn reopen_application_form(
+    preparation_id: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<BrowserSessionSummary, String> {
+    start_application_browser_session(&preparation_id, true, &state)
 }
 
 fn start_application_browser_session(
     preparation_id: &str,
+    reopen_for_refill: bool,
     state: &AppState,
 ) -> Result<BrowserSessionSummary, String> {
-    let (profile_id, session, reuse_existing_page) = {
+    let (profile_id, session, should_launch) = {
         let mut store = state
             .store
             .lock()
@@ -1116,15 +1125,33 @@ fn start_application_browser_session(
         let reuse_existing_page = store
             .has_review_required_application_session(preparation_id)
             .map_err(|error| error.to_string())?;
+        if reopen_for_refill && !reuse_existing_page {
+            return Err(
+                "Only an application ready for review can be reopened and refilled.".to_string(),
+            );
+        }
+        let active_session = store
+            .has_active_application_session(preparation_id)
+            .map_err(|error| error.to_string())?;
         let session = store
             .queue_application_session(preparation_id)
             .map_err(|error| error.to_string())?;
-        (profile_id, session, reuse_existing_page)
+        let should_launch =
+            should_launch_application_page(reopen_for_refill, reuse_existing_page, active_session);
+        (profile_id, session, should_launch)
     };
-    if !reuse_existing_page {
+    if should_launch {
         launch_application_page(&profile_id, &session, state)?;
     }
     Ok(session)
+}
+
+fn should_launch_application_page(
+    reopen_for_refill: bool,
+    has_review_required_attempt: bool,
+    has_active_attempt: bool,
+) -> bool {
+    !has_active_attempt && (reopen_for_refill || !has_review_required_attempt)
 }
 
 fn launch_application_page(
@@ -2002,6 +2029,7 @@ pub fn run() {
             retry_browser_session,
             focus_review_form,
             continue_in_browser,
+            reopen_application_form,
             confirm_application_applied,
             quit_app,
             create_operational_backup,
@@ -2084,6 +2112,14 @@ mod tests {
                 || argument.contains("remote-debugging")
                 || argument.contains("webdriver")
         }));
+    }
+
+    #[test]
+    fn explicit_refill_reopens_a_closed_review_form_but_dedupes_an_active_attempt() {
+        assert!(super::should_launch_application_page(true, true, false));
+        assert!(!super::should_launch_application_page(true, true, true));
+        assert!(!super::should_launch_application_page(false, true, false));
+        assert!(super::should_launch_application_page(false, false, false));
     }
 
     #[test]

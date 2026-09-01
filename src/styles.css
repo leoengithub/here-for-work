@@ -934,7 +934,27 @@ a.role-card__title:hover {
 
 .preparation-list__identity {
   display: grid;
+  min-width: 0;
   gap: 0.2rem;
+}
+
+.preparation-list__identity strong {
+  overflow-wrap: anywhere;
+}
+
+.application-state {
+  justify-self: end;
+}
+
+.application-state[data-tone="active"] {
+  color: var(--text);
+  background: var(--surface-muted);
+}
+
+.application-state[data-tone="success"] {
+  color: var(--success);
+  border-color: color-mix(in oklch, var(--success) 28%, var(--line));
+  background: color-mix(in oklch, var(--success) 7%, var(--surface));
 }
 
 .preparation-list strong {
@@ -952,6 +972,13 @@ a.role-card__title:hover {
   display: flex;
   flex-wrap: wrap;
   gap: 0.5rem;
+}
+
+.preparation-list__explanation {
+  grid-column: 1 / -1;
+  max-width: 65ch;
+  margin: 0;
+  line-height: 1.5;
 }
 
 .preparation-list__confirmation {
@@ -1346,6 +1373,11 @@ a.role-card__title:hover {
     right: 0.75rem;
     left: 0.75rem;
     width: calc(100vw - 1.5rem);
+  }
+
+  .preparation-list__identity,
+  .application-state {
+    grid-column: 1 / -1;
   }
 }
 
