@@ -21,7 +21,8 @@ The implemented read-only operations are:
 - `capabilities.get`: protocol version, operation allowlist, source ownership,
   and explicitly forbidden operations.
 - `health.check`: verifies the configured career-ops root, tracker, canonical
-  application history, pinned PDF browser, and writable adapter staging path.
+  application history, writable adapter staging path, and either the pinned PDF
+  browser or a valid hash-bound user-reviewed PDF fallback.
 - `history.snapshot`: asks career-ops' tracker to return structured canonical
   application records from its rebuildable SQLite index.
 - `profile.queue_filters.get`: derives editable queue-filter defaults from the
@@ -45,9 +46,8 @@ operation, exporter, scheduler authority, or automatic ingestion path.
 
 ## Writable personal-proof operations
 
-Writable operations require a matching, explicitly approved entry point in the
-career-ops repository. They are not emulated by editing its Markdown files from
-HereForWork.
+Writable operations use only fixed, existing career-ops CLIs. HereForWork does not add
+an entry point to career-ops and does not edit `applications.md` directly.
 
 The extension keeps provider execution separate from canonical writes:
 
@@ -65,9 +65,14 @@ The extension keeps provider execution separate from canonical writes:
    live legal fields remain user-owned. A confirmed authorization conflict or newly
    detected `Suspicious` result is discarded, while a below-threshold verified match
    returns to Needs decision.
-4. `preparation.result.commit` rejects a stale context or invalid result, runs
-   career-ops fact and artifact checks, and atomically publishes the report and
-   tailored CV references. It does not update application status.
+4. `preparation.result.commit` is the adapter transaction boundary. It rejects a stale
+   context or invalid result, stages the HTML and fact checks privately, renders the PDF
+   against a staged `CAREER_OPS_PDF_INDEX`, and validates HTML, facts, PDF structure,
+   index rows, paths, and hashes before publication. It publishes exclusively and uses
+   compare-and-swap checks while updating the report, artifact bundle, and canonical PDF
+   index. The canonical tracker merge is the commit point and is post-verified by the
+   exact HereForWork effect UUID, source URL, and report link. It does not update
+   application status.
 5. `answers.context.get` binds a prepared application to the exact hash of a
    live, typed form snapshot. Job and form text remains marked as untrusted data.
 6. HereForWork invokes the selected provider against that bounded context.
@@ -99,6 +104,30 @@ rechecks the root boundary, size, and hash and materializes bytes only in the tr
 message to the approved extension; HereForWork does not store those PDF bytes. The
 extension preserves any file already selected by the user and skips ambiguous controls,
 non-PDF controls, unsupported attachment types, or unverifiable inputs.
+
+### Compensating preparation transaction
+
+Preparation publication is durable and idempotent across process restarts. The adapter
+stores a private identity-bound journal, revalidates source/context hashes immediately
+before publication, rejects an effect UUID replay whose URL or report link differs, and
+rolls back only files that still match the hashes it wrote. If the report, candidate
+bundle, PDF index, or tracker changes concurrently—or a completed tracker merge cannot
+be proven exactly—the state becomes `manual_repair_required` rather than overwriting or
+claiming success.
+
+This is compensating atomicity, not a global filesystem/database transaction. Writers
+outside HereForWork do not participate in its lock or journal. Compare-and-swap checks
+detect observed drift and refuse unsafe rollback, but cannot make unrelated external
+writers transactional.
+
+The optional local `CvFallbackSetting` stores an absolute PDF path and the SHA-256
+computed when the user saves it in System. The path is not compiled into the app or
+returned in dashboard data. It is eligible only after request, context, HTML, and fact
+checks passed and PDF generation/rendering then failed. The adapter re-resolves the real
+path and verifies PDF structure and the exact saved hash. Missing, changed, or invalid
+fallback files fail explicitly. A successful recovery preserves the render diagnosis as
+a warning, records `cvSource=user_reviewed_fallback`, and states that the CV is reviewed
+by the user and was not tailored for that role.
 
 Canonical decision operations are:
 

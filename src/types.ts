@@ -75,6 +75,7 @@ export interface PreparationSummary {
   attempt: number;
   reportPath: string | null;
   cvPdfPath: string | null;
+  cvSource: "tailored_generated" | "user_reviewed_fallback" | null;
   errorClass: string | null;
   errorStage: string | null;
   errorDetail: string | null;
@@ -96,6 +97,12 @@ export interface PreparationDetail {
   reportMarkdown: string | null;
   reportPath: string | null;
   cvPdfPath: string | null;
+  cvSource: "tailored_generated" | "user_reviewed_fallback" | null;
+}
+
+export interface CvFallbackSetting {
+  path: string | null;
+  sha256: string | null;
 }
 
 export interface OutcomeNotification {

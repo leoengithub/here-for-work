@@ -16,7 +16,7 @@
     "generate:contracts": "node scripts/generate-contract-types.mjs",
     "check:contracts": "node scripts/generate-contract-types.mjs && git diff --exit-code -- src/generated",
     "test": "vitest --config vite.config.ts run",
-    "test:adapter": "node --test packages/career-ops-adapter/adapter.test.mjs",
+    "test:adapter": "node --test packages/career-ops-adapter/adapter.test.mjs packages/career-ops-adapter/preparation-transaction.test.mjs",
     "test:discovery-contract": "node --test contracts/discovery-run-contract.test.mjs",
     "build:extension": "node packages/extension/build.mjs",
     "test:watch": "vitest --config vite.config.ts",

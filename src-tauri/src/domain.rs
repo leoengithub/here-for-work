@@ -152,6 +152,7 @@ pub struct PreparationSummary {
     pub attempt: i64,
     pub report_path: Option<String>,
     pub cv_pdf_path: Option<String>,
+    pub cv_source: Option<String>,
     pub error_class: Option<String>,
     pub error_stage: Option<String>,
     pub error_detail: Option<String>,
@@ -175,6 +176,14 @@ pub struct PreparationDetail {
     pub report_markdown: Option<String>,
     pub report_path: Option<String>,
     pub cv_pdf_path: Option<String>,
+    pub cv_source: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CvFallbackSetting {
+    pub path: Option<String>,
+    pub sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

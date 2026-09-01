@@ -11,12 +11,13 @@ use std::sync::{Arc, Mutex};
 
 use adapter::{AdapterConfig, CanonicalRoleInput, PreparationRoleInput, discover_executable};
 use domain::{
-    BrowserSessionSummary, BrowserSetup, CheckResult, ChromeProfile, DashboardState, ImportResult,
-    IntegrationHealth, MaintenanceResult, OutcomeNotification, PreparationDetail, PreparationWork,
-    PrepareRoleOutcome, QueueFilters, ReconcileResult, RestorePreflight, ScheduledRun,
+    BrowserSessionSummary, BrowserSetup, CheckResult, ChromeProfile, CvFallbackSetting,
+    DashboardState, ImportResult, IntegrationHealth, MaintenanceResult, OutcomeNotification,
+    PreparationDetail, PreparationWork, PrepareRoleOutcome, QueueFilters, ReconcileResult,
+    RestorePreflight, ScheduledRun,
 };
 use sha2::Digest;
-use store::Store;
+use store::{PreparationCompletion, Store};
 use tauri::Manager;
 use tauri_plugin_autostart::ManagerExt;
 use tauri_plugin_notification::NotificationExt;
@@ -126,6 +127,64 @@ fn save_queue_filters(
         .set_queue_filters(&filters)
         .map_err(|error| error.to_string())?;
     store.dashboard().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn get_cv_fallback_setting(state: tauri::State<'_, AppState>) -> Result<CvFallbackSetting, String> {
+    state
+        .store
+        .lock()
+        .map_err(|_| "Operational store lock was poisoned".to_string())?
+        .cv_fallback_setting()
+        .map_err(|error| error.to_string())
+}
+
+fn validate_reviewed_cv_fallback(path: &str) -> Result<CvFallbackSetting, String> {
+    let input = PathBuf::from(path.trim());
+    if path.trim().is_empty() {
+        return Ok(CvFallbackSetting::default());
+    }
+    if path.len() > 4096 || !input.is_absolute() {
+        return Err("Reviewed CV fallback must be an absolute path.".to_string());
+    }
+    let canonical = std::fs::canonicalize(&input)
+        .map_err(|_| "Reviewed CV fallback could not be read.".to_string())?;
+    let metadata = std::fs::metadata(&canonical)
+        .map_err(|_| "Reviewed CV fallback could not be read.".to_string())?;
+    if !metadata.is_file() || metadata.len() < 64 || metadata.len() > 15 * 1024 * 1024 {
+        return Err("Reviewed CV fallback must be a non-empty PDF smaller than 15 MB.".to_string());
+    }
+    let bytes = std::fs::read(&canonical)
+        .map_err(|_| "Reviewed CV fallback could not be read.".to_string())?;
+    let ending = &bytes[bytes.len().saturating_sub(4096)..];
+    let page_marker = b"/Type /Page";
+    if !bytes.starts_with(b"%PDF-")
+        || !ending.windows(5).any(|window| window == b"%%EOF")
+        || !bytes
+            .windows(page_marker.len())
+            .any(|window| window == page_marker)
+    {
+        return Err("Reviewed CV fallback is not a structurally valid PDF.".to_string());
+    }
+    Ok(CvFallbackSetting {
+        path: Some(canonical.to_string_lossy().into_owned()),
+        sha256: Some(format!("{:x}", sha2::Sha256::digest(&bytes))),
+    })
+}
+
+#[tauri::command]
+fn set_cv_fallback_setting(
+    path: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<CvFallbackSetting, String> {
+    let setting = validate_reviewed_cv_fallback(&path)?;
+    state
+        .store
+        .lock()
+        .map_err(|_| "Operational store lock was poisoned".to_string())?
+        .set_cv_fallback_setting(&setting)
+        .map_err(|error| error.to_string())?;
+    Ok(setting)
 }
 
 #[tauri::command]
@@ -570,15 +629,34 @@ fn process_preparation_work(app: &tauri::AppHandle, work: PreparationWork) -> Re
             return Ok(());
         }
     }
+    let fallback_configuration = {
+        let store = state
+            .store
+            .lock()
+            .map_err(|_| "Operational store lock was poisoned".to_string())?;
+        let setting = store
+            .cv_fallback_setting()
+            .map_err(|error| error.to_string())?;
+        match (&setting.path, &setting.sha256) {
+            (Some(_), Some(_)) => Some(
+                serde_json::to_value(setting)
+                    .map_err(|error| format!("Fallback configuration is invalid: {error}"))?,
+            ),
+            _ => None,
+        }
+    };
     let committed = {
         let _canonical_write = state
             .canonical_write_lock
             .lock()
             .map_err(|_| "Canonical writer lock was poisoned".to_string())?;
-        match state
-            .adapter
-            .commit_preparation(&input, &madrid_today(), context.job, result)
-        {
+        match state.adapter.commit_preparation(
+            &input,
+            &madrid_today(),
+            context.job,
+            result,
+            fallback_configuration.as_ref(),
+        ) {
             Ok(committed) => committed,
             Err(error) => {
                 if let Ok(mut store) = state.store.lock() {
@@ -629,6 +707,42 @@ fn process_preparation_work(app: &tauri::AppHandle, work: PreparationWork) -> Re
             return Err("career-ops returned an invalid artifact reference".to_string());
         }
     }
+    let valid_provenance = match committed.cv_provenance.source.as_str() {
+        "tailored_generated" => {
+            committed.cv_provenance.tailored
+                && committed.cv_provenance.source_sha256.is_none()
+                && committed.cv_provenance.render_recovery.is_none()
+        }
+        "user_reviewed_fallback" => {
+            !committed.cv_provenance.tailored
+                && committed
+                    .cv_provenance
+                    .source_sha256
+                    .as_deref()
+                    .is_some_and(|hash| {
+                        hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+                    })
+                && committed.cv_provenance.render_recovery.is_some()
+                && committed.warnings.iter().any(|warning| {
+                    warning.code == "pdf_generation_failed"
+                        && warning.stage == "stage.pdf"
+                        && warning.recovered_by == "user_reviewed_fallback"
+                        && !warning.detail.is_empty()
+                })
+        }
+        _ => false,
+    };
+    if !valid_provenance {
+        if let Ok(mut store) = state.store.lock() {
+            let _ = store.fail_preparation(
+                &work.id,
+                "invalid_cv_provenance",
+                "artifact.validation",
+                "The adapter returned invalid CV provenance.",
+            );
+        }
+        return Err("The adapter returned invalid CV provenance".to_string());
+    }
     let mut store = state
         .store
         .lock()
@@ -636,11 +750,14 @@ fn process_preparation_work(app: &tauri::AppHandle, work: PreparationWork) -> Re
     store
         .complete_preparation(
             &work.id,
-            committed.tracker_id,
-            &committed.artifacts.report.path,
-            &committed.artifacts.report.sha256,
-            &committed.artifacts.cv_pdf.path,
-            &committed.artifacts.cv_pdf.sha256,
+            &PreparationCompletion {
+                tracker_id: committed.tracker_id,
+                report_path: &committed.artifacts.report.path,
+                report_hash: &committed.artifacts.report.sha256,
+                cv_pdf_path: &committed.artifacts.cv_pdf.path,
+                cv_pdf_hash: &committed.artifacts.cv_pdf.sha256,
+                cv_source: &committed.cv_provenance.source,
+            },
         )
         .map_err(|error| error.to_string())?;
     Ok(())
@@ -1422,7 +1539,15 @@ fn preflight_latest_backup(state: tauri::State<'_, AppState>) -> Result<RestoreP
 
 #[tauri::command]
 fn check_integrations(state: tauri::State<'_, AppState>) -> IntegrationHealth {
-    let career_ops = match state.adapter.health() {
+    let fallback_configuration = state.store.lock().ok().and_then(|store| {
+        store.cv_fallback_setting().ok().and_then(|setting| {
+            match (&setting.path, &setting.sha256) {
+                (Some(_), Some(_)) => serde_json::to_value(setting).ok(),
+                _ => None,
+            }
+        })
+    });
+    let career_ops = match state.adapter.health(fallback_configuration.as_ref()) {
         Ok(true) => CheckResult {
             ready: true,
             detail: "career-ops canonical history is available.".to_string(),
@@ -1807,6 +1932,8 @@ pub fn run() {
             import_dataset,
             set_background_enabled,
             save_queue_filters,
+            get_cv_fallback_setting,
+            set_cv_fallback_setting,
             request_notification_permission,
             send_test_notification,
             take_in_app_outcome_notifications,
@@ -2019,5 +2146,26 @@ mod tests {
                 PreparationGate::Discard(_)
             ));
         }
+    }
+
+    #[test]
+    fn reviewed_cv_fallback_is_validated_and_hash_bound() {
+        use sha2::Digest;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("reviewed.pdf");
+        let bytes = b"%PDF-1.4\n1 0 obj\n<< /Type /Page >>\nendobj\nxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n%%EOF\n";
+        std::fs::write(&path, bytes).unwrap();
+
+        let setting = super::validate_reviewed_cv_fallback(path.to_str().unwrap()).unwrap();
+
+        assert_eq!(
+            setting.path.as_deref(),
+            path.canonicalize().unwrap().to_str()
+        );
+        let expected_hash = format!("{:x}", sha2::Sha256::digest(bytes));
+        assert_eq!(setting.sha256.as_deref(), Some(expected_hash.as_str()));
+        std::fs::write(&path, b"not a pdf").unwrap();
+        assert!(super::validate_reviewed_cv_fallback(path.to_str().unwrap()).is_err());
     }
 }

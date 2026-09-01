@@ -9,14 +9,14 @@ use uuid::Uuid;
 
 use crate::domain::{
     ActivityEntry, AdapterEffectContext, AdapterRoleContext, BrowserAnswerCommitWork,
-    BrowserAnswerWork, BrowserCommand, BrowserInspection, BrowserSessionSummary, DashboardState,
-    DiscoveryDataset, DiscoveryFinding, HistoryRecord, ImportResult, LeasedRun,
+    BrowserAnswerWork, BrowserCommand, BrowserInspection, BrowserSessionSummary, CvFallbackSetting,
+    DashboardState, DiscoveryDataset, DiscoveryFinding, HistoryRecord, ImportResult, LeasedRun,
     OutcomeNotification, PreparationCleanupWork, PreparationSummary, PreparationWork, QueueFilters,
     QueueGroup, ReconcileResult, RestorePreflight, RoleSummary, RunSummary, ScheduledRun,
     SourceScheduleSummary,
 };
 
-const SCHEMA_VERSION: i64 = 15;
+const SCHEMA_VERSION: i64 = 16;
 const MAX_RUN_ATTEMPTS: i64 = 3;
 const MAX_BROWSER_COMMAND_ATTEMPTS: i64 = 3;
 const MAX_ACTIVE_PREPARATIONS: i64 = 2;
@@ -51,6 +51,15 @@ pub enum StoreError {
 
 pub struct Store {
     connection: Connection,
+}
+
+pub struct PreparationCompletion<'a> {
+    pub tracker_id: i64,
+    pub report_path: &'a str,
+    pub report_hash: &'a str,
+    pub cv_pdf_path: &'a str,
+    pub cv_pdf_hash: &'a str,
+    pub cv_source: &'a str,
 }
 
 impl Store {
@@ -428,6 +437,15 @@ impl Store {
             )?;
             version = 15;
         }
+        if version < 16 {
+            self.connection.execute_batch(
+                "BEGIN IMMEDIATE;
+                 ALTER TABLE preparation_jobs ADD COLUMN cv_source TEXT;
+                 UPDATE schema_meta SET version = 16;
+                 COMMIT;",
+            )?;
+            version = 16;
+        }
         if version != SCHEMA_VERSION {
             return Err(StoreError::Database(rusqlite::Error::InvalidQuery));
         }
@@ -541,6 +559,25 @@ impl Store {
             "INSERT INTO settings(key, value, updated_at) VALUES ('queue_filters', ?1, ?2)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
             params![serde_json::to_string(filters)?, Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    pub fn cv_fallback_setting(&self) -> Result<CvFallbackSetting, StoreError> {
+        let Some(value) = setting(&self.connection, "user_reviewed_cv_fallback")? else {
+            return Ok(CvFallbackSetting::default());
+        };
+        serde_json::from_str(&value).map_err(StoreError::InvalidDataset)
+    }
+
+    pub fn set_cv_fallback_setting(
+        &mut self,
+        setting: &CvFallbackSetting,
+    ) -> Result<(), StoreError> {
+        self.connection.execute(
+            "INSERT INTO settings(key, value, updated_at) VALUES ('user_reviewed_cv_fallback', ?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+            params![serde_json::to_string(setting)?, Utc::now().to_rfc3339()],
         )?;
         Ok(())
     }
@@ -2107,7 +2144,7 @@ impl Store {
             .query_row(
                 "SELECT p.id, p.role_id, r.company, r.title, p.provider, p.status, p.step,
                         p.error_class, p.error_stage, p.error_detail, p.retry_policy,
-                        p.report_path, p.cv_pdf_path
+                        p.report_path, p.cv_pdf_path, p.cv_source
                    FROM preparation_jobs p JOIN roles r ON r.id = p.role_id
                   WHERE p.id = ?1 AND p.status != 'cancelled'",
                 [preparation_id],
@@ -2126,6 +2163,7 @@ impl Store {
                         report_markdown: None,
                         report_path: row.get(11)?,
                         cv_pdf_path: row.get(12)?,
+                        cv_source: row.get(13)?,
                     })
                 },
             )
@@ -2163,11 +2201,7 @@ impl Store {
     pub fn complete_preparation(
         &mut self,
         preparation_id: &str,
-        tracker_id: i64,
-        report_path: &str,
-        report_hash: &str,
-        cv_pdf_path: &str,
-        cv_pdf_hash: &str,
+        completion: &PreparationCompletion<'_>,
     ) -> Result<(), StoreError> {
         let now = Utc::now().to_rfc3339();
         let transaction = self.connection.transaction()?;
@@ -2188,14 +2222,15 @@ impl Store {
                 SET status = 'completed', step = 'prepared', tracker_id = ?1,
                     report_path = ?2, report_hash = ?3, cv_pdf_path = ?4, cv_pdf_hash = ?5,
                     error_class = NULL, error_stage = NULL, error_detail = NULL,
-                    retry_policy = NULL, updated_at = ?6
-              WHERE id = ?7",
+                    retry_policy = NULL, cv_source = ?6, updated_at = ?7
+              WHERE id = ?8",
             params![
-                tracker_id,
-                report_path,
-                report_hash,
-                cv_pdf_path,
-                cv_pdf_hash,
+                completion.tracker_id,
+                completion.report_path,
+                completion.report_hash,
+                completion.cv_pdf_path,
+                completion.cv_pdf_hash,
+                completion.cv_source,
                 now,
                 preparation_id
             ],
@@ -2206,12 +2241,20 @@ impl Store {
                     canonical_status = 'Evaluated', canonical_visibility_override = 0,
                     updated_at = ?2
               WHERE id = ?3",
-            params![tracker_id, now, role_id],
+            params![completion.tracker_id, now, role_id],
         )?;
         transaction.execute(
             "INSERT INTO activity(id, kind, message, occurred_at)
-             VALUES (?1, 'preparation', 'career-ops prepared a report and verified tailored CV.', ?2)",
-            params![Uuid::new_v4().to_string(), now],
+             VALUES (?1, 'preparation', ?2, ?3)",
+            params![
+                Uuid::new_v4().to_string(),
+                if completion.cv_source == "user_reviewed_fallback" {
+                    "career-ops prepared a report; PDF rendering failed, so HereForWork used the configured user-reviewed CV without tailoring it."
+                } else {
+                    "career-ops prepared a report and fact-checked tailored CV."
+                },
+                now
+            ],
         )?;
         transaction.commit()?;
         Ok(())
@@ -3370,7 +3413,7 @@ impl Store {
 
         let mut preparation_statement = self.connection.prepare(
             "SELECT p.id, p.role_id, r.company, r.title, p.provider, p.status, p.step,
-                    p.attempt, p.report_path, p.cv_pdf_path, p.error_class,
+                    p.attempt, p.report_path, p.cv_pdf_path, p.cv_source, p.error_class,
                     p.error_stage, p.error_detail, p.retry_policy, p.updated_at
                FROM preparation_jobs p
                JOIN roles r ON r.id = p.role_id
@@ -3395,11 +3438,12 @@ impl Store {
                     attempt: row.get(7)?,
                     report_path: row.get(8)?,
                     cv_pdf_path: row.get(9)?,
-                    error_class: row.get(10)?,
-                    error_stage: row.get(11)?,
-                    error_detail: row.get(12)?,
-                    retry_policy: row.get(13)?,
-                    updated_at: row.get(14)?,
+                    cv_source: row.get(10)?,
+                    error_class: row.get(11)?,
+                    error_stage: row.get(12)?,
+                    error_detail: row.get(13)?,
+                    retry_policy: row.get(14)?,
+                    updated_at: row.get(15)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -4152,7 +4196,7 @@ fn missed_nominal_times(
 
 #[cfg(test)]
 mod tests {
-    use super::{QueueFilters, Store};
+    use super::{PreparationCompletion, QueueFilters, Store};
     use crate::domain::PreparationWork;
 
     const DATASET: &str = r#"{
@@ -4407,11 +4451,14 @@ mod tests {
         store
             .complete_preparation(
                 &retry.id,
-                42,
-                "reports/042-example.md",
-                &"b".repeat(64),
-                "output/042-example/cv.pdf",
-                &"c".repeat(64),
+                &PreparationCompletion {
+                    tracker_id: 42,
+                    report_path: "reports/042-example.md",
+                    report_hash: &"b".repeat(64),
+                    cv_pdf_path: "output/042-example/cv.pdf",
+                    cv_pdf_hash: &"c".repeat(64),
+                    cv_source: "tailored_generated",
+                },
             )
             .unwrap();
         let completed = store.dashboard().unwrap();
@@ -4475,11 +4522,14 @@ mod tests {
         store
             .complete_preparation(
                 &second.id,
-                42,
-                "reports/042-example.md",
-                &"b".repeat(64),
-                "output/042-example/cv.pdf",
-                &"c".repeat(64),
+                &PreparationCompletion {
+                    tracker_id: 42,
+                    report_path: "reports/042-example.md",
+                    report_hash: &"b".repeat(64),
+                    cv_pdf_path: "output/042-example/cv.pdf",
+                    cv_pdf_hash: &"c".repeat(64),
+                    cv_source: "tailored_generated",
+                },
             )
             .unwrap();
         assert!(
@@ -4564,6 +4614,24 @@ mod tests {
         store.set_background_enabled(true).unwrap();
 
         assert!(store.dashboard().unwrap().background_enabled);
+    }
+
+    #[test]
+    fn reviewed_cv_fallback_setting_round_trips_without_entering_dashboard_data() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+        let setting = crate::domain::CvFallbackSetting {
+            path: Some("/private/example/reviewed.pdf".to_string()),
+            sha256: Some("a".repeat(64)),
+        };
+
+        store.set_cv_fallback_setting(&setting).unwrap();
+
+        let stored = store.cv_fallback_setting().unwrap();
+        assert_eq!(stored.path, setting.path);
+        assert_eq!(stored.sha256, setting.sha256);
+        let dashboard = serde_json::to_value(store.dashboard().unwrap()).unwrap();
+        assert!(!dashboard.to_string().contains("reviewed.pdf"));
     }
 
     #[test]
@@ -4850,11 +4918,14 @@ mod tests {
             store
                 .complete_preparation(
                     &preparation.id,
-                    40 + index as i64,
-                    &format!("reports/{}-example.md", index + 1),
-                    &"b".repeat(64),
-                    &format!("output/{}/cv.pdf", index + 1),
-                    &"c".repeat(64),
+                    &PreparationCompletion {
+                        tracker_id: 40 + index as i64,
+                        report_path: &format!("reports/{}-example.md", index + 1),
+                        report_hash: &"b".repeat(64),
+                        cv_pdf_path: &format!("output/{}/cv.pdf", index + 1),
+                        cv_pdf_hash: &"c".repeat(64),
+                        cv_source: "tailored_generated",
+                    },
                 )
                 .unwrap();
             preparations.push(preparation);
@@ -4912,11 +4983,14 @@ mod tests {
         store
             .complete_preparation(
                 &preparation.id,
-                42,
-                "reports/042-example.md",
-                &"b".repeat(64),
-                "output/042-example/cv.pdf",
-                &"c".repeat(64),
+                &PreparationCompletion {
+                    tracker_id: 42,
+                    report_path: "reports/042-example.md",
+                    report_hash: &"b".repeat(64),
+                    cv_pdf_path: "output/042-example/cv.pdf",
+                    cv_pdf_hash: &"c".repeat(64),
+                    cv_source: "tailored_generated",
+                },
             )
             .unwrap();
         store
@@ -5137,11 +5211,14 @@ mod tests {
         store
             .complete_preparation(
                 &preparation.id,
-                42,
-                "reports/042-example.md",
-                &"b".repeat(64),
-                "output/042-example/cv.pdf",
-                &"c".repeat(64),
+                &PreparationCompletion {
+                    tracker_id: 42,
+                    report_path: "reports/042-example.md",
+                    report_hash: &"b".repeat(64),
+                    cv_pdf_path: "output/042-example/cv.pdf",
+                    cv_pdf_hash: &"c".repeat(64),
+                    cv_source: "tailored_generated",
+                },
             )
             .unwrap();
         store

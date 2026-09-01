@@ -90,7 +90,7 @@ corepack pnpm build:extension
 corepack pnpm tauri build
 ```
 
-career-ops' PDF writer also requires the Chromium revision pinned by its
+career-ops' PDF writer normally requires the Chromium revision pinned by its
 installed Playwright package:
 
 ```sh
@@ -98,8 +98,11 @@ cd /path/to/career-ops
 ./node_modules/.bin/playwright install chromium
 ```
 
-The adapter health check reports this runtime separately so a missing browser cannot
-masquerade as a ready PDF integration.
+The adapter health check reports this runtime separately. As a recovery-only option,
+System can save an absolute path to a user-reviewed PDF. HereForWork hash-binds the file
+when saved and revalidates it on use. It is used only when PDF rendering fails after HTML
+and fact checks, and successful preparations identify it as an untailored user-reviewed
+fallback. The personal path and PDF are never committed to this repository.
 
 Do not run automated browser tests against the selected production Chrome profile.
 Live-form testing uses ordinary Chrome and ends at review; the user performs the final

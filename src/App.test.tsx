@@ -98,6 +98,9 @@ describe("App", () => {
     expect(screen.getByRole("checkbox", { name: "Hide explicit authorization conflicts" })).toBeInTheDocument();
     expect(screen.getByRole("combobox", { name: "Chrome profile" })).toBeInTheDocument();
     expect(screen.getByRole("combobox", { name: "Preparation provider" })).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Reviewed CV fallback" })).toBeInTheDocument();
+    expect(screen.getByText("Not configured")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Save reviewed CV" })).toBeInTheDocument();
     expect(screen.getByText("Background checks")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Turn on" })).toBeInTheDocument();
   });

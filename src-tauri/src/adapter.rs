@@ -157,11 +157,32 @@ pub struct PreparationArtifacts {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct PreparationCvProvenance {
+    pub source: String,
+    pub tailored: bool,
+    pub source_sha256: Option<String>,
+    pub render_recovery: Option<Value>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreparationWarning {
+    pub code: String,
+    pub stage: String,
+    pub recovered_by: String,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PreparationCommit {
     pub preparation_id: String,
     pub context_hash: String,
     pub tracker_id: i64,
     pub artifacts: PreparationArtifacts,
+    pub cv_provenance: PreparationCvProvenance,
+    #[serde(default)]
+    pub warnings: Vec<PreparationWarning>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -213,7 +234,18 @@ impl AdapterConfig {
         input: Value,
         timeout: Duration,
     ) -> Result<Value, AdapterError> {
-        let mut child = Command::new(&self.node_path)
+        self.request_with_timeout_and_environment(operation, input, timeout, None)
+    }
+
+    fn request_with_timeout_and_environment(
+        &self,
+        operation: &str,
+        input: Value,
+        timeout: Duration,
+        fallback_configuration: Option<&Value>,
+    ) -> Result<Value, AdapterError> {
+        let mut command = Command::new(&self.node_path);
+        command
             .arg(&self.script_path)
             .current_dir(&self.career_ops_root)
             .env("HFW_CAREER_OPS_ROOT", &self.career_ops_root)
@@ -221,8 +253,11 @@ impl AdapterConfig {
             .env("HFW_CAREER_OPS_STAGING", &self.staging_path)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?;
+            .stderr(Stdio::piped());
+        if let Some(configuration) = fallback_configuration {
+            command.env("HFW_USER_REVIEWED_CV_FALLBACK", configuration.to_string());
+        }
+        let mut child = command.spawn()?;
 
         let request_id = Uuid::new_v4().to_string();
         let request = json!({
@@ -295,8 +330,13 @@ impl AdapterConfig {
             .ok_or_else(|| AdapterError::InvalidData("response result is missing".to_string()))
     }
 
-    pub fn health(&self) -> Result<bool, AdapterError> {
-        let result = self.request("health.check", json!({}))?;
+    pub fn health(&self, fallback_configuration: Option<&Value>) -> Result<bool, AdapterError> {
+        let result = self.request_with_timeout_and_environment(
+            "health.check",
+            json!({}),
+            Duration::from_secs(15),
+            fallback_configuration,
+        )?;
         result
             .get("ready")
             .and_then(Value::as_bool)
@@ -332,6 +372,7 @@ impl AdapterConfig {
         event_date: &str,
         job: Value,
         result: Value,
+        fallback_configuration: Option<&Value>,
     ) -> Result<PreparationCommit, AdapterError> {
         let mut payload = serde_json::to_value(input)
             .expect("preparation role input serializes")
@@ -344,7 +385,12 @@ impl AdapterConfig {
         );
         payload.insert("job".to_string(), job);
         payload.insert("result".to_string(), result);
-        let value = self.request("preparation.result.commit", Value::Object(payload))?;
+        let value = self.request_with_timeout_and_environment(
+            "preparation.result.commit",
+            Value::Object(payload),
+            Duration::from_secs(240),
+            fallback_configuration,
+        )?;
         serde_json::from_value(value).map_err(|error| AdapterError::InvalidData(error.to_string()))
     }
 

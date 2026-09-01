@@ -8,17 +8,22 @@
  * paths from callers. External job data is returned as data only.
  */
 
-import { access, chmod, constants, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { access, constants, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { dirname, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import {
+  commitPreparationTransaction,
+  reviewedCvFallbackReady,
+} from "./preparation-transaction.mjs";
 
 const PROTOCOL_VERSION = 1;
 const root = process.env.HFW_CAREER_OPS_ROOT;
 const trackerDb = process.env.HFW_CAREER_OPS_INDEX;
 const stagingRoot = process.env.HFW_CAREER_OPS_STAGING;
+const userReviewedCvFallback = process.env.HFW_USER_REVIEWED_CV_FALLBACK || null;
 
 const operations = Object.freeze([
   "capabilities.get",
@@ -115,81 +120,30 @@ async function runCareerOpsScript(scriptName, args, extraEnv = {}) {
     });
     const stdout = [];
     const stderr = [];
-    child.stdout.on("data", (chunk) => stdout.push(chunk));
-    child.stderr.on("data", (chunk) => stderr.push(chunk));
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
+    child.stdout.on("data", (chunk) => {
+      if (stdoutBytes < 65_536) stdout.push(chunk.subarray(0, 65_536 - stdoutBytes));
+      stdoutBytes += chunk.length;
+    });
+    child.stderr.on("data", (chunk) => {
+      if (stderrBytes < 65_536) stderr.push(chunk.subarray(0, 65_536 - stderrBytes));
+      stderrBytes += chunk.length;
+    });
     child.on("error", reject);
     child.on("close", (code) => {
       const output = Buffer.concat(stdout).toString("utf8");
       const diagnostics = Buffer.concat(stderr).toString("utf8").trim();
       if (code !== 0) {
-        reject(new Error(diagnostics || `career-ops tracker exited with status ${code}.`));
+        const error = new Error(`career-ops ${scriptName} exited with status ${code}.`);
+        error.exitCode = code;
+        error.diagnostics = diagnostics;
+        reject(error);
         return;
       }
       resolvePromise({ output, diagnostics });
     });
   });
-}
-
-class PreparationCommitError extends Error {
-  constructor(error) {
-    super(`career-ops preparation commit failed with ${String(error?.code ?? "unknown_error")}.`);
-    this.name = "PreparationCommitError";
-    this.code = String(error?.code ?? "commit_failed");
-    this.stage = String(error?.stage ?? "preparation.result.commit");
-    this.retryPolicy = String(error?.retryPolicy ?? "manual_repair_required");
-    this.diagnosticId = typeof error?.diagnosticId === "string" ? error.diagnosticId : null;
-  }
-}
-
-async function runAtomicPreparationCommit(input, preparationId) {
-  const entrypoint = resolve(root, "hfw-preparation-commit.mjs");
-  if (!(await canRead(entrypoint))) return null;
-  const effectDirectory = resolve(stagingRoot, preparationId);
-  await mkdir(effectDirectory, { recursive: true });
-  const requestPath = resolve(effectDirectory, "private-commit-request.json");
-  await writeFile(requestPath, `${JSON.stringify(input)}\n`, { encoding: "utf8", mode: 0o600 });
-  await chmod(requestPath, 0o600);
-  try {
-    return await new Promise((resolvePromise, reject) => {
-      const child = spawn(process.execPath, [
-        entrypoint,
-        "--input",
-        requestPath,
-        "--staging-dir",
-        effectDirectory,
-      ], {
-        cwd: root,
-        env: process.env,
-        stdio: ["ignore", "pipe", "pipe"],
-        shell: false,
-      });
-      const stdout = [];
-      child.stdout.on("data", (chunk) => stdout.push(chunk));
-      child.stderr.resume();
-      child.on("error", reject);
-      child.on("close", (exitCode) => {
-        const output = Buffer.concat(stdout).toString("utf8").trim();
-        let parsed;
-        try {
-          parsed = JSON.parse(output);
-        } catch {
-          reject(new PreparationCommitError({
-            code: "invalid_commit_response",
-            stage: "preparation.result.commit",
-            retryPolicy: "repair_runtime_then_retry",
-          }));
-          return;
-        }
-        if (exitCode !== 0 || parsed?.outcome === "failed") {
-          reject(new PreparationCommitError(parsed?.error));
-          return;
-        }
-        resolvePromise(parsed);
-      });
-    });
-  } finally {
-    await rm(requestPath, { force: true });
-  }
 }
 
 function sha256(value) {
@@ -259,16 +213,6 @@ function publicHttpsUrl(value, label = "url") {
   }
   parsed.hash = "";
   return parsed;
-}
-
-function slugify(value, fallback = "role") {
-  const slug = String(value ?? "")
-    .normalize("NFKD")
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 80);
-  return slug || fallback;
 }
 
 async function readBounded(relativePath, maxBytes, { optional = false } = {}) {
@@ -669,43 +613,6 @@ function safeGeneratedArtifactPath(value) {
   return value;
 }
 
-async function preparationManifest(preparationId, context, role, eventDate) {
-  const effectDirectory = resolve(stagingRoot, preparationId);
-  const manifestPath = resolve(effectDirectory, "preparation.json");
-  await mkdir(effectDirectory, { recursive: true });
-  try {
-    const existing = JSON.parse(await readFile(manifestPath, "utf8"));
-    if (existing.contextHash !== context || JSON.stringify(existing.role) !== JSON.stringify(role)) {
-      throw new Error("Preparation idempotency key was reused with different input.");
-    }
-    return { effectDirectory, manifestPath, manifest: existing };
-  } catch (error) {
-    if (error?.code !== "ENOENT") throw error;
-  }
-  const { output } = await runCareerOpsScript("reserve-report-num.mjs", []);
-  const reportNum = output.trim();
-  if (!/^\d{3,}$/.test(reportNum)) throw new Error("career-ops did not reserve a valid report number.");
-  const key = `${reportNum}-${slugify(role.company)}-${slugify(role.title)}`;
-  const reportRelative = `reports/${reportNum}-${slugify(role.company)}-${eventDate}.md`;
-  const artifactRoot = `output/${key}`;
-  const manifest = {
-    schemaVersion: 1,
-    preparationId,
-    contextHash: context,
-    role,
-    eventDate,
-    reportNum,
-    reportRelative,
-    cvPayloadRelative: `${artifactRoot}/cv/tailored/v001/cv-payload.json`,
-    cvHtmlRelative: `${artifactRoot}/cv/tailored/v001/cv.html`,
-    cvPdfRelative: `${artifactRoot}/cv/tailored/v001/cv.pdf`,
-    cvChangesRelative: `${artifactRoot}/cv/tailored/v001/changes.md`,
-    jobRelative: `${artifactRoot}/jd/current.md`,
-  };
-  await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, { flag: "wx" });
-  return { effectDirectory, manifestPath, manifest };
-}
-
 async function writeIdempotent(path, content, { replaceIncomplete = false } = {}) {
   await mkdir(dirname(path), { recursive: true });
   try {
@@ -718,26 +625,6 @@ async function writeIdempotent(path, content, { replaceIncomplete = false } = {}
       if (!replaceIncomplete) throw new Error("A career-ops artifact changed during preparation recovery.");
       await writeFile(path, expected);
     }
-  }
-}
-
-async function stagedPreparationResult(effectDirectory, expectedHash, incoming) {
-  const resultPath = resolve(effectDirectory, "provider-result.json");
-  try {
-    const existing = JSON.parse(await readFile(resultPath, "utf8"));
-    assertPreparationResult(existing, expectedHash);
-    return { result: existing, created: false };
-  } catch (error) {
-    if (error?.code !== "ENOENT") throw error;
-  }
-  try {
-    await writeFile(resultPath, `${JSON.stringify(incoming, null, 2)}\n`, { flag: "wx", mode: 0o600 });
-    return { result: incoming, created: true };
-  } catch (error) {
-    if (error?.code !== "EEXIST") throw error;
-    const existing = JSON.parse(await readFile(resultPath, "utf8"));
-    assertPreparationResult(existing, expectedHash);
-    return { result: existing, created: false };
   }
 }
 
@@ -1132,6 +1019,7 @@ async function execute(request) {
         ],
       };
     case "health.check": {
+      const pdfFallback = await reviewedCvFallbackReady(userReviewedCvFallback);
       const checks = {
         root: Boolean(root && (await canRead(root))),
         tracker: Boolean(root && (await canRead(resolve(root, "tracker.mjs")))),
@@ -1142,12 +1030,22 @@ async function execute(request) {
         verifyCvFacts: Boolean(root && (await canRead(resolve(root, "verify-cv-facts.mjs")))),
         generatePdf: Boolean(root && (await canRead(resolve(root, "generate-pdf.mjs")))),
         playwrightChromium: await playwrightChromiumReady(),
+        userReviewedCvFallback: pdfFallback,
         applicationAnswers: Boolean(root && (await canRead(resolve(root, "application-answers.mjs")))),
         applications: Boolean(root && (await canRead(resolve(root, "data/applications.md")))),
         trackerIndexConfigured: Boolean(trackerDb),
         writableStagingConfigured: Boolean(stagingRoot),
       };
-      return { ready: Object.values(checks).every(Boolean), checks };
+      const {
+        playwrightChromium,
+        userReviewedCvFallback: fallbackReady,
+        ...requiredChecks
+      } = checks;
+      return {
+        ready: Object.values(requiredChecks).every(Boolean)
+          && (playwrightChromium || fallbackReady),
+        checks,
+      };
     }
     case "history.snapshot": {
       const inputKeys = Object.keys(request.input ?? {});
@@ -1226,52 +1124,20 @@ async function execute(request) {
       if (typeof job.descriptionAvailable !== "boolean") throw new Error("job description availability is invalid.");
       if (normalizeUrl(job.sourceUrl) !== normalizeUrl(role.url)) throw new Error("job source URL no longer matches the requested role.");
       publicHttpsUrl(job.url, "resolved application URL");
-      const atomicCommit = await runAtomicPreparationCommit(request.input, preparationId);
-      if (atomicCommit) return atomicCommit;
-      const sources = await preparationSources();
-      const hash = contextHash(role, job, sources);
-      assertPreparationResult(request.input?.result, hash);
-      const incomingResult = request.input.result;
-      const { effectDirectory, manifest } = await preparationManifest(preparationId, hash, role, eventDate);
-      const absolute = (relative) => resolve(root, relative);
-      const publishedArtifactExists = (await canRead(absolute(manifest.reportRelative))) || (await canRead(absolute(manifest.cvPdfRelative)));
-      const staged = await stagedPreparationResult(effectDirectory, hash, incomingResult);
-      const result = staged.result;
-      const replaceIncomplete = staged.created && !publishedArtifactExists;
-      await writeIdempotent(absolute(manifest.jobRelative), `${job.description.trim()}\n`, { replaceIncomplete });
-      await writeIdempotent(absolute(manifest.cvPayloadRelative), `${JSON.stringify(result.cvPayload, null, 2)}\n`, { replaceIncomplete });
-      await writeIdempotent(absolute(manifest.cvChangesRelative), `${result.cvChangesMarkdown.trim()}\n`, { replaceIncomplete });
-      await runCareerOpsScript("build-cv-html.mjs", [
-        absolute(manifest.cvPayloadRelative), absolute(manifest.cvHtmlRelative),
-      ]);
-      await runCareerOpsScript("verify-cv-facts.mjs", [absolute(manifest.cvHtmlRelative), "--json"]);
-      await runCareerOpsScript("generate-pdf.mjs", [
-        absolute(manifest.cvHtmlRelative), absolute(manifest.cvPdfRelative),
-        `--format=${result.cvPayload.page_format}`, `--report=${manifest.reportNum}`, "--allow-reorder",
-      ]);
-      const report = reportHeader(role, result, eventDate, manifest.reportNum, manifest.cvPdfRelative);
-      await writeIdempotent(absolute(manifest.reportRelative), report);
-      await runCareerOpsScript("reserve-report-num.mjs", ["--release", manifest.reportNum]);
-      const record = await ensureCanonicalRole(role, "Evaluated", preparationId, eventDate, {
-        score: `${result.score.toFixed(1)}/5`,
-        pdf: "✅",
-        report: `[${manifest.reportNum}](${manifest.reportRelative})`,
-        notes: `Prepared by HereForWork; ATS=${job.provider}`,
+      return commitPreparationTransaction({
+        input: { ...request.input, eventDate },
+        role,
+        root,
+        trackerDb,
+        stagingRoot,
+        fallbackConfiguration: userReviewedCvFallback,
+        preparationSources,
+        contextHash,
+        assertPreparationResult,
+        runCareerOpsScript,
+        historyRecords,
+        reportHeader,
       });
-      const reportBytes = await readFile(absolute(manifest.reportRelative));
-      const cvBytes = await readFile(absolute(manifest.cvPdfRelative));
-      return {
-        outcome: "completed",
-        preparationId,
-        contextHash: hash,
-        trackerId: Number(record.id),
-        artifacts: {
-          report: { path: manifest.reportRelative, sha256: sha256(reportBytes) },
-          cvHtml: { path: manifest.cvHtmlRelative, sha256: sha256(await readFile(absolute(manifest.cvHtmlRelative))) },
-          cvPdf: { path: manifest.cvPdfRelative, sha256: sha256(cvBytes) },
-          cvChanges: { path: manifest.cvChangesRelative, sha256: sha256(await readFile(absolute(manifest.cvChangesRelative))) },
-        },
-      };
     }
     case "preparation.artifacts.delete": {
       assertInputKeys(request.input, ["preparationId", "reportPath", "cvPdfPath"], request.operation);
@@ -1283,20 +1149,17 @@ async function execute(request) {
       const expectedReport = safeReportPath(request.input?.reportPath);
       const expectedCvPdf = safeGeneratedArtifactPath(request.input?.cvPdfPath);
       const effectDirectory = resolve(stagingRoot, preparationId);
-      const manifest = JSON.parse(await readFile(resolve(effectDirectory, "preparation.json"), "utf8"));
-      if (manifest.preparationId !== preparationId
-          || manifest.reportRelative !== expectedReport
-          || manifest.cvPdfRelative !== expectedCvPdf) {
+      const state = JSON.parse(await readFile(resolve(effectDirectory, "commit-state.json"), "utf8"));
+      if (state.schemaVersion !== 2
+          || state.preparationId !== preparationId
+          || state.status !== "committed"
+          || state.artifacts?.report?.path !== expectedReport
+          || state.artifacts?.cvPdf?.path !== expectedCvPdf
+          || !Array.isArray(state.cleanupPaths)) {
         throw new Error("Preparation cleanup references do not match the committed manifest.");
       }
-      const reportRelative = safeReportPath(manifest.reportRelative);
-      const generated = [
-        manifest.cvPayloadRelative,
-        manifest.cvHtmlRelative,
-        manifest.cvPdfRelative,
-        manifest.cvChangesRelative,
-        manifest.jobRelative,
-      ].map(safeGeneratedArtifactPath);
+      const reportRelative = safeReportPath(state.artifacts.report.path);
+      const generated = state.cleanupPaths.map(safeGeneratedArtifactPath);
       await rm(resolve(root, reportRelative), { force: true });
       for (const relativePath of generated) await rm(resolve(root, relativePath), { force: true });
       await rm(effectDirectory, { recursive: true, force: true });

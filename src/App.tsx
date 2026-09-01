@@ -57,12 +57,14 @@ import {
   continueInBrowser,
   confirmApplicationApplied,
   getPreparationDetail,
+  getCvFallbackSetting,
   focusReviewForm,
   openPreparationArtifact,
   quitApp,
   cancelPreparation,
   sendTestNotification,
   saveQueueFilters,
+  setCvFallbackSetting,
   setBackgroundEnabled,
   startBrowserConnectionCheck,
   takeInAppOutcomeNotifications,
@@ -81,6 +83,7 @@ import type {
   BrowserSessionSummary,
   PreparationDetail,
   QueueFilters,
+  CvFallbackSetting,
 } from "./types";
 import { formatPublicationAge } from "./lib/publication-age";
 
@@ -396,6 +399,10 @@ function SystemPanel({
   onSaveQueueFilters,
   selectedProvider,
   onSelectedProviderChange,
+  cvFallbackSetting,
+  cvFallbackPath,
+  onCvFallbackPathChange,
+  onSaveCvFallback,
   onToggleBackground,
   notificationsReady,
   onEnableNotifications,
@@ -431,6 +438,10 @@ function SystemPanel({
   onSaveQueueFilters: () => void;
   selectedProvider: "codex" | "claude";
   onSelectedProviderChange: (provider: "codex" | "claude") => void;
+  cvFallbackSetting: CvFallbackSetting;
+  cvFallbackPath: string;
+  onCvFallbackPathChange: (path: string) => void;
+  onSaveCvFallback: () => void;
   onToggleBackground: () => void;
   notificationsReady: boolean;
   onEnableNotifications: () => void;
@@ -540,6 +551,27 @@ function SystemPanel({
                 <SelectItem value="claude">Claude</SelectItem>
               </SelectContent>
             </Select>
+          </Field>
+          <Field>
+            <FieldLabel htmlFor="reviewed-cv-fallback">Reviewed CV fallback</FieldLabel>
+            <Input
+              id="reviewed-cv-fallback"
+              value={cvFallbackPath}
+              onChange={(event) => onCvFallbackPathChange(event.target.value)}
+              placeholder="/absolute/path/to/reviewed-cv.pdf"
+              disabled={busy}
+            />
+            <span className="background-setting__state">
+              {cvFallbackSetting.sha256
+                ? "Available · hash-bound to this file"
+                : "Not configured"}
+            </span>
+            <span className="background-setting__state">
+              Used only if tailored PDF rendering fails after HTML and fact checks.
+            </span>
+            <Button variant="outline" type="button" onClick={onSaveCvFallback} disabled={busy}>
+              Save reviewed CV
+            </Button>
           </Field>
           <div className="background-setting">
             <div>
@@ -794,6 +826,8 @@ export function App() {
   const [notificationsReady, setNotificationsReady] = useState(false);
   const [providerProbe, setProviderProbe] = useState<ProviderProbeResult | null>(null);
   const [selectedProvider, setSelectedProvider] = useState<"codex" | "claude">("codex");
+  const [cvFallbackSetting, setCvFallbackSettingState] = useState<CvFallbackSetting>({ path: null, sha256: null });
+  const [cvFallbackPath, setCvFallbackPath] = useState("");
   const [browserSetup, setBrowserSetup] = useState<BrowserSetup | null>(null);
   const [browserSessions, setBrowserSessions] = useState<BrowserSessionSummary[]>([]);
   const [extensionId, setExtensionId] = useState("");
@@ -816,6 +850,22 @@ export function App() {
         if (!active) return;
         setDashboard(state);
         setQueueFiltersDraft(state.queueFilters);
+      })
+      .catch((reason: unknown) => {
+        if (active) setError(reason instanceof Error ? reason.message : String(reason));
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    getCvFallbackSetting()
+      .then((setting) => {
+        if (!active) return;
+        setCvFallbackSettingState(setting);
+        setCvFallbackPath(setting.path ?? "");
       })
       .catch((reason: unknown) => {
         if (active) setError(reason instanceof Error ? reason.message : String(reason));
@@ -982,6 +1032,24 @@ export function App() {
       setDashboard(next);
       setQueueFiltersDraft(next.queueFilters);
       setNotice("Queue filters saved. Current unprepared roles and future imports now use them.");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const persistCvFallback = async () => {
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const setting = await setCvFallbackSetting(cvFallbackPath);
+      setCvFallbackSettingState(setting);
+      setCvFallbackPath(setting.path ?? "");
+      setNotice(setting.path
+        ? "Reviewed CV fallback saved and hash-bound to the selected PDF."
+        : "Reviewed CV fallback cleared.");
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
     } finally {
@@ -1300,6 +1368,10 @@ export function App() {
           onSaveQueueFilters={() => void persistQueueFilters()}
           selectedProvider={selectedProvider}
           onSelectedProviderChange={setSelectedProvider}
+          cvFallbackSetting={cvFallbackSetting}
+          cvFallbackPath={cvFallbackPath}
+          onCvFallbackPathChange={setCvFallbackPath}
+          onSaveCvFallback={() => void persistCvFallback()}
           onToggleBackground={() => void toggleBackground()}
           notificationsReady={notificationsReady}
           onEnableNotifications={() => void enableNotifications()}
@@ -1361,7 +1433,10 @@ export function App() {
               >
                 <div className="preparation-list__identity">
                   <strong>{item.title}</strong>
-                  <span>{item.company} · {item.provider}</span>
+                  <span>
+                    {item.company} · {item.provider}
+                    {item.cvSource === "user_reviewed_fallback" ? " · User-reviewed CV" : ""}
+                  </span>
                 </div>
                 <Badge variant="outline">{status}</Badge>
                 {item.status === "queued" || item.status === "preparing" ? (
@@ -1389,7 +1464,7 @@ export function App() {
                       Details
                     </Button>
                     <Button variant="outline" type="button" onClick={() => void openArtifact(item.id, "cv")} disabled={busy}>
-                      Open CV
+                      {item.cvSource === "user_reviewed_fallback" ? "Open user-reviewed CV" : "Open tailored CV"}
                     </Button>
                     {!latestSession ? (
                     <Button
@@ -1432,7 +1507,7 @@ export function App() {
                 ) : null}
                 {undoPreparationId === item.id ? (
                   <div className="preparation-list__confirmation" role="alert">
-                    <p>Discard this role and permanently delete its generated report and tailored CV files?</p>
+                    <p>Discard this role and permanently delete its generated preparation artifacts?</p>
                     <div className="button-cluster">
                       <Button variant="destructive" type="button" onClick={() => void discardPreparation(item.id)} disabled={busy}>
                         Discard preparation
@@ -1480,7 +1555,9 @@ export function App() {
                   <Button variant="outline" type="button" onClick={() => void openArtifact(preparationDetail.preparationId, "report")}>Open original report</Button>
                 ) : null}
                 {preparationDetail.cvPdfPath ? (
-                  <Button variant="outline" type="button" onClick={() => void openArtifact(preparationDetail.preparationId, "cv")}>Open verified CV</Button>
+                  <Button variant="outline" type="button" onClick={() => void openArtifact(preparationDetail.preparationId, "cv")}>
+                    {preparationDetail.cvSource === "user_reviewed_fallback" ? "Open user-reviewed CV" : "Open fact-checked tailored CV"}
+                  </Button>
                 ) : null}
                 {preparationDetail.status === "action_required"
                   && ["retry_same_preparation", "repair_runtime_then_retry"].includes(preparationDetail.retryPolicy ?? "retry_same_preparation") ? (
@@ -1498,6 +1575,14 @@ export function App() {
                   </Button>
                 ) : null}
               </div>
+              {preparationDetail.cvSource === "user_reviewed_fallback" ? (
+                <Alert>
+                  <AlertTitle>User-reviewed CV fallback</AlertTitle>
+                  <AlertDescription>
+                    PDF rendering failed, so this preparation uses your configured reviewed CV. It was not tailored for this role.
+                  </AlertDescription>
+                </Alert>
+              ) : null}
               {preparationDetail.errorDetail ? (
                 <Alert variant="destructive">
                   <AlertTitle>{preparationDetail.stage.replaceAll("_", " ").replaceAll(".", " ")}</AlertTitle>

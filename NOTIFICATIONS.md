@@ -41,7 +41,8 @@ the same preparation (`retry_same_preparation` or `repair_runtime_then_retry`). 
 that require a fresh provider run, a fresh preparation ID, or manual repair never reuse
 the failed preparation automatically.
 
-The career-ops adapter prefers `hfw-preparation-commit.mjs` when it is present. It writes
-the bounded request with mode `0600`, invokes the atomic entrypoint with that request and
-the preparation effect directory, and preserves structured failure metadata. Once that
-entrypoint is present, a failure never falls back to the legacy multi-command writer.
+The HereForWork adapter owns the durable compensating preparation transaction and uses
+fixed upstream career-ops CLIs. Structured code, stage, retry policy, and bounded
+diagnostics cross the NDJSON boundary. A PDF render failure recovered with a configured,
+hash-bound user-reviewed CV is recorded as warning/provenance and does not emit a false
+`preparation_failed` outcome; any later publication or tracker failure still does.

@@ -42,101 +42,6 @@ test("capabilities expose the fixed safety boundary", async () => {
   assert.equal(response.result.sourceOfTruth.applicationHistory, "career-ops");
 });
 
-test("atomic preparation commit uses a private request and never invokes legacy writers", async () => {
-  const fixture = await fakeCareerOps();
-  await writeFile(join(fixture.root, "hfw-preparation-commit.mjs"), `
-    import { readFile, stat } from "node:fs/promises";
-    const inputPath = process.argv[process.argv.indexOf("--input") + 1];
-    const stagingDir = process.argv[process.argv.indexOf("--staging-dir") + 1];
-    const input = JSON.parse(await readFile(inputPath, "utf8"));
-    const mode = (await stat(inputPath)).mode & 0o777;
-    if (mode !== 0o600 || !stagingDir.endsWith(input.preparationId)) process.exit(9);
-    process.stdout.write(JSON.stringify({
-      preparationId: input.preparationId,
-      contextHash: input.result.contextHash,
-      trackerId: 42,
-      artifacts: {
-        report: { path: "reports/atomic.md", sha256: "a".repeat(64) },
-        cvHtml: { path: "generated/atomic.html", sha256: "b".repeat(64) },
-        cvPdf: { path: "generated/atomic.pdf", sha256: "c".repeat(64) },
-        cvChanges: { path: "generated/atomic-changes.md", sha256: "d".repeat(64) }
-      }
-    }));
-  `);
-  const preparationId = "77777777-7777-4777-8777-777777777777";
-  const response = await request({
-    id: "atomic-commit",
-    protocolVersion: 1,
-    operation: "preparation.result.commit",
-    input: {
-      preparationId,
-      eventDate: "2026-09-01",
-      company: "Example Co",
-      title: "Frontend Engineer",
-      location: "Remote Europe",
-      url: "https://jobs.ashbyhq.com/example/role-1",
-      job: {
-        title: "Frontend Engineer",
-        company: "Example Co",
-        location: "Remote Europe",
-        url: "https://jobs.ashbyhq.com/example/role-1",
-        sourceUrl: "https://jobs.ashbyhq.com/example/role-1",
-        description: "A sufficiently long fixture describing React, TypeScript, accessibility, testing, collaboration, and reliable product delivery across a distributed European team.",
-        descriptionAvailable: true,
-        postedAt: null,
-        provider: "ashby",
-      },
-      result: { contextHash: "e".repeat(64) },
-    },
-  }, fixture.env);
-  assert.equal(response.ok, true);
-  assert.equal(response.result.artifacts.report.path, "reports/atomic.md");
-  await assert.rejects(stat(join(fixture.staging, preparationId, "private-commit-request.json")), { code: "ENOENT" });
-  assert.equal(JSON.parse(await readFile(join(fixture.root, "state.json"), "utf8")).length, 0);
-});
-
-test("atomic preparation commit preserves structured failure metadata", async () => {
-  const fixture = await fakeCareerOps();
-  await writeFile(join(fixture.root, "hfw-preparation-commit.mjs"), `
-    process.stderr.write("hfw-preparation-commit:context_changed:commit.validate");
-    process.stdout.write(JSON.stringify({ outcome: "failed", error: {
-      code: "context_changed", stage: "commit.validate",
-      retryPolicy: "fresh_preparation_id", diagnosticId: "11111111-1111-4111-8111-111111111111"
-    }}));
-    process.exit(3);
-  `);
-  const response = await request({
-    id: "atomic-failure",
-    protocolVersion: 1,
-    operation: "preparation.result.commit",
-    input: {
-      preparationId: "88888888-8888-4888-8888-888888888888",
-      eventDate: "2026-09-01", company: "Example Co", title: "Frontend Engineer",
-      location: "Remote Europe", url: "https://jobs.ashbyhq.com/example/role-1",
-      job: {
-        title: "Frontend Engineer", company: "Example Co", location: "Remote Europe",
-        url: "https://jobs.ashbyhq.com/example/role-1", sourceUrl: "https://jobs.ashbyhq.com/example/role-1",
-        description: "A sufficiently long fixture describing React, TypeScript, accessibility, testing, collaboration, and reliable product delivery across a distributed European team.",
-        descriptionAvailable: true, postedAt: null, provider: "ashby",
-      },
-      result: { contextHash: "f".repeat(64) },
-    },
-  }, fixture.env);
-  assert.equal(response.ok, false);
-  assert.deepEqual(response.error, {
-    code: "context_changed",
-    stage: "commit.validate",
-    retryPolicy: "fresh_preparation_id",
-    diagnosticId: "11111111-1111-4111-8111-111111111111",
-    message: "career-ops preparation commit failed with context_changed.",
-  });
-  assert.equal(JSON.parse(await readFile(join(fixture.root, "state.json"), "utf8")).length, 0);
-  await assert.rejects(
-    stat(join(fixture.staging, "88888888-8888-4888-8888-888888888888", "private-commit-request.json")),
-    { code: "ENOENT" },
-  );
-});
-
 test("generic discovery resolves a source listing to its application form", async (context) => {
   const requested = [];
   context.mock.method(globalThis, "fetch", async (input) => {
@@ -326,9 +231,11 @@ location:
     const files = (await readdir(process.env.CAREER_OPS_ADDITIONS)).filter((name) => name.endsWith(".tsv"));
     for (const name of files) {
       const parts = (await readFile(process.env.CAREER_OPS_ADDITIONS + "/" + name, "utf8")).trim().split("\\t");
+      const statusFirst = ["Evaluated", "Discarded", "Applied"].includes(parts[4]);
       if (!rows.some((row) => row.notes.includes(parts[8]))) rows.push({
         id: Number(parts[0]), date: parts[1], company: parts[2], role: parts[3],
-        score: parts[4], status: parts[5], pdf: parts[6], report: parts[7], notes: parts[8]
+        status: statusFirst ? parts[4] : parts[5], score: statusFirst ? parts[5] : parts[4],
+        pdf: parts[6], report: parts[7], notes: parts[8]
       });
     }
     await writeFile(stateUrl, JSON.stringify(rows));
@@ -368,10 +275,18 @@ location:
       console.error("tailored CV generation must opt into the career-ops reorder guard");
       process.exit(2);
     }
+    const input = process.argv[2];
     const output = process.argv[3];
+    const report = process.argv.find((value) => value.startsWith("--report="))?.split("=")[1] ?? "";
+    const format = process.argv.find((value) => value.startsWith("--format="))?.split("=")[1] ?? "a4";
     await mkdir(dirname(output), { recursive: true });
-    await writeFile(output, "%PDF-1.4 fixture");
+    await writeFile(output, "%PDF-1.4\\n1 0 obj\\n<< /Type /Catalog /Pages 2 0 R >>\\nendobj\\n2 0 obj\\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\\nendobj\\n3 0 obj\\n<< /Type /Page /Parent 2 0 R >>\\nendobj\\ntrailer\\n<< /Root 1 0 R >>\\n%%EOF\\n");
+    const root = process.env.CAREER_OPS_TRACKER.endsWith("data/applications.md")
+      ? dirname(dirname(process.env.CAREER_OPS_TRACKER)) : dirname(process.env.CAREER_OPS_TRACKER);
+    const relative = (path) => path.slice(root.length + 1);
+    await writeFile(process.env.CAREER_OPS_PDF_INDEX, "# report\\tpdf\\thtml\\tformat\\tdate — written by generate-pdf.mjs, do not edit\\n" + [report, relative(output), relative(input), format, "2026-08-30"].join("\\t") + "\\n");
   `);
+  await writeFile(join(root, "hfw-preparation-commit.mjs"), "process.exit(99);\n");
   await writeFile(join(root, "application-answers.mjs"), `
     import { readFile, writeFile } from "node:fs/promises";
     const value = (name) => process.argv[process.argv.indexOf(name) + 1];
@@ -410,7 +325,7 @@ test("provider-neutral preparation commits only through fixed career-ops writers
     operation: "health.check",
     input: {},
   }, fixture.env);
-  assert.equal(health.ok, true);
+  assert.equal(health.ok, true, JSON.stringify(health));
   assert.equal(health.result.ready, true);
   assert.equal(health.result.checks.playwrightChromium, true);
   assert.equal(health.result.checks.trackerIndexConfigured, true);
@@ -486,7 +401,7 @@ test("provider-neutral preparation commits only through fixed career-ops writers
     operation: "preparation.result.commit",
     input: { ...role, eventDate: "2026-08-30", job: context.result.job, result },
   }, fixture.env);
-  assert.equal(commit.ok, true);
+  assert.equal(commit.ok, true, JSON.stringify(commit));
   assert.equal(commit.result.artifacts.report.path, "reports/042-example-co-2026-08-30.md");
   assert.equal(commit.result.artifacts.cvPdf.sha256.length, 64);
   const stagedResultPath = join(fixture.staging, preparationId, "provider-result.json");
@@ -511,6 +426,15 @@ test("provider-neutral preparation commits only through fixed career-ops writers
     id: "prepare-commit-replay",
     protocolVersion: 1,
     operation: "preparation.result.commit",
+    input: { ...role, eventDate: "2026-08-30", job: context.result.job, result },
+  }, fixture.env);
+  assert.equal(replay.ok, true, JSON.stringify(replay));
+  assert.equal(replay.result.artifacts.report.sha256, commit.result.artifacts.report.sha256);
+
+  const conflictingReplay = await request({
+    id: "prepare-commit-conflicting-replay",
+    protocolVersion: 1,
+    operation: "preparation.result.commit",
     input: {
       ...role,
       eventDate: "2026-08-30",
@@ -522,8 +446,9 @@ test("provider-neutral preparation commits only through fixed career-ops writers
       },
     },
   }, fixture.env);
-  assert.equal(replay.ok, true);
-  assert.equal(replay.result.artifacts.report.sha256, commit.result.artifacts.report.sha256);
+  assert.equal(conflictingReplay.ok, false);
+  assert.equal(conflictingReplay.error.code, "staging_conflict");
+  assert.equal(conflictingReplay.error.retryPolicy, "fresh_preparation_id");
   assert.doesNotMatch(
     await readFile(join(fixture.root, replay.result.artifacts.report.path), "utf8"),
     /A different retry result/,
@@ -611,10 +536,10 @@ test("provider-neutral preparation commits only through fixed career-ops writers
       cvPdfPath: commit.result.artifacts.cvPdf.path,
     },
   }, fixture.env);
-  assert.equal(cleanup.ok, true);
+  assert.equal(cleanup.ok, true, JSON.stringify(cleanup));
   await assert.rejects(readFile(join(fixture.root, commit.result.artifacts.report.path)));
   await assert.rejects(readFile(join(fixture.root, commit.result.artifacts.cvPdf.path)));
-  await assert.rejects(readFile(join(fixture.staging, preparationId, "preparation.json")));
+  await assert.rejects(readFile(join(fixture.staging, preparationId, "commit-state.json")));
 });
 
 test("preparation accepts career-ops profiles without optional cv-facts config", async () => {

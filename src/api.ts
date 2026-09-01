@@ -14,6 +14,7 @@ import type {
   PrepareRoleOutcome,
   QueueFilters,
   OutcomeNotification,
+  CvFallbackSetting,
 } from "./types";
 
 const isTauri = (): boolean => "__TAURI_INTERNALS__" in window;
@@ -101,6 +102,16 @@ export async function prepareRole(roleId: string, provider: "codex" | "claude"):
 export async function saveQueueFilters(filters: QueueFilters): Promise<DashboardState> {
   if (!isTauri()) throw new Error("Queue filters are available in the desktop app.");
   return invoke<DashboardState>("save_queue_filters", { filters });
+}
+
+export async function getCvFallbackSetting(): Promise<CvFallbackSetting> {
+  if (!isTauri()) return { path: null, sha256: null };
+  return invoke<CvFallbackSetting>("get_cv_fallback_setting");
+}
+
+export async function setCvFallbackSetting(path: string): Promise<CvFallbackSetting> {
+  if (!isTauri()) throw new Error("Reviewed CV fallback settings are available in the desktop app.");
+  return invoke<CvFallbackSetting>("set_cv_fallback_setting", { path });
 }
 
 export async function undoPreparation(preparationId: string): Promise<DashboardState> {

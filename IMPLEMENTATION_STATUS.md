@@ -70,14 +70,22 @@ Stage: generic public-HTTPS path live-proven; Greenhouse and Lever live observat
   failure retries that canonical write without inspecting or filling the page again.
 - JSON Schema contracts generate compiler-checked TypeScript declarations through the
   repository-local `generate:contracts` command.
-- Schema v15 stores sanitized preparation failure stage, detail, and retry policy plus
+- Schema v16 stores sanitized preparation failure stage, detail, retry policy, and CV
+  provenance plus
   transactional, deduped failure and released-form outcome events. Visible windows use
   actionable in-app notices; hidden windows use informational macOS delivery, and a
   fully quit app expires undelivered outcomes rather than replaying them after restart.
-- When career-ops provides `hfw-preparation-commit.mjs`, preparation commits use that
-  atomic entrypoint with a mode-0600 private request. Structured code, stage, and retry
-  policy cross the adapter boundary; the legacy writer is never attempted after an
-  atomic-entrypoint failure.
+- Preparation commits now use the NDJSON adapter as the transaction boundary and invoke
+  only fixed upstream career-ops CLIs. A private restart-safe journal, exclusive
+  publication, drift checks, exact tracker post-verification, and conservative rollback
+  provide compensating atomicity. Concurrent external writers remain outside that
+  transaction and unsafe rollback becomes `manual_repair_required`.
+- System can store a local, hash-bound user-reviewed PDF fallback. It is used only after
+  HTML and fact checks pass and PDF rendering fails; its provenance stays visibly
+  `user_reviewed_fallback` and never claims tailoring.
+- The System control reuses the project's registry-derived shadcn `Field`, `Input`, and
+  `Button` primitives; the registry check found no need for a new modal, card, or
+  project-owned component.
 - Opening an older personal-proof database creates a pre-migration backup before
   migrating to schema v10. The live database and backup copies pass SQLite integrity
   and restore-preflight checks.
