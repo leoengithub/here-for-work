@@ -15,8 +15,7 @@ afterEach(() => {
 })
 
 describe("preparation outcome notifications", () => {
-  it("keeps failures persistent and routes View details to the preparation", () => {
-    vi.useFakeTimers()
+  it("routes View details to the preparation", () => {
     const manager = createToastManager()
     const notices = createOutcomeNoticeController(manager)
     const viewDetails = vi.fn()
@@ -28,10 +27,27 @@ describe("preparation outcome notifications", () => {
       preparationId: "preparation-1", browserSessionId: null, createdAt: "2026-09-01T10:00:00Z",
     }, viewDetails, vi.fn()))
 
-    act(() => vi.advanceTimersByTime(120_000))
-    expect(screen.getAllByText("Preparation failed").length).toBeGreaterThan(0)
     fireEvent.click(screen.getByText("View details"))
     expect(viewDetails).toHaveBeenCalledWith("preparation-1")
+  })
+
+  it("expires failures after five seconds", () => {
+    vi.useFakeTimers()
+    const manager = createToastManager()
+    const notices = createOutcomeNoticeController(manager)
+    render(<Toaster toastManager={manager} />)
+    act(() => notices.show({
+      id: "failure-expiry", eventKind: "preparation_failed", title: "Failure notice expiry",
+      body: "Frontend Engineer at Example Co. Provider invoke: Provider unavailable.",
+      actionKind: "view_details", actionLabel: "View details", roleId: "role-1",
+      preparationId: "preparation-1", browserSessionId: null, createdAt: "2026-09-01T10:00:00Z",
+    }, vi.fn(), vi.fn()))
+
+    const toastRoot = document.querySelector('[data-slot="toast"]')
+    act(() => vi.advanceTimersByTime(4_999))
+    expect(toastRoot).not.toHaveAttribute("data-ending-style")
+    act(() => vi.advanceTimersByTime(1))
+    expect(toastRoot).toHaveAttribute("data-ending-style")
   })
 
   it("routes Review form to the released session", () => {
@@ -51,7 +67,7 @@ describe("preparation outcome notifications", () => {
     expect(reviewForm).toHaveBeenCalledWith("session-1")
   })
 
-  it("expires ready notices after 30 seconds", () => {
+  it("expires ready notices after five seconds", () => {
     vi.useFakeTimers()
     const manager = createToastManager()
     const notices = createOutcomeNoticeController(manager)
@@ -64,10 +80,51 @@ describe("preparation outcome notifications", () => {
     }, vi.fn(), vi.fn()))
 
     const toastRoot = screen.getAllByText("Ready notice expiry")[0].closest('[data-slot="toast"]')
-    act(() => vi.advanceTimersByTime(29_999))
+    act(() => vi.advanceTimersByTime(4_999))
     expect(toastRoot).not.toHaveAttribute("data-ending-style")
     act(() => vi.advanceTimersByTime(1))
     expect(toastRoot).toHaveAttribute("data-ending-style")
+  })
+
+  it("provides an accessible close control without removing the outcome action", () => {
+    const manager = createToastManager()
+    const notices = createOutcomeNoticeController(manager)
+    render(<Toaster toastManager={manager} />)
+    act(() => notices.show({
+      id: "failure-close", eventKind: "preparation_failed", title: "Preparation failed",
+      body: "Frontend Engineer at Example Co. Browser inspect: Extension unavailable.",
+      actionKind: "view_details", actionLabel: "View details", roleId: "role-1",
+      preparationId: "preparation-1", browserSessionId: "session-1", createdAt: "2026-09-01T10:00:00Z",
+    }, vi.fn(), vi.fn()))
+
+    const toastRoot = document.querySelector('[data-slot="toast"]')
+    expect(within(toastRoot as HTMLElement).getByText("View details")).toBeInTheDocument()
+
+    fireEvent.keyDown(window, { key: "F6" })
+    const closeButton = within(toastRoot as HTMLElement).getByRole("button", { name: "Close notification" })
+    expect(closeButton).toHaveAccessibleName("Close notification")
+    fireEvent.click(closeButton)
+    expect(toastRoot).toHaveAttribute("data-ending-style")
+  })
+
+  it("deduplicates repeated delivery of the same visible outcome", () => {
+    const manager = createToastManager()
+    const notices = createOutcomeNoticeController(manager)
+    render(<Toaster toastManager={manager} />)
+    const notification = {
+      id: "failure-delivery-1", eventKind: "preparation_failed" as const, title: "Preparation failed",
+      body: "Frontend Engineer at Example Co. Browser inspect: Extension unavailable.",
+      actionKind: "view_details" as const, actionLabel: "View details" as const, roleId: "role-1",
+      preparationId: "preparation-1", browserSessionId: "session-1", createdAt: "2026-09-01T10:00:00Z",
+    }
+
+    act(() => {
+      notices.show(notification, vi.fn(), vi.fn())
+      notices.show({ ...notification, id: "failure-delivery-2" }, vi.fn(), vi.fn())
+    })
+
+    expect(document.querySelectorAll('[data-slot="toast"]')).toHaveLength(1)
+    expect(within(document.querySelector('[data-slot="toast"]') as HTMLElement).getByText("Preparation failed")).toBeInTheDocument()
   })
 })
 
@@ -76,6 +133,16 @@ function activeToastRoots() {
 }
 
 describe("dismissal notifications", () => {
+  it("does not add the outcome-only close control", () => {
+    const manager = createToastManager()
+    const notices = createDismissalNoticeController(manager)
+    render(<Toaster toastManager={manager} />)
+
+    act(() => notices.show("role-1", "Frontend Engineer", () => undefined))
+
+    expect(screen.queryByRole("button", { name: "Close notification" })).not.toBeInTheDocument()
+  })
+
   it("expires each notice after 30 seconds", () => {
     vi.useFakeTimers()
     const manager = createToastManager()

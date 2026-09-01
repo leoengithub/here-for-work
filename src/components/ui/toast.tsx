@@ -1,11 +1,15 @@
 import * as React from "react"
 import { Toast as ToastPrimitive } from "@base-ui/react/toast"
+import { Cancel01Icon } from "@hugeicons/core-free-icons"
+import { HugeiconsIcon } from "@hugeicons/react"
 
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 import type { OutcomeNotification } from "@/types"
 
 const toast = ToastPrimitive.createToastManager()
+
+const OUTCOME_TOAST_TIMEOUT = 5_000
 
 function dismissalToastId(roleId: string) {
   return `dismissal-${roleId}`
@@ -73,14 +77,22 @@ function createOutcomeNoticeController(
       onViewDetails: (preparationId: string) => void,
       onReviewForm: (sessionId: string) => void,
     ) {
-      const isFailure = notification.eventKind === "preparation_failed"
       toastManager.add({
-        id: `outcome-${notification.id}`,
+        id: [
+          "outcome",
+          notification.eventKind,
+          notification.roleId,
+          notification.preparationId,
+          notification.browserSessionId ?? "",
+          notification.title,
+          notification.body,
+        ].join("\u001f"),
         title: notification.title,
         description: notification.body,
-        type: isFailure ? "error" : "success",
+        type: notification.eventKind === "preparation_failed" ? "error" : "success",
         priority: "high",
-        timeout: isFailure ? 0 : 30_000,
+        timeout: OUTCOME_TOAST_TIMEOUT,
+        data: { dismissible: true },
         actionProps: {
           children: notification.actionLabel,
           onClick: () => {
@@ -170,6 +182,25 @@ function ToastAction({
   )
 }
 
+function ToastClose({
+  className,
+  children,
+  render = <Button variant="ghost" size="icon-sm" />,
+  ...props
+}: ToastPrimitive.Close.Props) {
+  return (
+    <ToastPrimitive.Close
+      data-slot="toast-close"
+      aria-label="Close notification"
+      render={render}
+      className={cn("toast__close", className)}
+      {...props}
+    >
+      {children ?? <HugeiconsIcon icon={Cancel01Icon} strokeWidth={2} aria-hidden="true" />}
+    </ToastPrimitive.Close>
+  )
+}
+
 function ToastList() {
   const { toasts } = ToastPrimitive.useToastManager()
 
@@ -181,6 +212,7 @@ function ToastList() {
           <ToastDescription />
         </div>
         {toastItem.actionProps ? <ToastAction /> : null}
+        {toastItem.data?.dismissible ? <ToastClose /> : null}
       </ToastContent>
     </Toast>
   ))
@@ -211,6 +243,7 @@ export {
   Toaster,
   Toast,
   ToastAction,
+  ToastClose,
   ToastContent,
   ToastDescription,
   ToastPortal,
