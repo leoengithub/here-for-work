@@ -36,8 +36,7 @@
       "icons/icon.icns"
     ],
     "resources": {
-      "../packages/career-ops-adapter/adapter.mjs": "career-ops-adapter/adapter.mjs",
-      "../packages/career-ops-adapter/preparation-transaction.mjs": "career-ops-adapter/preparation-transaction.mjs",
+      "../packages/career-ops-adapter/dist/adapter.mjs": "career-ops-adapter/adapter.mjs",
       "../contracts/provider-probe.schema.json": "contracts/provider-probe.schema.json",
       "../contracts/preparation-result.schema.json": "contracts/preparation-result.schema.json",
       "../contracts/answer-draft.schema.json": "contracts/answer-draft.schema.json",
