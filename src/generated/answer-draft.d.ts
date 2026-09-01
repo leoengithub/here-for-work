@@ -13,8 +13,13 @@ export interface HereForWorkGroundedApplicationAnswerDraft {
    */
   answers: {
     fieldId: string;
+    /**
+     * A source-grounded candidate answer or null. Narrative text remains an editable draft pending human review.
+     */
     answer: string | null;
     /**
+     * Supplied career-ops source paths supporting the answer; empty when answer is null.
+     *
      * @maxItems 12
      */
     provenance: string[];

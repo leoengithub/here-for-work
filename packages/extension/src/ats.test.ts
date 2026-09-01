@@ -32,6 +32,7 @@ describe("ATS trust boundary", () => {
   it("allows verified CV identity facts while keeping declarations sensitive", () => {
     expect(classifyField("Phone", "tel").classification).toBe("safe_verified");
     expect(classifyField("Will you require sponsorship?", "select").classification).toBe("sensitive");
+    expect(classifyField("Expected annual salary (EUR)", "number").classification).toBe("compensation");
     expect(classifyField("Name", "text").classification).toBe("safe_verified");
     expect(classifyField("Email", "email").classification).toBe("safe_verified");
     expect(classifyField("", "email").classification).toBe("safe_verified");
@@ -41,6 +42,8 @@ describe("ATS trust boundary", () => {
     expect(classifyField("Portfolio website", "url").classification).toBe("safe_verified");
     expect(classifyField("Resume / CV", "file").classification).toBe("safe_verified");
     expect(classifyField("Cover letter", "file").classification).toBe("unsupported");
+    expect(classifyField("Tell us about a front-end problem you solved", "textarea").classification).toBe("grounded_narrative");
+    expect(classifyField("Why are you interested in working at Example Co?", "textarea").classification).toBe("grounded_narrative");
     expect(classifyField("Tell us something", "textarea").classification).toBe("unknown");
   });
 
@@ -65,7 +68,7 @@ describe("ATS trust boundary", () => {
       "full-name", "contact", "declaration", "motivation", "answer",
     ]);
     expect(snapshot.fields.map((field) => field.classification)).toEqual([
-      "safe_verified", "safe_verified", "unverifiable", "unknown", "unknown",
+      "safe_verified", "safe_verified", "unverifiable", "grounded_narrative", "unknown",
     ]);
     expect(snapshot.fields.some((field) => field.inputType === "submit")).toBe(false);
   });
@@ -148,7 +151,7 @@ describe("ATS trust boundary", () => {
     const hash = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
     const upload: FileUploadInstruction = {
       fieldId: "resume",
-      fileName: "HereForWork-tailored-CV.pdf",
+      fileName: "Leonardo_Gomez_Frontend_Engineer.pdf",
       mimeType: "application/pdf",
       contentBase64: btoa(String.fromCharCode(...bytes)),
       sha256: hash,
@@ -173,7 +176,7 @@ describe("ATS trust boundary", () => {
 
     expect(results).toEqual([{ fieldId: "resume", status: "verified", reason: null }]);
     expect(results.filter((item) => item.fieldId === "resume")).toHaveLength(1);
-    expect(doc.querySelector<HTMLInputElement>("#resume")?.files?.item(0)?.name).toBe("HereForWork-tailored-CV.pdf");
+    expect(doc.querySelector<HTMLInputElement>("#resume")?.files?.item(0)?.name).toBe("Leonardo_Gomez_Frontend_Engineer.pdf");
   });
 
   it("preserves a CV the user already selected", async () => {
@@ -189,7 +192,7 @@ describe("ATS trust boundary", () => {
     });
     const upload: FileUploadInstruction = {
       fieldId: "resume",
-      fileName: "HereForWork-tailored-CV.pdf",
+      fileName: "Leonardo_Gomez_Frontend_Engineer.pdf",
       mimeType: "application/pdf",
       contentBase64: "",
       sha256: "a".repeat(64),
@@ -208,6 +211,53 @@ describe("ATS trust boundary", () => {
       reason: "The CV already selected by the user was preserved.",
     }]);
     expect(element.files?.item(0)?.name).toBe("my-selected-cv.pdf");
+  });
+
+  it("fills grounded drafts, verified country, and a structured canonical salary for review", async () => {
+    const doc = fixture("prep10");
+    const snapshot = await inspectForm(doc, new URL("https://careers.example.com/apply/42"));
+    expect(snapshot.fields.map((field) => field.classification)).toEqual([
+      "grounded_narrative",
+      "grounded_narrative",
+      "safe_verified",
+      "compensation",
+      "safe_verified",
+    ]);
+    expect(snapshot.fields[0]).toMatchObject({ language: "en", maxLength: 600, maxWords: 100, minSentences: 2, maxSentences: 3 });
+    expect(snapshot.fields.some((field) => field.inputType === "submit")).toBe(false);
+
+    const bytes = Uint8Array.from([37, 80, 68, 70, 45, 49]);
+    const digest = await crypto.subtle.digest("SHA-256", bytes);
+    const hash = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+    const results = await applyFillPlan({
+      protocolVersion: 1,
+      snapshotFingerprint: snapshot.fingerprint,
+      instructions: [
+        { fieldId: "frontend-story", value: "I traced a slow rendering path to duplicated requests. I reduced the critical work and improved the experience.", classification: "grounded_draft" },
+        { fieldId: "company-interest", value: "The role aligns with my verified frontend product work.", classification: "grounded_draft" },
+        { fieldId: "work-country", value: "Spain", classification: "safe_verified" },
+        { fieldId: "salary", value: "52000", classification: "canonical_preference" },
+      ],
+    } as unknown as FillPlan, snapshot.fingerprint, doc, [{
+      fieldId: "resume",
+      fileName: "Leonardo_Gomez_Frontend_Engineer.pdf",
+      mimeType: "application/pdf",
+      contentBase64: btoa(String.fromCharCode(...bytes)),
+      sha256: hash,
+      classification: "safe_verified",
+    }], (element, file) => {
+      Object.defineProperty(element, "files", {
+        configurable: true,
+        value: { 0: file, length: 1, item: () => file },
+      });
+    });
+
+    expect(results.map((item) => item.status)).toEqual(["verified", "verified", "verified", "verified", "verified"]);
+    expect(doc.querySelector<HTMLTextAreaElement>("#frontend-story")?.value).toContain("slow rendering path");
+    expect(doc.querySelector<HTMLTextAreaElement>("#company-interest")?.value).toContain("frontend product work");
+    expect(doc.querySelector<HTMLSelectElement>("#work-country")?.value).toBe("Spain");
+    expect(doc.querySelector<HTMLInputElement>("#salary")?.value).toBe("52000");
+    expect(doc.querySelector<HTMLInputElement>("#resume")?.files?.item(0)?.name).toBe("Leonardo_Gomez_Frontend_Engineer.pdf");
   });
 
   it("guards the terminal control only until release", () => {

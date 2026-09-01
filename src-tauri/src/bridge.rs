@@ -13,6 +13,7 @@ use sha2::{Digest, Sha256};
 use tauri::Manager;
 
 use crate::AppState;
+use crate::PUBLIC_CV_FILENAME;
 use crate::domain::BrowserInspection;
 
 const MAX_MESSAGE_BYTES: u64 = 1_048_576;
@@ -170,7 +171,7 @@ fn materialize_browser_payload(root: &Path, payload: &mut Value) -> Result<(), &
     }
     let upload = json!({
         "fieldId": field_id,
-        "fileName": "HereForWork-tailored-CV.pdf",
+        "fileName": PUBLIC_CV_FILENAME,
         "mimeType": "application/pdf",
         "contentBase64": STANDARD.encode(bytes),
         "sha256": expected_hash,
@@ -201,8 +202,14 @@ struct FormField {
     label: String,
     control: String,
     input_type: String,
+    input_mode: Option<String>,
     required: bool,
     options: Vec<String>,
+    language: Option<String>,
+    max_length: Option<u32>,
+    max_words: Option<u32>,
+    min_sentences: Option<u32>,
+    max_sentences: Option<u32>,
     classification: String,
     reason: String,
 }
@@ -404,8 +411,35 @@ fn validate_form_snapshot(value: Value) -> Result<FormSnapshot, &'static str> {
             || !matches!(field.control.as_str(), "input" | "textarea" | "select")
             || !matches!(
                 field.classification.as_str(),
-                "safe_verified" | "sensitive" | "unknown" | "unsupported" | "unverifiable"
+                "safe_verified"
+                    | "grounded_narrative"
+                    | "compensation"
+                    | "sensitive"
+                    | "unknown"
+                    | "unsupported"
+                    | "unverifiable"
             )
+            || field
+                .input_mode
+                .as_ref()
+                .is_some_and(|value| value.len() > 50)
+            || field
+                .language
+                .as_ref()
+                .is_some_and(|value| value.len() > 35)
+            || field
+                .max_length
+                .is_some_and(|value| value == 0 || value > 12_000)
+            || field
+                .max_words
+                .is_some_and(|value| value == 0 || value > 3_000)
+            || field
+                .min_sentences
+                .is_some_and(|value| value == 0 || value > 50)
+            || field
+                .max_sentences
+                .is_some_and(|value| value == 0 || value > 50)
+            || matches!((field.min_sentences, field.max_sentences), (Some(minimum), Some(maximum)) if minimum > maximum)
         {
             return Err("invalid_form_snapshot");
         }
@@ -512,7 +546,7 @@ mod tests {
                 "fieldId": "resume",
                 "relativePath": relative,
                 "sha256": hash,
-                "fileName": "HereForWork-tailored-CV.pdf",
+                "fileName": "Leonardo_Gomez_Frontend_Engineer.pdf",
                 "mimeType": "application/pdf",
                 "classification": "safe_verified"
             }
@@ -568,6 +602,30 @@ mod tests {
         let mut unknown_classification = valid;
         unknown_classification["fields"][0]["classification"] = json!("auto_submit");
         assert!(super::validate_form_snapshot(unknown_classification).is_err());
+
+        let grounded = json!({
+            "protocolVersion": 1,
+            "ats": "generic",
+            "url": "https://careers.example.com/acme/role",
+            "title": "Frontend Engineer",
+            "fields": [{
+                "id": "story",
+                "label": "Tell us about a front-end problem you solved",
+                "control": "textarea",
+                "inputType": "textarea",
+                "required": true,
+                "options": [],
+                "language": "en",
+                "maxLength": 600,
+                "maxWords": 100,
+                "minSentences": 2,
+                "maxSentences": 3,
+                "classification": "grounded_narrative",
+                "reason": "Grounded draft pending review."
+            }],
+            "fingerprint": "b".repeat(64)
+        });
+        assert!(super::validate_form_snapshot(grounded).is_ok());
     }
 
     #[test]

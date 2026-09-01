@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <form>
+      <label for="frontend-story">Tell us about a front-end problem you solved that you're proud of and why? (2-3 sentences)</label>
+      <p id="frontend-story-limit">Up to 100 words.</p>
+      <textarea id="frontend-story" maxlength="600" aria-describedby="frontend-story-limit"></textarea>
+
+      <label for="company-interest">Why are you interested in working at Example Co?</label>
+      <textarea id="company-interest" maxlength="400"></textarea>
+
+      <label for="work-country">Which country will you work from?</label>
+      <select id="work-country">
+        <option value="">Select one</option>
+        <option value="Portugal">Portugal</option>
+        <option value="Spain">Spain</option>
+      </select>
+
+      <label for="salary">Expected annual salary (EUR)</label>
+      <input id="salary" type="number" inputmode="numeric">
+
+      <label for="resume">Resume / CV</label>
+      <input id="resume" type="file" accept="application/pdf">
+
+      <button type="submit">Submit application</button>
+    </form>
+  </body>
+</html>

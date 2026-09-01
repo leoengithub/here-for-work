@@ -7,7 +7,23 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 const adapter = fileURLToPath(new URL("./adapter.mjs", import.meta.url));
-const { contextHash, fetchJob } = await import("./adapter.mjs");
+const { compensationApplicationAnswer, contextHash, fetchJob } = await import("./adapter.mjs");
+
+test("structured compensation preferences reject prose, conversion, and invalid ranges", () => {
+  const source = (value) => [{ relativePath: "config/profile.yml", value }];
+  const valid = `compensation:\n  application_answer:\n    currency: EUR\n    basis: gross\n    period: annual\n    minimum: 50000\n    maximum: 55000\n    single_value: 52000\n    modalities: [employee, eor, contractor, b2b]\n    allow_currency_conversion: false\n    allow_period_conversion: false\n`;
+  assert.deepEqual(compensationApplicationAnswer(source(valid)), {
+    currency: "EUR",
+    minimum: 50000,
+    maximum: 55000,
+    single: 52000,
+    provenance: ["config/profile.yml:compensation.application_answer"],
+  });
+  assert.equal(compensationApplicationAnswer(source('compensation:\n  target_range: "EUR 50,000-55,000 gross annual"\n')), null);
+  assert.equal(compensationApplicationAnswer(source(valid.replace("allow_currency_conversion: false", "allow_currency_conversion: true"))), null);
+  assert.equal(compensationApplicationAnswer(source(valid.replace("single_value: 52000", "single_value: 56000"))), null);
+  assert.equal(compensationApplicationAnswer(source(`${valid}    unexpected: 1\n`)), null);
+});
 
 function request(payload, env = {}) {
   return new Promise((resolve, reject) => {
@@ -193,10 +209,31 @@ target_roles:
       level: "Experienced"
       fit: "primary"
 compensation:
+  target_range: "50,000–55,000 gross annual"
+  currency: "EUR"
+  application_answer:
+    currency: "EUR"
+    basis: "gross"
+    period: "annual"
+    minimum: 50000
+    maximum: 55000
+    single_value: 52000
+    modalities: ["employee", "eor", "contractor", "b2b"]
+    allow_currency_conversion: false
+    allow_period_conversion: false
   location_flexibility: "Target geography: Spain first, followed by Lisbon. Remote roles are an active search lane when they provide sponsorship or another authorization path."
 location:
   country: "Spain"
   city: "Madrid"
+`);
+  await writeFile(join(root, "modes/_profile.md"), `# Verified profile policy
+## Your Comp Targets
+Approved compensation preference:
+- Currency: EUR. Basis: gross annual.
+- Target range: EUR 50,000–55,000.
+- When an EUR annual form requires one number, use EUR 52,000.
+- Apply this preference to any engagement modality.
+- Do not invent currency conversions or period conversions.
 `);
   await writeFile(join(root, "config/cv-facts.json"), "{\"allow_metrics\":[],\"allow_facts\":[],\"forbidden_phrases\":[],\"warn_phrases\":[]}\n");
   await writeFile(join(root, "providers/_http.mjs"), "export async function fetchJson() { return {}; }\n");
@@ -462,8 +499,12 @@ test("provider-neutral preparation commits only through fixed career-ops writers
     fingerprint: "d".repeat(64),
     fields: [
       { id: "email", label: "Email", control: "input", inputType: "email", required: true, options: [], classification: "safe_verified", reason: "Verified profile fact." },
-      { id: "why", label: "Why this role?", control: "textarea", inputType: "textarea", required: true, options: [], classification: "unknown", reason: "Needs grounded drafting." },
+      { id: "why", label: "Why are you interested in working at Example Co? (2-3 sentences)", control: "textarea", inputType: "textarea", required: true, options: [], language: "en", maxLength: 400, maxWords: 60, minSentences: 2, maxSentences: 3, classification: "grounded_narrative", reason: "Needs grounded drafting." },
       { id: "phone", label: "Phone", control: "input", inputType: "tel", required: false, options: [], classification: "safe_verified", reason: "Verified profile fact." },
+      { id: "country", label: "Which country will you work from?", control: "select", inputType: "select", required: true, options: ["Portugal", "Spain"], classification: "safe_verified", reason: "Verified profile fact." },
+      { id: "salary", label: "Expected annual salary (EUR)", control: "input", inputType: "number", inputMode: "numeric", required: false, options: [], classification: "compensation", reason: "Canonical compensation preference." },
+      { id: "monthlySalary", label: "Expected monthly salary (EUR)", control: "input", inputType: "number", inputMode: "numeric", required: false, options: [], classification: "compensation", reason: "Canonical compensation preference has no monthly conversion." },
+      { id: "usdSalary", label: "Expected annual salary (USD)", control: "input", inputType: "number", inputMode: "numeric", required: false, options: [], classification: "compensation", reason: "Canonical compensation preference has no USD conversion." },
       { id: "unlabeled", label: "", control: "input", inputType: "text", required: false, options: [], classification: "unknown", reason: "No visible label." },
     ],
   };
@@ -474,14 +515,21 @@ test("provider-neutral preparation commits only through fixed career-ops writers
     input: { preparationId, reportPath: commit.result.artifacts.report.path, snapshot },
   }, fixture.env);
   assert.equal(answerContext.ok, true);
+  assert.match(answerContext.result.prompt, /grounded_narrative/);
+  assert.match(answerContext.result.prompt, /minSentences/);
+  assert.match(answerContext.result.prompt, /pending human review/);
   const answerResult = {
     contractVersion: 1,
     contextHash: answerContext.result.contextHash,
     answers: [
       { fieldId: "email", answer: "untrusted-model@example.test", provenance: ["config/profile.yml"] },
-      { fieldId: "why", answer: "The role matches my verified React and accessibility work.", provenance: ["cv.md", "reports/042-example-co-2026-08-30.md"] },
+      { fieldId: "why", answer: "The role matches my verified React and accessibility work. Its product scope also matches my source-backed frontend experience.", provenance: ["cv.md", "reports/042-example-co-2026-08-30.md"] },
       { fieldId: "phone", answer: "+34 600 000 000", provenance: ["config/profile.yml"] },
-      { fieldId: "unlabeled", answer: null, provenance: [] },
+      { fieldId: "country", answer: "Portugal", provenance: ["config/profile.yml"] },
+      { fieldId: "salary", answer: "52000", provenance: ["config/profile.yml"] },
+      { fieldId: "monthlySalary", answer: "4333", provenance: ["config/profile.yml"] },
+      { fieldId: "usdSalary", answer: "60000", provenance: ["config/profile.yml"] },
+      { fieldId: "unlabeled", answer: "Provider output must not promote an unknown field.", provenance: ["cv.md"] },
     ],
   };
   const answers = await request({
@@ -493,10 +541,64 @@ test("provider-neutral preparation commits only through fixed career-ops writers
   assert.equal(answers.ok, true);
   assert.deepEqual(answers.result.fillPlan.instructions, [
     { fieldId: "email", value: "test@example.test", classification: "safe_verified" },
+    { fieldId: "why", value: "The role matches my verified React and accessibility work. Its product scope also matches my source-backed frontend experience.", classification: "grounded_draft" },
     { fieldId: "phone", value: "+34 600 000 000", classification: "safe_verified" },
+    { fieldId: "country", value: "Spain", classification: "safe_verified" },
+    { fieldId: "salary", value: "52000", classification: "canonical_preference" },
   ]);
-  assert.equal(answers.result.reviewItems.find((item) => item.fieldId === "why").decision, "suggest");
+  assert.deepEqual(answers.result.reviewItems.find((item) => item.fieldId === "why"), {
+    fieldId: "why",
+    label: "Why are you interested in working at Example Co? (2-3 sentences)",
+    decision: "fill_draft",
+    answer: "The role matches my verified React and accessibility work. Its product scope also matches my source-backed frontend experience.",
+    provenance: ["cv.md", "reports/042-example-co-2026-08-30.md"],
+    draftPolicy: { language: "en", maxLength: 400, maxWords: 60, minSentences: 2, maxSentences: 3 },
+  });
   assert.equal(answers.result.reviewItems.find((item) => item.fieldId === "phone").decision, "fill");
+  assert.equal(answers.result.reviewItems.find((item) => item.fieldId === "country").answer, "Spain");
+  assert.deepEqual(answers.result.reviewItems.find((item) => item.fieldId === "salary"), {
+    fieldId: "salary",
+    label: "Expected annual salary (EUR)",
+    decision: "fill_preference",
+    answer: "52000",
+    provenance: ["config/profile.yml:compensation.application_answer"],
+  });
+  assert.equal(answers.result.reviewItems.find((item) => item.fieldId === "monthlySalary").decision, "skip");
+  assert.equal(answers.result.reviewItems.find((item) => item.fieldId === "usdSalary").decision, "skip");
+  assert.equal(answers.result.reviewItems.find((item) => item.fieldId === "unlabeled").answer, null);
+
+  const unsupportedProvenance = structuredClone(answerResult);
+  unsupportedProvenance.answers.find((item) => item.fieldId === "why").provenance = ["modes/apply.md"];
+  const provenanceRejected = await request({
+    id: "answer-validate-provenance",
+    protocolVersion: 1,
+    operation: "answers.result.validate",
+    input: { preparationId, reportPath: commit.result.artifacts.report.path, snapshot, result: unsupportedProvenance },
+  }, fixture.env);
+  assert.equal(provenanceRejected.result.reviewItems.find((item) => item.fieldId === "why").decision, "skip");
+  assert.equal(provenanceRejected.result.fillPlan.instructions.some((item) => item.fieldId === "why"), false);
+
+  const overlongDraft = structuredClone(answerResult);
+  overlongDraft.answers.find((item) => item.fieldId === "why").answer = "verified ".repeat(61).trim();
+  const lengthRejected = await request({
+    id: "answer-validate-length",
+    protocolVersion: 1,
+    operation: "answers.result.validate",
+    input: { preparationId, reportPath: commit.result.artifacts.report.path, snapshot, result: overlongDraft },
+  }, fixture.env);
+  assert.equal(lengthRejected.result.reviewItems.find((item) => item.fieldId === "why").decision, "skip");
+  assert.equal(lengthRejected.result.fillPlan.instructions.some((item) => item.fieldId === "why"), false);
+
+  const tooFewSentences = structuredClone(answerResult);
+  tooFewSentences.answers.find((item) => item.fieldId === "why").answer = "I improved a verified path from 2.5 seconds to 1.2 seconds.";
+  const sentenceRejected = await request({
+    id: "answer-validate-sentences",
+    protocolVersion: 1,
+    operation: "answers.result.validate",
+    input: { preparationId, reportPath: commit.result.artifacts.report.path, snapshot, result: tooFewSentences },
+  }, fixture.env);
+  assert.equal(sentenceRejected.result.reviewItems.find((item) => item.fieldId === "why").decision, "skip");
+  assert.equal(sentenceRejected.result.fillPlan.instructions.some((item) => item.fieldId === "why"), false);
 
   const answerCommit = await request({
     id: "answer-commit",
@@ -509,8 +611,12 @@ test("provider-neutral preparation commits only through fixed career-ops writers
       reviewItems: answers.result.reviewItems,
       fillResults: [
         { fieldId: "email", status: "verified", reason: null },
-        { fieldId: "why", status: "skipped", reason: "User review required." },
+        { fieldId: "why", status: "verified", reason: null },
         { fieldId: "phone", status: "verified", reason: null },
+        { fieldId: "country", status: "verified", reason: null },
+        { fieldId: "salary", status: "verified", reason: null },
+        { fieldId: "monthlySalary", status: "skipped", reason: "No canonical monthly conversion." },
+        { fieldId: "usdSalary", status: "skipped", reason: "No canonical USD conversion." },
         { fieldId: "unlabeled", status: "skipped", reason: "No visible label." },
       ],
       cvPdfPath: commit.result.artifacts.cvPdf.path,
@@ -524,6 +630,10 @@ test("provider-neutral preparation commits only through fixed career-ops writers
   assert.match(reportWithAnswers, /\*\*Email:\*\* test@example\.test/);
   assert.match(reportWithAnswers, /verified React and accessibility work/);
   assert.match(reportWithAnswers, /\*\*Phone:\*\* \+34 600 000 000/);
+  assert.match(reportWithAnswers, /\*\*Which country will you work from\?:\*\* Spain/);
+  assert.match(reportWithAnswers, /\*\*Expected annual salary \(EUR\):\*\* 52000/);
+  assert.doesNotMatch(reportWithAnswers, /4333|60000/);
+  assert.doesNotMatch(reportWithAnswers, /Provider output must not promote/);
   assert.doesNotMatch(reportWithAnswers, /\*\*:\*\*/);
 
   const cleanup = await request({

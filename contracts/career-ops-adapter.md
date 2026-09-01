@@ -77,8 +77,14 @@ The extension keeps provider execution separate from canonical writes:
    live, typed form snapshot. Job and form text remains marked as untrusted data.
 6. HereForWork invokes the selected provider against that bounded context.
 7. `answers.result.validate` returns only classified field instructions with
-   provenance. It rejects stale snapshots and never writes to a browser.
-8. After safe fields are read back, `answers.result.commit` accepts only the
+   provenance. Direct facts remain `safe_verified`; source-grounded narrative
+   answers are separately marked `grounded_draft`, carry their form-language and
+   detected length policy, and remain pending human review. Canonical compensation
+   preferences are separately marked `canonical_preference` and come only from the
+   strictly validated career-ops `compensation.application_answer` YAML structure.
+   The adapter does not scrape prose or infer conversions. It rejects stale
+   snapshots and never writes to a browser.
+8. After classified fills are read back, `answers.result.commit` accepts only the
    bounded review items and verification results for that context hash. It
    invokes career-ops' fixed `application-answers.mjs` writer and returns the
    updated report hash.
@@ -104,6 +110,9 @@ rechecks the root boundary, size, and hash and materializes bytes only in the tr
 message to the approved extension; HereForWork does not store those PDF bytes. The
 extension preserves any file already selected by the user and skips ambiguous controls,
 non-PDF controls, unsupported attachment types, or unverifiable inputs.
+The public upload filename is `Leonardo_Gomez_Frontend_Engineer.pdf` for both
+tailored and reviewed-fallback artifacts; internal provenance continues to distinguish
+`tailored_generated` from `user_reviewed_fallback`.
 
 ### Compensating preparation transaction
 

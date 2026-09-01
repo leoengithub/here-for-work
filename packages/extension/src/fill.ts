@@ -69,8 +69,10 @@ export async function applyFillPlan(
   const uploadFieldIds = new Set(uploads.map((upload) => upload.fieldId));
   for (const instruction of plan.instructions) {
     if (uploadFieldIds.has(instruction.fieldId)) continue;
-    if (instruction.classification !== "safe_verified") {
-      results.push({ fieldId: instruction.fieldId, status: "skipped", reason: "Only safe verified fields may be filled." });
+    if (instruction.classification !== "safe_verified"
+        && instruction.classification !== "grounded_draft"
+        && instruction.classification !== "canonical_preference") {
+      results.push({ fieldId: instruction.fieldId, status: "skipped", reason: "Only verified facts, career-ops-grounded drafts, or structured canonical preferences may be filled." });
       continue;
     }
     const element = Array.from(
@@ -96,7 +98,7 @@ export async function applyFillPlan(
         || upload.mimeType !== "application/pdf"
         || !upload.fileName.toLowerCase().endsWith(".pdf")
         || !/^[a-f0-9]{64}$/.test(upload.sha256)) {
-      results.push({ fieldId: upload.fieldId, status: "skipped", reason: "Only a verified tailored PDF may be attached." });
+      results.push({ fieldId: upload.fieldId, status: "skipped", reason: "Only a manifest-verified career-ops PDF may be attached." });
       continue;
     }
     const element = Array.from(doc.querySelectorAll<HTMLInputElement>("input[type=file][data-hfw-field-id]"))

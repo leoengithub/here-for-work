@@ -18,12 +18,14 @@
         "properties": {
           "fieldId": { "type": "string", "minLength": 1, "maxLength": 500 },
           "answer": {
+            "description": "A source-grounded candidate answer or null. Narrative text remains an editable draft pending human review.",
             "anyOf": [
               { "type": "string", "maxLength": 12000 },
               { "type": "null" }
             ]
           },
           "provenance": {
+            "description": "Supplied career-ops source paths supporting the answer; empty when answer is null.",
             "type": "array",
             "maxItems": 12,
             "items": { "type": "string", "minLength": 1, "maxLength": 500 }

@@ -22,6 +22,8 @@ use tauri::Manager;
 use tauri_plugin_autostart::ManagerExt;
 use tauri_plugin_notification::NotificationExt;
 
+pub(crate) const PUBLIC_CV_FILENAME: &str = "Leonardo_Gomez_Frontend_Engineer.pdf";
+
 struct AppState {
     store: Mutex<Store>,
     adapter: AdapterConfig,
@@ -904,7 +906,7 @@ fn verified_cv_upload_descriptor(
         "fieldId": field_id,
         "relativePath": work.cv_pdf_path,
         "sha256": work.cv_pdf_hash,
-        "fileName": "HereForWork-tailored-CV.pdf",
+        "fileName": PUBLIC_CV_FILENAME,
         "mimeType": "application/pdf",
         "classification": "safe_verified"
     })))

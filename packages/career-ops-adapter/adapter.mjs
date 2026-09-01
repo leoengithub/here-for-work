@@ -14,6 +14,7 @@ import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { dirname, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { parseDocument } from "yaml";
 import {
   commitPreparationTransaction,
   reviewedCvFallbackReady,
@@ -648,7 +649,14 @@ function validateSnapshot(snapshot) {
     if (typeof field.id !== "string" || field.id.length < 1 || field.id.length > 500 || ids.has(field.id)) throw new Error("snapshot field id is invalid or duplicated.");
     ids.add(field.id);
     if (typeof field.label !== "string" || field.label.length > 2_000) throw new Error("snapshot field label is invalid.");
-    if (!["safe_verified", "sensitive", "unknown", "unsupported", "unverifiable"].includes(field.classification)) throw new Error("snapshot field classification is invalid.");
+    if (!["safe_verified", "grounded_narrative", "compensation", "sensitive", "unknown", "unsupported", "unverifiable"].includes(field.classification)) throw new Error("snapshot field classification is invalid.");
+    if (field.inputMode !== undefined && field.inputMode !== null && (typeof field.inputMode !== "string" || field.inputMode.length > 50)) throw new Error("snapshot field input mode is invalid.");
+    if (field.language !== undefined && field.language !== null && (typeof field.language !== "string" || field.language.length > 35)) throw new Error("snapshot field language is invalid.");
+    if (field.maxLength !== undefined && field.maxLength !== null && (!Number.isInteger(field.maxLength) || field.maxLength < 1 || field.maxLength > 12_000)) throw new Error("snapshot field character limit is invalid.");
+    if (field.maxWords !== undefined && field.maxWords !== null && (!Number.isInteger(field.maxWords) || field.maxWords < 1 || field.maxWords > 3_000)) throw new Error("snapshot field word limit is invalid.");
+    if (field.minSentences !== undefined && field.minSentences !== null && (!Number.isInteger(field.minSentences) || field.minSentences < 1 || field.minSentences > 50)) throw new Error("snapshot field minimum sentence count is invalid.");
+    if (field.maxSentences !== undefined && field.maxSentences !== null && (!Number.isInteger(field.maxSentences) || field.maxSentences < 1 || field.maxSentences > 50)) throw new Error("snapshot field maximum sentence count is invalid.");
+    if (Number.isInteger(field.minSentences) && Number.isInteger(field.maxSentences) && field.minSentences > field.maxSentences) throw new Error("snapshot field sentence range is invalid.");
   }
   return snapshot;
 }
@@ -693,7 +701,9 @@ Safety and authority contract:
 - Use only the supplied career-ops sources for candidate facts. Do not use tools, files, memory, or outside facts.
 - Return exactly one answer item for every field id and no others.
 - Use null when an answer is sensitive, unknown, unsupported, unverifiable, or lacks explicit source evidence. Never guess.
+- Use null for compensation fields. The adapter resolves them only from career-ops' strictly validated compensation.application_answer structure; do not infer values by parsing prose.
 - Provenance names the supplied career-ops source paths that support the answer. It never cites the form itself as candidate evidence.
+- A field classified grounded_narrative may receive an editable draft only when every claim is grounded in the prepared report, cv.md, config/profile.yml, modes/_profile.md, modes/_custom.md, or article-digest.md. Instruction and heuristic files are not factual provenance. Follow that field's language, maxLength, maxWords, minSentences, and maxSentences when present. The draft remains pending human review and is not a newly verified fact.
 - Do not submit, send, navigate, click, or provide instructions to finalize the form.
 - Return only the JSON object required by the response schema.
 
@@ -751,6 +761,118 @@ function verifiedAnswerFromSources(answer, sources) {
   return { value: answer.answer.trim(), provenance: answer.provenance };
 }
 
+function countSentences(value, language) {
+  try {
+    return [...new Intl.Segmenter(language || "en", { granularity: "sentence" }).segment(value)]
+      .filter(({ segment }) => /[\p{L}\p{N}]/u.test(segment)).length;
+  } catch {
+    return value.match(/[^.!?]+(?:[.!?]+|$)/gu)?.filter((sentence) => sentence.trim()).length ?? 0;
+  }
+}
+
+function groundedDraftFromSources(answer, field, sources) {
+  if (!answer || typeof answer.answer !== "string" || !answer.answer.trim()) return null;
+  if (!Array.isArray(answer.provenance) || answer.provenance.length === 0) return null;
+  const groundingSources = sources.filter((source) => source.relativePath.startsWith("reports/")
+    || ["cv.md", "config/profile.yml", "modes/_profile.md", "modes/_custom.md", "article-digest.md"].includes(source.relativePath));
+  const validProvenance = answer.provenance.every((entry) => {
+    if (typeof entry !== "string" || !entry.trim()) return false;
+    return groundingSources.some((source) => entry === source.relativePath || entry.startsWith(`${source.relativePath}:`));
+  });
+  if (!validProvenance) return null;
+  const value = answer.answer.trim();
+  if (Number.isInteger(field.maxLength) && value.length > field.maxLength) return null;
+  const wordCount = value.split(/\s+/u).filter(Boolean).length;
+  if (Number.isInteger(field.maxWords) && wordCount > field.maxWords) return null;
+  const sentenceCount = countSentences(value, field.language);
+  if (Number.isInteger(field.minSentences) && sentenceCount < field.minSentences) return null;
+  if (Number.isInteger(field.maxSentences) && sentenceCount > field.maxSentences) return null;
+  return {
+    value,
+    provenance: answer.provenance,
+    draftPolicy: {
+      language: typeof field.language === "string" && field.language.trim() ? field.language.trim() : null,
+      maxLength: Number.isInteger(field.maxLength) ? field.maxLength : null,
+      maxWords: Number.isInteger(field.maxWords) ? field.maxWords : null,
+      minSentences: Number.isInteger(field.minSentences) ? field.minSentences : null,
+      maxSentences: Number.isInteger(field.maxSentences) ? field.maxSentences : null,
+    },
+  };
+}
+
+export function compensationApplicationAnswer(sources) {
+  const raw = sources.find((source) => source.relativePath === "config/profile.yml")?.value;
+  if (typeof raw !== "string") return null;
+  let profile;
+  try {
+    const document = parseDocument(raw, {
+      schema: "core",
+      merge: false,
+      uniqueKeys: true,
+      maxAliasCount: 0,
+    });
+    if (document.errors.length > 0) return null;
+    profile = document.toJS({ maxAliasCount: 0 });
+  } catch {
+    return null;
+  }
+  const preference = profile?.compensation?.application_answer;
+  if (!preference || typeof preference !== "object" || Array.isArray(preference)) return null;
+  const keys = [
+    "currency",
+    "basis",
+    "period",
+    "minimum",
+    "maximum",
+    "single_value",
+    "modalities",
+    "allow_currency_conversion",
+    "allow_period_conversion",
+  ];
+  if (Object.keys(preference).some((key) => !keys.includes(key)) || keys.some((key) => !(key in preference))) return null;
+  const currency = typeof preference.currency === "string" ? preference.currency.trim() : "";
+  const modalities = preference.modalities;
+  const allowedModalities = ["employee", "eor", "contractor", "b2b"];
+  if (!/^[A-Z]{3}$/.test(currency)
+      || preference.basis !== "gross"
+      || preference.period !== "annual"
+      || ![preference.minimum, preference.maximum, preference.single_value]
+        .every((value) => Number.isSafeInteger(value) && value > 0)
+      || preference.minimum > preference.maximum
+      || preference.single_value < preference.minimum
+      || preference.single_value > preference.maximum
+      || !Array.isArray(modalities)
+      || modalities.length !== allowedModalities.length
+      || new Set(modalities).size !== allowedModalities.length
+      || modalities.some((value) => !allowedModalities.includes(value))
+      || preference.allow_currency_conversion !== false
+      || preference.allow_period_conversion !== false) return null;
+  return {
+    currency,
+    minimum: preference.minimum,
+    maximum: preference.maximum,
+    single: preference.single_value,
+    provenance: ["config/profile.yml:compensation.application_answer"],
+  };
+}
+
+function canonicalCompensationForField(field, sources) {
+  const preference = compensationApplicationAnswer(sources);
+  if (!preference) return null;
+  const semantic = `${field.label ?? ""} ${(field.options ?? []).join(" ")}`;
+  const escapedCurrency = preference.currency.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  if (!new RegExp(`\\b${escapedCurrency}\\b`, "i").test(semantic)
+      || !/\b(?:annual|yearly|per annum|per year)\b/i.test(semantic)
+      || /\bnet\b/i.test(semantic)) return null;
+  let value = String(preference.single);
+  if (/\b(?:minimum|min\.?)\b/i.test(semantic)) value = String(preference.minimum);
+  else if (/\b(?:maximum|max\.?)\b/i.test(semantic)) value = String(preference.maximum);
+  else if (/\b(?:range|from\s+.+\s+to)\b/i.test(semantic) && field.inputType !== "number" && field.inputMode !== "numeric") {
+    value = `${preference.minimum}-${preference.maximum}`;
+  }
+  return { value, provenance: preference.provenance };
+}
+
 function validateAnswerResult(result, expectedHash, snapshot, sources) {
   if (!result || typeof result !== "object" || Array.isArray(result)) throw new Error("Answer result must be an object.");
   if (Object.keys(result).some((key) => !["contractVersion", "contextHash", "answers"].includes(key))) throw new Error("Answer result contains an unknown field.");
@@ -778,7 +900,20 @@ function validateAnswerResult(result, expectedHash, snapshot, sources) {
       reviewItems.push({ fieldId: field.id, label: field.label, decision: "fill", answer: verifiedValue, provenance: [`config/profile.yml:${factKey}`] });
       continue;
     }
-    const suggested = typeof answer.answer === "string" && answer.answer.trim() ? answer.answer.trim() : null;
+    const compensation = field.classification === "compensation"
+      ? canonicalCompensationForField(field, sources)
+      : null;
+    if (compensation) {
+      instructions.push({ fieldId: field.id, value: compensation.value, classification: "canonical_preference" });
+      reviewItems.push({
+        fieldId: field.id,
+        label: field.label,
+        decision: "fill_preference",
+        answer: compensation.value,
+        provenance: compensation.provenance,
+      });
+      continue;
+    }
     const verifiedSourceAnswer = field.classification === "safe_verified"
       ? verifiedAnswerFromSources(answer, sources)
       : null;
@@ -793,12 +928,27 @@ function validateAnswerResult(result, expectedHash, snapshot, sources) {
       });
       continue;
     }
+    const groundedDraft = field.classification === "grounded_narrative"
+      ? groundedDraftFromSources(answer, field, sources)
+      : null;
+    if (groundedDraft) {
+      instructions.push({ fieldId: field.id, value: groundedDraft.value, classification: "grounded_draft" });
+      reviewItems.push({
+        fieldId: field.id,
+        label: field.label,
+        decision: "fill_draft",
+        answer: groundedDraft.value,
+        provenance: groundedDraft.provenance,
+        draftPolicy: groundedDraft.draftPolicy,
+      });
+      continue;
+    }
     reviewItems.push({
       fieldId: field.id,
       label: field.label,
-      decision: suggested ? "suggest" : "skip",
-      answer: suggested,
-      provenance: suggested ? answer.provenance : [],
+      decision: "skip",
+      answer: null,
+      provenance: [],
       reason: field.classification,
     });
   }
@@ -839,19 +989,33 @@ function validateAnswerCommit(input) {
   const reviewItemIds = new Set();
   for (const item of input.reviewItems) {
     if (!item || typeof item !== "object" || Array.isArray(item)) throw new Error("review item is invalid.");
-    if (Object.keys(item).some((key) => !["fieldId", "label", "decision", "answer", "provenance", "reason"].includes(key))) throw new Error("review item contains an unknown field.");
+    if (Object.keys(item).some((key) => !["fieldId", "label", "decision", "answer", "provenance", "reason", "draftPolicy"].includes(key))) throw new Error("review item contains an unknown field.");
     if (typeof item.fieldId !== "string" || item.fieldId.length < 1 || item.fieldId.length > 500) throw new Error("review item fieldId is invalid.");
     if (reviewItemIds.has(item.fieldId)) throw new Error("review item fieldId is duplicated.");
     reviewItemIds.add(item.fieldId);
     if (typeof item.label !== "string" || item.label.length > 2_000) throw new Error("review item label is invalid.");
-    if (!["fill", "suggest", "skip"].includes(item.decision)) throw new Error("review item decision is invalid.");
+    if (!["fill", "fill_draft", "fill_preference", "skip"].includes(item.decision)) throw new Error("review item decision is invalid.");
     if (item.answer !== null && item.answer !== undefined && (typeof item.answer !== "string" || item.answer.length > 12_000)) throw new Error("review item answer is invalid.");
     if (!Array.isArray(item.provenance) || item.provenance.some((value) => typeof value !== "string" || value.length > 500)) throw new Error("review item provenance is invalid.");
+    if (item.draftPolicy !== undefined) {
+      const policy = item.draftPolicy;
+      if (!policy || typeof policy !== "object" || Array.isArray(policy)
+          || Object.keys(policy).some((key) => !["language", "maxLength", "maxWords", "minSentences", "maxSentences"].includes(key))
+          || (policy.language !== null && (typeof policy.language !== "string" || policy.language.length > 35))
+          || (policy.maxLength !== null && (!Number.isInteger(policy.maxLength) || policy.maxLength < 1 || policy.maxLength > 12_000))
+          || (policy.maxWords !== null && (!Number.isInteger(policy.maxWords) || policy.maxWords < 1 || policy.maxWords > 3_000))
+          || (policy.minSentences !== null && (!Number.isInteger(policy.minSentences) || policy.minSentences < 1 || policy.minSentences > 50))
+          || (policy.maxSentences !== null && (!Number.isInteger(policy.maxSentences) || policy.maxSentences < 1 || policy.maxSentences > 50))
+          || (Number.isInteger(policy.minSentences) && Number.isInteger(policy.maxSentences) && policy.minSentences > policy.maxSentences)) {
+        throw new Error("review item draft policy is invalid.");
+      }
+    }
     if (item.reason !== null && item.reason !== undefined && (typeof item.reason !== "string" || item.reason.length > 1_000)) throw new Error("review item reason is invalid.");
-    if (item.decision === "fill" && verified.has(item.fieldId) && typeof item.answer === "string" && item.label.trim()) {
+    if (["fill", "fill_preference"].includes(item.decision) && verified.has(item.fieldId) && typeof item.answer === "string" && item.label.trim()) {
       fieldValues.push({ question: item.label, answer: item.answer });
     }
-    if (item.decision === "suggest" && typeof item.answer === "string" && item.answer.trim() && item.label.trim()) {
+    if (item.decision === "fill_draft" && verified.has(item.fieldId)
+        && typeof item.answer === "string" && item.answer.trim() && item.label.trim()) {
       freeText.push({ question: item.label, answer: item.answer.trim() });
     }
   }

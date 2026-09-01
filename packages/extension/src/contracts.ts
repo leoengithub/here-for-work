@@ -3,6 +3,8 @@ export const PROTOCOL_VERSION = 1 as const;
 export type AtsFamily = "ashby" | "greenhouse" | "lever" | "generic";
 export type FieldClassification =
   | "safe_verified"
+  | "grounded_narrative"
+  | "compensation"
   | "sensitive"
   | "unknown"
   | "unsupported"
@@ -13,8 +15,14 @@ export interface FormField {
   label: string;
   control: "input" | "textarea" | "select";
   inputType: string;
+  inputMode: string | null;
   required: boolean;
   options: string[];
+  language: string | null;
+  maxLength: number | null;
+  maxWords: number | null;
+  minSentences: number | null;
+  maxSentences: number | null;
   classification: FieldClassification;
   reason: string;
 }
@@ -31,7 +39,7 @@ export interface FormSnapshot {
 export interface FillInstruction {
   fieldId: string;
   value: string;
-  classification: "safe_verified";
+  classification: "safe_verified" | "grounded_draft" | "canonical_preference";
 }
 
 export interface FillPlan {

@@ -41,6 +41,37 @@ function labelFor(element: HTMLInputElement | HTMLTextAreaElement | HTMLSelectEl
   );
 }
 
+function describedText(element: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement): string {
+  return text(element.getAttribute("aria-describedby")
+    ?.split(/\s+/)
+    .map((id) => element.ownerDocument.getElementById(id)?.textContent ?? "")
+    .filter(Boolean)
+    .join(" "));
+}
+
+function detectedWordLimit(value: string): number | null {
+  const match = value.match(/\b(?:up to|max(?:imum)?|limit(?:ed to)?|no more than)\s+(\d{1,5})\s+words?\b/i);
+  if (!match) return null;
+  const limit = Number(match[1]);
+  return Number.isInteger(limit) && limit > 0 && limit <= 3_000 ? limit : null;
+}
+
+function detectedSentenceRange(value: string): { minSentences: number | null; maxSentences: number | null } {
+  const match = value.match(/\b(\d{1,2})\s*(?:-|–|—|to)\s*(\d{1,2})\s+sentences?\b/i);
+  if (!match) return { minSentences: null, maxSentences: null };
+  const minimum = Number(match[1]);
+  const maximum = Number(match[2]);
+  if (!Number.isInteger(minimum) || !Number.isInteger(maximum) || minimum < 1 || maximum < minimum || maximum > 50) {
+    return { minSentences: null, maxSentences: null };
+  }
+  return { minSentences: minimum, maxSentences: maximum };
+}
+
+function detectedLanguage(element: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement): string | null {
+  const language = element.closest("[lang]")?.getAttribute("lang")?.trim() ?? "";
+  return language.length <= 35 && /^[a-z]{2,8}(?:-[a-z0-9]{1,8})*$/i.test(language) ? language : null;
+}
+
 export function isControlVisible(element: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement): boolean {
   for (let current: Element | null = element; current; current = current.parentElement) {
     if (current.hasAttribute("hidden") || current.getAttribute("aria-hidden") === "true") return false;
@@ -57,15 +88,22 @@ export function classifyField(label: string, inputType: string, autocomplete = "
   const semanticLabel = label.trim().toLowerCase();
   if (inputType === "file") {
     if (/\b(resume|résumé|cv|curriculum vitae)\b/.test(semanticLabel) && !/cover letter/.test(semanticLabel)) {
-      return { classification: "safe_verified", reason: "May receive only the verified tailored career-ops PDF." };
+      return { classification: "safe_verified", reason: "May receive only the manifest-verified career-ops PDF." };
     }
     return { classification: "unsupported", reason: "Only an unambiguous resume or CV PDF control is supported." };
   }
   if (/password|social security|passport|national id|date of birth|birth date/.test(normalized)) {
     return { classification: "sensitive", reason: "Identity or account data requires the user." };
   }
-  if (/salary|compensation|work authori[sz]ation|sponsor|visa|gender|race|ethnic|veteran|disab|pronoun/.test(normalized)) {
+  if (/salary|compensation|remuneration|pay expectation/.test(normalized)) {
+    return { classification: "compensation", reason: "May receive only a matching canonical career-ops compensation preference; human review remains required." };
+  }
+  if (/work authori[sz]ation|sponsor|visa|gender|race|ethnic|veteran|disab|pronoun/.test(normalized)) {
     return { classification: "sensitive", reason: "A sensitive declaration requires explicit review." };
+  }
+  if ((inputType === "text" || inputType === "textarea")
+      && /\b(why (?:are you interested|this (?:company|role)|do you want)|tell us about|describe (?:a|an|your)|share (?:a|an) example|problem you solved|challenge you (?:faced|solved)|motivation|por qu[eé]|cu[eé]ntanos|describe (?:un|una|tu))\b/.test(semanticLabel)) {
+    return { classification: "grounded_narrative", reason: "May receive only a career-ops grounded draft with source provenance; human review remains required." };
   }
   if (inputType === "checkbox" || inputType === "radio") {
     return { classification: "unverifiable", reason: "A declaration cannot be inferred from control state." };
@@ -101,6 +139,8 @@ export async function inspectForm(doc: Document = document, pageUrl = new URL(do
   const ids = new Map<string, number>();
   const fields: FormField[] = controls.map((element, index) => {
     const label = labelFor(element);
+    const helpText = describedText(element);
+    const sentenceRange = detectedSentenceRange(`${label} ${helpText}`);
     const inputType = element instanceof HTMLInputElement ? element.type.toLowerCase() : element.tagName.toLowerCase();
     const classification = classifyField(label, inputType, element.getAttribute("autocomplete") ?? "");
     const baseId = element.id || element.name || `field-${index}`;
@@ -113,8 +153,15 @@ export async function inspectForm(doc: Document = document, pageUrl = new URL(do
       label,
       control: element.tagName.toLowerCase() as FormField["control"],
       inputType,
+      inputMode: element instanceof HTMLInputElement ? element.inputMode || null : null,
       required: element.required || element.getAttribute("aria-required") === "true",
       options: element instanceof HTMLSelectElement ? Array.from(element.options).map((option) => text(option.text)) : [],
+      language: detectedLanguage(element),
+      maxLength: element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement
+        ? element.maxLength > 0 && element.maxLength <= 12_000 ? element.maxLength : null
+        : null,
+      maxWords: detectedWordLimit(`${label} ${helpText}`),
+      ...sentenceRange,
       ...classification,
     };
   });

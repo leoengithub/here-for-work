@@ -5429,12 +5429,23 @@ mod tests {
             page_title: "Frontend Engineer".to_string(),
             page_url: "https://jobs.ashbyhq.com/northstar/frontend/application".to_string(),
             snapshot_fingerprint: "d".repeat(64),
-            fields: serde_json::json!([{
-                "id": "email", "label": "Email", "control": "input", "inputType": "email",
-                "required": true, "options": [], "classification": "safe_verified", "reason": "verified"
-            }]),
+            fields: serde_json::json!([
+                {
+                    "id": "email", "label": "Email", "control": "input", "inputType": "email",
+                    "required": true, "options": [], "classification": "safe_verified", "reason": "verified"
+                },
+                {
+                    "id": "story", "label": "Tell us about a front-end problem you solved", "control": "textarea", "inputType": "textarea",
+                    "required": true, "options": [], "language": "en", "maxLength": 600, "maxWords": 100, "minSentences": 2, "maxSentences": 3,
+                    "classification": "grounded_narrative", "reason": "grounded draft"
+                },
+                {
+                    "id": "salary", "label": "Expected annual salary (EUR)", "control": "input", "inputType": "number", "inputMode": "numeric",
+                    "required": true, "options": [], "classification": "compensation", "reason": "canonical preference"
+                }
+            ]),
             safe_field_count: 1,
-            needs_user_count: 0,
+            needs_user_count: 2,
         };
         let inspected = store
             .complete_browser_inspection(&inspect.command_id, &inspection)
@@ -5452,16 +5463,30 @@ mod tests {
         let fill_plan = serde_json::json!({
             "protocolVersion": 1,
             "snapshotFingerprint": "d".repeat(64),
-            "instructions": [{ "fieldId": "email", "value": "verified@example.test", "classification": "safe_verified" }]
+            "instructions": [
+                { "fieldId": "email", "value": "verified@example.test", "classification": "safe_verified" },
+                { "fieldId": "story", "value": "A grounded first sentence. A grounded second sentence.", "classification": "grounded_draft" },
+                { "fieldId": "salary", "value": "52000", "classification": "canonical_preference" }
+            ]
         });
-        let review_items = serde_json::json!([{
-            "fieldId": "email", "label": "Email", "decision": "fill", "answer": "verified@example.test", "provenance": ["config/profile.yml:email"]
-        }]);
+        let review_items = serde_json::json!([
+            {
+                "fieldId": "email", "label": "Email", "decision": "fill", "answer": "verified@example.test", "provenance": ["config/profile.yml:email"]
+            },
+            {
+                "fieldId": "story", "label": "Tell us about a front-end problem you solved", "decision": "fill_draft", "answer": "A grounded first sentence. A grounded second sentence.",
+                "provenance": ["cv.md"], "draftPolicy": { "language": "en", "maxLength": 600, "maxWords": 100, "minSentences": 2, "maxSentences": 3 }
+            },
+            {
+                "fieldId": "salary", "label": "Expected annual salary (EUR)", "decision": "fill_preference", "answer": "52000",
+                "provenance": ["config/profile.yml:compensation.application_answer"]
+            }
+        ]);
         let cv_upload = serde_json::json!({
             "fieldId": "resume",
             "relativePath": "output/042-example/cv.pdf",
             "sha256": "c".repeat(64),
-            "fileName": "HereForWork-tailored-CV.pdf",
+            "fileName": "Leonardo_Gomez_Frontend_Engineer.pdf",
             "mimeType": "application/pdf",
             "classification": "safe_verified"
         });
@@ -5487,6 +5512,8 @@ mod tests {
                 &serde_json::json!([
                     { "fieldId": "resume", "status": "skipped", "reason": "File controls use the verified upload path." },
                     { "fieldId": "email", "status": "verified", "reason": null },
+                    { "fieldId": "story", "status": "verified", "reason": null },
+                    { "fieldId": "salary", "status": "verified", "reason": null },
                     { "fieldId": "resume", "status": "verified", "reason": null }
                 ]),
             )
@@ -5506,8 +5533,11 @@ mod tests {
         assert_eq!(commit_work.report_path, "reports/042-example.md");
         assert_eq!(commit_work.cv_pdf_path, "output/042-example/cv.pdf");
         assert_eq!(commit_work.review_items[0]["decision"], "fill");
+        assert_eq!(commit_work.review_items[1]["decision"], "fill_draft");
+        assert_eq!(commit_work.review_items[1]["provenance"][0], "cv.md");
+        assert_eq!(commit_work.review_items[2]["decision"], "fill_preference");
         assert_eq!(commit_work.fill_results[0]["status"], "verified");
-        assert_eq!(commit_work.fill_results.as_array().unwrap().len(), 2);
+        assert_eq!(commit_work.fill_results.as_array().unwrap().len(), 4);
         store
             .connection
             .execute(
