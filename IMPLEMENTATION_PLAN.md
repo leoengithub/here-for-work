@@ -64,6 +64,113 @@ Continue from the current implementation in this dependency order:
 Scheduling migration remains independently gated by `SCHEDULING_MIGRATION.md`. Pipeline
 implementation does not transfer executor authority or authorize a source cutover.
 
+The verified interface inventory and compatibility gates for this sequence are in
+[`contracts/career-ops-capabilities.md`](contracts/career-ops-capabilities.md). The
+following isolated tasks refine the six target steps into acceptance-sized work.
+
+### Dependency-ordered target tasks
+
+```text
+Capability boundary
+  -> Pre-Queue pipeline
+       -> Queue projection
+       -> Artifact-aware Prepare
+            -> Extension completion + lease + fallback
+                 -> Terminal Applied proofs
+```
+
+#### Capability boundary
+
+Deliver the versioned capability manifest and exact-revision probes described in the
+capability contract. No discovery/evaluation/browser operation is enabled by this task.
+
+Acceptance:
+
+- Exact upstream revision and declared version are reported separately.
+- Every capability is `supported`, `degraded`, or `unavailable` from a strict probe.
+- Missing/changed interfaces fail closed without parsing CLI prose.
+- Product-required but unsupported capabilities are visible blockers.
+- No career-ops files or configuration are changed.
+
+#### Pre-Queue pipeline
+
+Depends on supported typed discovery, liveness, full A-G evaluation, evaluated-result
+read, and canonical result-receipt capabilities. Orchestrate runs, retries, replay
+idempotency, and cross-run/cross-source identity in HereForWork while career-ops retains
+source-local normalization/deduplication and all evaluation authority.
+
+Acceptance:
+
+- Every queue candidate is live, unique, nonblocked, and has a complete A-G report plus
+  canonical native score 1–5.
+- Capped, partial, stale, malformed, or outage-stopped discovery never publishes as a
+  successful empty run.
+- Reverse-ATS discovery never writes cache or other state into the career-ops checkout;
+  an isolated HFW-owned execution/copy/cache boundary or a verified zero-checkout-write
+  upstream mode is proven before it is enabled.
+- `not_scored`, missing-report, score/report disagreement, suspicious, dead, blocked,
+  and previously applied fixtures remain out of Queue with typed reasons.
+- Parallel work honors the supported upstream concurrency/model contract; there is no
+  HFW score, model override, low-confidence escalation, or audit sampling unless the
+  corresponding capability is supported.
+- Canonical effects are replay-safe and no scheduled-source authority changes.
+
+#### Queue projection
+
+Depends on the typed evaluated-role projection from Pre-Queue.
+
+Acceptance:
+
+- Cards show the native 1–5 score, concise source-backed strengths, blockers/gaps,
+  compensation context, and material uncertainty from the validated report result.
+- No percentage, probability, advisory `rank:`, or HFW-derived confidence appears.
+- Missing evidence does not become positive copy; nonqueueable results are absent.
+- Existing compact card, action placement, keyboard, 200% zoom, and shadcn policy remain
+  intact with synthetic fixtures only.
+
+#### Artifact-aware Prepare
+
+Depends on Pre-Queue plus supported artifact inspection/provenance/freshness.
+
+Acceptance:
+
+- Current valid report/CV artifacts are reused; only missing, failed, or typed-stale work
+  is generated or refreshed.
+- A below-threshold role generates its missing CV/PDF only after explicit Prepare.
+- The effective upstream threshold and any mismatch are visible; HFW never rewrites it.
+- File existence or modification time alone never claims freshness or provenance.
+- Retry resumes at the failed step and preserves already validated artifacts.
+
+#### Extension completion, lease, and fallback
+
+Depends on Artifact-aware Prepare and a supported review-only browser fallback capability.
+
+Acceptance:
+
+- Extension success has exactly one result per planned field and correct settled read-back
+  for every required fillable.
+- The single-driver lease is durable and released before fallback starts.
+- Only eligible hard pre-fill failures auto-fallback; partial fill, authentication,
+  CAPTCHA, anti-bot, and uncertain state become visible human handoff.
+- Fallback returns typed field results and an ordered grounded copy/paste plan when safe
+  autofill cannot finish.
+- No transport, extension, fallback, fixture, or test contains a submit/finalize action.
+- Redacted generic fixtures pass before separately authorized Greenhouse and Lever live
+  review-only proofs.
+
+#### Terminal Applied proofs
+
+Depends on the browser workflow reaching human review; the tracking writer itself may be
+contract-tested independently.
+
+Acceptance:
+
+- Only physical user submission plus explicit confirmation invokes Applied.
+- A tracking failure retains the idempotency key and retries only the canonical writer.
+- Tracking retry never opens, inspects, fills, or reuses a browser session.
+- Canonical/history reconciliation proves one Applied effect and terminal HFW state.
+- No follow-up, outreach, reply-watch, interview workflow, or post-Applied state is added.
+
 ## Cross-cutting rules
 
 - career-ops remains canonical for verified facts, native 1–5 match scoring, generated artifacts and their provenance, grounded answers, and application history. HereForWork does not rescore or convert match output into a percentage or probability.

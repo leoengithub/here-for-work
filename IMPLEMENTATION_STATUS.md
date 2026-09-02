@@ -30,6 +30,27 @@ stable contract:
 These are approved implementation gaps, not claims of completed functionality. They do
 not authorize career-ops source changes, scheduled-task cutover, or submission.
 
+The read-only capability audit in
+[`contracts/career-ops-capabilities.md`](contracts/career-ops-capabilities.md) found that
+several of these gaps are upstream-interface blockers rather than ordinary HereForWork
+implementation work:
+
+- The installed checkout and inspected `origin/main` both declare `1.31.0` while differing
+  materially, so version-only compatibility is unsafe.
+- Typed company-to-ATS preview and conditional reverse-ATS JSON discovery exist, but the
+  latter still writes `data/cache/ats-companies/*.json`; it cannot run in the career-ops
+  checkout. Configured `scan.mjs` output and per-role liveness remain prose-oriented.
+- Full A-G evaluation, low-confidence escalation/audit sampling, artifact freshness and
+  structured CV-change provenance have no versioned public process contract.
+- career-ops contains review-only Playwright behavior in its internal web implementation,
+  but no supported external lease/result contract that HereForWork may call as fallback.
+- The effective PDF threshold is currently the upstream default `3.0` because no explicit
+  setting was present during the audit; HereForWork cannot silently enforce the approved
+  initial `3.5`.
+
+Pre-Queue publication, artifact-aware reuse, and Playwright fallback therefore remain
+disabled until the required capabilities pass the fail-closed manifest and probes.
+
 ## Verified implementation evidence
 
 - Apple Silicon `.app` launches without a local HTTP server.

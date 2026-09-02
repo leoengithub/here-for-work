@@ -4,6 +4,12 @@ Version 1 is an NDJSON request/response protocol over a child process. HereForWo
 starts the bundled adapter with a fixed executable and fixed script path; neither
 operation names nor subprocess arguments come from job or form content.
 
+The verified upstream capability inventory, compatibility classes, fail-closed gates,
+and blocked target operations are recorded in
+[`career-ops-capabilities.md`](career-ops-capabilities.md). A product requirement in this
+document is not evidence that the installed career-ops revision exposes a callable
+interface for it.
+
 Request envelope:
 
 ```json
@@ -63,6 +69,10 @@ At volume, orchestration reuses career-ops' supported batch/pipeline parallelism
 routing: fast/economy processing first, escalation for low-confidence results, and an
 audit sample. The adapter must preserve the authoritative evaluation and provenance; this
 strategy never permits HereForWork to generate an interim, fallback, or audit score.
+
+The audit found public batch `--parallel`, `spend_tier`, and explicit `--model` behavior,
+but no public low-confidence escalation or audit-sample capability. Those two target
+behaviors remain blocked rather than being inferred from the cheaper pre-screen gate.
 
 Prepare becomes an artifact validation and continuation capability: reuse current report
 and CV artifacts, and ask career-ops to generate or refresh only work that is missing,
@@ -137,6 +147,13 @@ to a hard pre-fill failure without authentication, CAPTCHA, anti-bot, partial-fi
 uncertain state; those conditions require a visible human handoff. The fallback returns a
 grounded ordered answer plan and, if autofill cannot proceed, copy/paste recovery. No
 fallback may add a submit or finalization operation.
+
+The inspected career-ops `modes/apply.md` is an agent instruction, and
+`prepare-application.mjs` prints a manual prefill summary. The newer career-ops web tree
+contains an internal Playwright implementation, but it is not a versioned public process
+contract, does not expose a transferable HereForWork lease, and opens its own browser
+context. Therefore the fallback above is an approved requirement, not currently callable
+adapter behavior.
 
 `preparation.artifacts.delete` is a narrowly scoped cleanup operation used by Undo
 preparation. It accepts only the committed preparation UUID plus the exact report and
