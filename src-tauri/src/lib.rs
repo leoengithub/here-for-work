@@ -1735,7 +1735,7 @@ fn discard_role_internal(role_id: &str, state: &AppState) -> Result<DashboardSta
 }
 
 #[tauri::command]
-fn undo_preparation(
+fn dismiss_preparation(
     preparation_id: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<DashboardState, String> {
@@ -1756,12 +1756,12 @@ fn undo_preparation(
         location: work.effect.role.location.clone(),
         url: work.effect.role.application_url.clone(),
     };
-    let (canonical, cleanup_result) = {
+    let canonical = {
         let _canonical_write = state
             .canonical_write_lock
             .lock()
             .map_err(|_| "Canonical writer lock was poisoned".to_string())?;
-        let canonical = match state.adapter.discard_role(&input) {
+        match state.adapter.discard_role(&input) {
             Ok(canonical) => canonical,
             Err(error) => {
                 if let Ok(mut store) = state.store.lock() {
@@ -1773,18 +1773,33 @@ fn undo_preparation(
                 }
                 return Err(error.to_string());
             }
-        };
-        let cleanup_result = state.adapter.delete_preparation_artifacts(
-            &work.preparation_id,
-            &work.report_path,
-            &work.cv_pdf_path,
-        );
-        (canonical, cleanup_result)
+        }
     };
     if canonical.idempotency_key != work.effect.idempotency_key {
+        if let Ok(mut store) = state.store.lock() {
+            let _ = store.fail_preparation_cleanup(
+                &work.preparation_id,
+                &work.effect.idempotency_key,
+                "canonical_response_invalid",
+            );
+        }
         return Err("career-ops returned a mismatched idempotency key".to_string());
     }
-    if let Err(error) = cleanup_result {
+    if canonical.status != "Discarded" {
+        if let Ok(mut store) = state.store.lock() {
+            let _ = store.fail_preparation_cleanup(
+                &work.preparation_id,
+                &work.effect.idempotency_key,
+                "canonical_response_invalid",
+            );
+        }
+        return Err("career-ops did not confirm the Discarded status".to_string());
+    }
+    if let Err(error) = state.adapter.delete_preparation_artifacts(
+        &work.preparation_id,
+        work.report_path.as_deref(),
+        work.cv_pdf_path.as_deref(),
+    ) {
         if let Ok(mut store) = state.store.lock() {
             let _ = store.fail_preparation_cleanup(
                 &work.preparation_id,
@@ -2039,7 +2054,7 @@ pub fn run() {
             check_integrations,
             reconcile_application_history,
             dismiss_role,
-            undo_preparation,
+            dismiss_preparation,
             undo_dismissal
         ])
         .build(tauri::generate_context!())

@@ -175,7 +175,7 @@ unless career-ops later supplies an explicit conversion rule.
 
 Dismiss immediately records Discarded through the career-ops adapter, removes the role from the active queue, and offers Undo. An optional Add reason action may store operational context in HereForWork and pass it through the adapter when career-ops supports it. The adapter does not become a recommendation engine, and the feedback must not silently change ranking.
 
-**Undo preparation** is distinct from Undo dismissal: it records the unsuitable role as Discarded, deletes only the generated report and tailored-CV preparation artifacts, clears HereForWork's preparation and browser state, and removes the application row. It is unavailable after Applied has been confirmed.
+**Dismiss in Applications** is distinct from Undo dismissal: it is available only when preparation failed or the live form is ready for review. After inline confirmation, it records the unsuitable role as Discarded, deletes only generated preparation artifacts, clears HereForWork's preparation and browser state, and removes the application row. A failed canonical write preserves the preparation and its files for retry. It is unavailable while work is active, while Applied tracking is pending, or after Applied has been confirmed.
 
 ## Adapter Boundary
 

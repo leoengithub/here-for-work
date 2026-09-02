@@ -121,9 +121,9 @@ export async function setCvFallbackSetting(path: string): Promise<CvFallbackSett
   return invoke<CvFallbackSetting>("set_cv_fallback_setting", { path });
 }
 
-export async function undoPreparation(preparationId: string): Promise<DashboardState> {
+export async function dismissPreparation(preparationId: string): Promise<DashboardState> {
   if (!isTauri()) throw new Error("Preparation cleanup is available in the desktop app.");
-  return invoke<DashboardState>("undo_preparation", { preparationId });
+  return invoke<DashboardState>("dismiss_preparation", { preparationId });
 }
 
 export async function cancelPreparation(roleId: string): Promise<boolean> {

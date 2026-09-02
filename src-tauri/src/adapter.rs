@@ -422,8 +422,8 @@ impl AdapterConfig {
     pub fn delete_preparation_artifacts(
         &self,
         preparation_id: &str,
-        report_path: &str,
-        cv_pdf_path: &str,
+        report_path: Option<&str>,
+        cv_pdf_path: Option<&str>,
     ) -> Result<(), AdapterError> {
         let result = self.request(
             "preparation.artifacts.delete",

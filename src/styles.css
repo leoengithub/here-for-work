@@ -983,18 +983,35 @@ a.role-card__title:hover {
 
 .preparation-list__confirmation {
   grid-column: 1 / -1;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 1rem;
-  padding: 0.8rem;
+  align-items: start;
   border: 1px solid color-mix(in oklch, var(--danger) 45%, var(--line));
-  border-radius: 0.65rem;
   background: color-mix(in oklch, var(--danger) 6%, var(--surface));
 }
 
 .preparation-list__confirmation .button-cluster {
-  flex: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+}
+
+.preparation-list__confirmation [data-slot="alert-description"] > p {
+  max-width: 65ch;
+}
+
+.preparation-list__confirmation .button-cluster [data-slot="button"] {
+  min-height: 2.75rem;
+}
+
+.preparation-list__dismiss-error {
+  color: var(--danger);
+  font-weight: 600;
+}
+
+@media (pointer: coarse) {
+  .preparation-list__actions [data-slot="button"] {
+    min-height: 2.75rem;
+  }
 }
 
 .preparation-detail {
@@ -1322,8 +1339,7 @@ a.role-card__title:hover {
   }
 
   .queue-filter-settings__heading,
-  .queue-runtime-settings,
-  .preparation-list__confirmation {
+  .queue-runtime-settings {
     align-items: flex-start;
     flex-direction: column;
   }

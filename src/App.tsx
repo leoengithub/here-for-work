@@ -76,7 +76,7 @@ import {
   setBackgroundEnabled,
   startBrowserConnectionCheck,
   takeInAppOutcomeNotifications,
-  undoPreparation,
+  dismissPreparation,
   undoDismissal,
 } from "./api";
 import type {
@@ -332,6 +332,16 @@ export function deriveApplicationState(
     return { label: "Filling form", tone: "active", active: true, explanation: null };
   }
   return { label: browserStatusLabel[latestSession.status], tone: "neutral", active: false, explanation: null };
+}
+
+export function canDismissApplicationPreparation(
+  item: PreparationSummary,
+  latestSession: BrowserSessionSummary | undefined,
+  recordingApplication: boolean,
+): boolean {
+  if (recordingApplication) return false;
+  const state = deriveApplicationState(item, latestSession, false);
+  return state.label === "Preparation failed" || state.label === "Ready for review";
 }
 
 function ApplicationStatus({ state }: { state: ApplicationState }) {
@@ -964,7 +974,9 @@ export function App() {
   const [preparationDetail, setPreparationDetail] = useState<PreparationDetail | null>(null);
   const [selectedPreparationId, setSelectedPreparationId] = useState<string | null>(null);
   const [queueFiltersDraft, setQueueFiltersDraft] = useState<QueueFilters | null>(null);
-  const [undoPreparationId, setUndoPreparationId] = useState<string | null>(null);
+  const [dismissPreparationId, setDismissPreparationId] = useState<string | null>(null);
+  const [dismissingPreparationId, setDismissingPreparationId] = useState<string | null>(null);
+  const [dismissPreparationError, setDismissPreparationError] = useState<string | null>(null);
   const [enqueuingRoleIds, setEnqueuingRoleIds] = useState<Set<string>>(() => new Set());
   const [cancellationRequestedRoleIds, setCancellationRequestedRoleIds] = useState<Set<string>>(() => new Set());
   const [reopeningPreparationIds, setReopeningPreparationIds] = useState<Set<string>>(() => new Set());
@@ -1479,21 +1491,48 @@ export function App() {
     }
   };
 
+  const openDismissPreparation = (preparationId: string) => {
+    setDismissPreparationId(preparationId);
+    setDismissPreparationError(null);
+    window.requestAnimationFrame(() => {
+      document.getElementById(`keep-preparation-${preparationId}`)?.focus();
+    });
+  };
+
+  const keepPreparation = (preparationId: string) => {
+    setDismissPreparationId(null);
+    setDismissPreparationError(null);
+    window.requestAnimationFrame(() => {
+      document.getElementById(`dismiss-preparation-${preparationId}`)?.focus();
+    });
+  };
+
   const discardPreparation = async (preparationId: string) => {
-    setBusy(true);
+    if (dismissingPreparationId) return;
+    setDismissingPreparationId(preparationId);
     setError(null);
     setNotice(null);
+    setDismissPreparationError(null);
     try {
-      const next = await undoPreparation(preparationId);
+      const next = await dismissPreparation(preparationId);
       setDashboard(next);
       setBrowserSessions(await getBrowserSessions());
       setPreparationDetail((current) => current?.preparationId === preparationId ? null : current);
-      setUndoPreparationId(null);
-      setNotice("Preparation discarded. career-ops history was updated and generated files were deleted.");
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
+      setDismissPreparationId(null);
+      setNotice("Role dismissed. career-ops was updated and generated preparation files were deleted.");
+    } catch {
+      setDismissPreparationError(
+        "Dismiss did not finish. The preparation remains in Applications so you can try again.",
+      );
+      try {
+        const [nextDashboard, nextSessions] = await Promise.all([getDashboard(), getBrowserSessions()]);
+        setDashboard(nextDashboard);
+        setBrowserSessions(nextSessions);
+      } catch {
+        // Keep the row and its recovery action visible from the last known state.
+      }
     } finally {
-      setBusy(false);
+      setDismissingPreparationId(null);
     }
   };
 
@@ -1584,6 +1623,9 @@ export function App() {
               const recordingApplication = Boolean(latestSession && recordingSessionIds.has(latestSession.id));
               const applicationState = deriveApplicationState(item, latestSession, recordingApplication);
               const browserActive = Boolean(latestSession && activeBrowserStatuses.has(latestSession.status));
+              const canDismissPreparation = canDismissApplicationPreparation(item, latestSession, recordingApplication);
+              const dismissalOpen = dismissPreparationId === item.id;
+              const dismissalInProgress = dismissingPreparationId === item.id;
               const canRetryPreparation = item.status === "action_required"
                 && item.step !== "undo_cleanup"
                 && ["retry_same_preparation", "repair_runtime_then_retry"].includes(item.retryPolicy ?? "retry_same_preparation");
@@ -1624,26 +1666,39 @@ export function App() {
                 ) : null}
                 {item.status === "action_required" ? (
                   <div className="preparation-list__actions">
-                    <Button variant="outline" type="button" onClick={() => void showPreparationDetail(item.id)} disabled={busy}>
+                    <Button variant="outline" type="button" onClick={() => void showPreparationDetail(item.id)} disabled={busy || dismissalInProgress}>
                       Details
                     </Button>
                     {canRetryPreparation ? (
                       <Button
                         type="button"
                         onClick={() => void prepareQueueRole(item.roleId, item.provider)}
-                        disabled={enqueuingRoleIds.has(item.roleId)}
+                        disabled={enqueuingRoleIds.has(item.roleId) || dismissalInProgress}
                       >
                         {enqueuingRoleIds.has(item.roleId) ? "Queueing…" : "Retry preparation"}
+                      </Button>
+                    ) : null}
+                    {canDismissPreparation ? (
+                      <Button
+                        id={`dismiss-preparation-${item.id}`}
+                        variant="destructive"
+                        type="button"
+                        aria-expanded={dismissalOpen}
+                        aria-controls={`dismiss-preparation-confirmation-${item.id}`}
+                        onClick={() => openDismissPreparation(item.id)}
+                        disabled={dismissalInProgress}
+                      >
+                        Dismiss
                       </Button>
                     ) : null}
                   </div>
                 ) : null}
                 {item.status === "completed" ? (
                   <div className="preparation-list__actions">
-                    <Button variant="outline" type="button" onClick={() => void showPreparationDetail(item.id)} disabled={busy}>
+                    <Button variant="outline" type="button" onClick={() => void showPreparationDetail(item.id)} disabled={busy || dismissalInProgress}>
                       Details
                     </Button>
-                    <Button variant="outline" type="button" onClick={() => void openArtifact(item.id, "cv")} disabled={busy}>
+                    <Button variant="outline" type="button" onClick={() => void openArtifact(item.id, "cv")} disabled={busy || dismissalInProgress}>
                       {item.cvSource === "user_reviewed_fallback" ? "Open user-reviewed CV" : "Open tailored CV"}
                     </Button>
                     {!latestSession ? (
@@ -1651,13 +1706,13 @@ export function App() {
 
                       type="button"
                       onClick={() => void continuePreparedRole(item.id)}
-                      disabled={busy || !browserSetup?.approvedInstallationId}
+                      disabled={busy || dismissalInProgress || !browserSetup?.approvedInstallationId}
                     >
                       Open in browser
                     </Button>
                     ) : null}
                     {latestSession?.status === "action_required" ? (
-                      <Button type="button" onClick={() => void retryBrowser(latestSession.id)} disabled={busy}>
+                      <Button type="button" onClick={() => void retryBrowser(latestSession.id)} disabled={busy || dismissalInProgress}>
                         Retry browser step
                       </Button>
                     ) : null}
@@ -1667,43 +1722,78 @@ export function App() {
                           variant="outline"
                           type="button"
                           onClick={() => void reopenPreparedRole(item.id)}
-                          disabled={busy || reopeningPreparationIds.has(item.id) || recordingApplication}
+                          disabled={busy || dismissalInProgress || reopeningPreparationIds.has(item.id) || recordingApplication}
                         >
                           {reopeningPreparationIds.has(item.id) ? "Reopening…" : "Reopen and refill"}
                         </Button>
                         <Button
                           type="button"
                           onClick={() => void confirmApplied(latestSession.id)}
-                          disabled={busy || recordingApplication}
+                          disabled={busy || dismissalInProgress || recordingApplication}
                         >
                           {recordingApplication ? "Recording…" : "I submitted this application"}
                         </Button>
                       </>
                     ) : null}
                     {latestSession?.status === "submitted_tracking_pending" ? (
-                      <Button type="button" onClick={() => void confirmApplied(latestSession.id)} disabled={busy || recordingApplication}>
+                      <Button type="button" onClick={() => void confirmApplied(latestSession.id)} disabled={busy || dismissalInProgress || recordingApplication}>
                         {recordingApplication ? "Recording…" : "Retry tracking update"}
                       </Button>
                     ) : null}
-                    {!recordingApplication && !["submitted_tracking_pending", "applied_recorded"].includes(latestSession?.status ?? "") ? (
-                      <Button variant="destructive" type="button" onClick={() => setUndoPreparationId(item.id)} disabled={busy || Boolean(browserActive)}>
-                        Undo preparation
+                    {canDismissPreparation ? (
+                      <Button
+                        id={`dismiss-preparation-${item.id}`}
+                        variant="destructive"
+                        type="button"
+                        aria-expanded={dismissalOpen}
+                        aria-controls={`dismiss-preparation-confirmation-${item.id}`}
+                        onClick={() => openDismissPreparation(item.id)}
+                        disabled={busy || dismissalInProgress || Boolean(browserActive)}
+                      >
+                        Dismiss
                       </Button>
                     ) : null}
                   </div>
                 ) : null}
-                {undoPreparationId === item.id ? (
-                  <div className="preparation-list__confirmation" role="alert">
-                    <p>Discard this role and permanently delete its generated preparation artifacts?</p>
-                    <div className="button-cluster">
-                      <Button variant="destructive" type="button" onClick={() => void discardPreparation(item.id)} disabled={busy}>
-                        Discard preparation
-                      </Button>
-                      <Button variant="outline" type="button" onClick={() => setUndoPreparationId(null)} disabled={busy}>
-                        Keep preparation
-                      </Button>
-                    </div>
-                  </div>
+                {dismissalOpen ? (
+                  <Alert
+                    id={`dismiss-preparation-confirmation-${item.id}`}
+                    className="preparation-list__confirmation"
+                    variant="destructive"
+                  >
+                    <HugeiconsIcon icon={Alert02Icon} strokeWidth={2} aria-hidden="true" />
+                    <AlertTitle>Dismiss this role?</AlertTitle>
+                    <AlertDescription>
+                      <p>
+                        This marks {item.title} as Discarded in career-ops, permanently deletes its generated preparation files, and removes it from Applications.
+                      </p>
+                      {dismissPreparationError ? (
+                        <p className="preparation-list__dismiss-error" aria-live="assertive">
+                          {dismissPreparationError}
+                        </p>
+                      ) : null}
+                      <div className="button-cluster">
+                        <Button
+                          id={`keep-preparation-${item.id}`}
+                          className="text-foreground"
+                          variant="outline"
+                          type="button"
+                          onClick={() => keepPreparation(item.id)}
+                          disabled={dismissalInProgress}
+                        >
+                          Keep role
+                        </Button>
+                        <Button
+                          variant="destructive"
+                          type="button"
+                          onClick={() => void discardPreparation(item.id)}
+                          disabled={dismissalInProgress}
+                        >
+                          {dismissalInProgress ? "Dismissing…" : "Dismiss role"}
+                        </Button>
+                      </div>
+                    </AlertDescription>
+                  </Alert>
                 ) : null}
               </li>
               );

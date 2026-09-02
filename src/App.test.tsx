@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { App, BrowserSessions, RoleRow, deriveApplicationState } from "./App";
 import type { BrowserSessionSummary, PreparationSummary } from "./types";
@@ -131,6 +131,118 @@ describe("App", () => {
     expect(container.querySelector('[data-preparation-id="failed"]')).not.toHaveTextContent("preparing cv");
     expect(container.querySelector('[data-preparation-id="recording"]')).not.toHaveTextContent("Undo preparation");
     expect(container.querySelector('[data-preparation-id="tracking"]')).not.toHaveTextContent("Undo preparation");
+    expect(within(container.querySelector<HTMLElement>('[data-preparation-id="failed"]')!).getByRole("button", { name: "Dismiss" })).toBeEnabled();
+    expect(within(container.querySelector<HTMLElement>('[data-preparation-id="review"]')!).getByRole("button", { name: "Dismiss" })).toBeEnabled();
+    for (const preparationId of ["waiting", "preparing", "recording", "tracking", "recorded"]) {
+      expect(within(container.querySelector<HTMLElement>(`[data-preparation-id="${preparationId}"]`)!).queryByRole("button", { name: "Dismiss" }))
+        .not.toBeInTheDocument();
+    }
+  });
+
+  it("opens a row-scoped inline dismissal confirmation and returns focus safely", async () => {
+    window.history.replaceState({}, "", "/?application-preview=states");
+    const { container } = render(<App />);
+    await screen.findByRole("heading", { name: "Review queue" });
+    fireEvent.click(screen.getByRole("tab", { name: "applications" }));
+    const failedRow = container.querySelector<HTMLElement>('[data-preparation-id="failed"]')!;
+
+    fireEvent.click(within(failedRow).getByRole("button", { name: "Dismiss" }));
+
+    const confirmation = within(failedRow).getByRole("alert");
+    expect(confirmation).toHaveTextContent("Dismiss this role?");
+    expect(confirmation).toHaveTextContent(
+      "This marks Senior React Frontend Developer as Discarded in career-ops, permanently deletes its generated preparation files, and removes it from Applications.",
+    );
+    expect(within(confirmation).getByRole("button", { name: "Keep role" })).toBeEnabled();
+    expect(within(confirmation).getByRole("button", { name: "Dismiss role" })).toBeEnabled();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    await waitFor(() => expect(within(confirmation).getByRole("button", { name: "Keep role" })).toHaveFocus());
+
+    fireEvent.click(within(confirmation).getByRole("button", { name: "Keep role" }));
+    expect(within(failedRow).queryByRole("alert")).not.toBeInTheDocument();
+    await waitFor(() => expect(within(failedRow).getByRole("button", { name: "Dismiss" })).toHaveFocus());
+  });
+
+  it("shows dismissal progress, disables conflicting actions, and removes the successful row", async () => {
+    let finishDismissal: (() => void) | undefined;
+    let dismissed = false;
+    const dashboardAfterDismissal = {
+      ...applicationsPreviewDashboard,
+      preparations: applicationsPreviewDashboard.preparations.filter((item) => item.id !== "failed"),
+    };
+    const invoke = vi.fn(async (command: string) => {
+      if (command === "get_dashboard") return dismissed ? dashboardAfterDismissal : applicationsPreviewDashboard;
+      if (command === "get_cv_fallback_setting") return { path: null, sha256: null };
+      if (command === "take_in_app_outcome_notifications") return [];
+      if (command === "get_browser_setup") return applicationsPreviewBrowserSetup;
+      if (command === "get_browser_sessions") return applicationsPreviewSessions;
+      if (command === "dismiss_preparation") {
+        return new Promise((resolve) => {
+          finishDismissal = () => {
+            dismissed = true;
+            resolve(dashboardAfterDismissal);
+          };
+        });
+      }
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    (window as typeof window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = { invoke };
+    const { container } = render(<App />);
+    await screen.findByRole("heading", { name: "Review queue" });
+    fireEvent.click(screen.getByRole("tab", { name: "applications" }));
+    const failedRow = container.querySelector<HTMLElement>('[data-preparation-id="failed"]')!;
+    fireEvent.click(within(failedRow).getByRole("button", { name: "Dismiss" }));
+    const dismissRole = within(failedRow).getByRole("button", { name: "Dismiss role" });
+    dismissRole.focus();
+    fireEvent.click(dismissRole);
+
+    expect(within(failedRow).getByRole("button", { name: "Dismissing…" })).toBeDisabled();
+    expect(within(failedRow).getByRole("button", { name: "Retry preparation" })).toBeDisabled();
+    expect(invoke).toHaveBeenCalledWith("dismiss_preparation", { preparationId: "failed" }, undefined);
+
+    await act(async () => finishDismissal?.());
+    await waitFor(() => expect(container.querySelector('[data-preparation-id="failed"]')).not.toBeInTheDocument());
+    expect(await screen.findByText(/Role dismissed\. career-ops was updated/)).toBeInTheDocument();
+  });
+
+  it("preserves a failed dismissal inline and retries the same visible preparation", async () => {
+    let attempts = 0;
+    const dashboardAfterDismissal = {
+      ...applicationsPreviewDashboard,
+      preparations: applicationsPreviewDashboard.preparations.filter((item) => item.id !== "failed"),
+    };
+    const invoke = vi.fn(async (command: string) => {
+      if (command === "get_dashboard") return attempts > 1 ? dashboardAfterDismissal : applicationsPreviewDashboard;
+      if (command === "get_cv_fallback_setting") return { path: null, sha256: null };
+      if (command === "take_in_app_outcome_notifications") return [];
+      if (command === "get_browser_setup") return applicationsPreviewBrowserSetup;
+      if (command === "get_browser_sessions") return applicationsPreviewSessions;
+      if (command === "dismiss_preparation") {
+        attempts += 1;
+        if (attempts === 1) throw new Error("canonical writer unavailable");
+        return dashboardAfterDismissal;
+      }
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    (window as typeof window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = { invoke };
+    const { container } = render(<App />);
+    await screen.findByRole("heading", { name: "Review queue" });
+    fireEvent.click(screen.getByRole("tab", { name: "applications" }));
+    const failedRow = container.querySelector<HTMLElement>('[data-preparation-id="failed"]')!;
+    fireEvent.click(within(failedRow).getByRole("button", { name: "Dismiss" }));
+    const firstDismissal = within(failedRow).getByRole("button", { name: "Dismiss role" });
+    await waitFor(() => expect(within(failedRow).getByRole("button", { name: "Keep role" })).toHaveFocus());
+    firstDismissal.focus();
+    fireEvent.click(firstDismissal);
+
+    expect(await within(failedRow).findByText(/Dismiss did not finish/)).toBeInTheDocument();
+    expect(container.querySelector('[data-preparation-id="failed"]')).toBeInTheDocument();
+    const retryDismissal = within(failedRow).getByRole("button", { name: "Dismiss role" });
+    expect(retryDismissal).toHaveFocus();
+    fireEvent.click(retryDismissal);
+
+    await waitFor(() => expect(container.querySelector('[data-preparation-id="failed"]')).not.toBeInTheDocument());
+    expect(attempts).toBe(2);
   });
 
   it("records an already-submitted application with one click and no browser confirmation gate", async () => {

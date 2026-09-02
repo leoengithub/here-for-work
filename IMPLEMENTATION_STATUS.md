@@ -61,9 +61,9 @@ Stage: generic public-HTTPS path live-proven; Greenhouse and Lever live observat
   unknown or bounded research is inconclusive. Confirmed authorization or legitimacy
   incompatibilities are discarded; other material fit or legitimacy uncertainty returns
   to Needs decision without generating artifacts.
-- Undo preparation records Discarded through the canonical adapter, removes only the
-  generated report and tailored-CV preparation artifacts, and clears local preparation
-  and browser state. It is unavailable after Applied is recorded.
+- Applications Dismiss is limited to failed or ready-for-review work. It records
+  Discarded through the canonical adapter before removing generated artifacts and local
+  preparation/browser state. Failed canonical writes preserve that local work for retry.
 - Duplicate provenance remains persisted for reconciliation and diagnostics, but source-occurrence count is intentionally hidden from the decision-focused Queue.
 - Safe form fills are not released for human review until the validated answer snapshot
   has been persisted through career-ops' fixed application-answer writer. Persistence

@@ -134,8 +134,8 @@ pub struct PreparationWork {
 pub struct PreparationCleanupWork {
     pub preparation_id: String,
     pub role_id: String,
-    pub report_path: String,
-    pub cv_pdf_path: String,
+    pub report_path: Option<String>,
+    pub cv_pdf_path: Option<String>,
     pub effect: AdapterEffectContext,
 }
 

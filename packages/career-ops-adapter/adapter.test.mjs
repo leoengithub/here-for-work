@@ -650,6 +650,48 @@ test("provider-neutral preparation commits only through fixed career-ops writers
   await assert.rejects(readFile(join(fixture.root, commit.result.artifacts.report.path)));
   await assert.rejects(readFile(join(fixture.root, commit.result.artifacts.cvPdf.path)));
   await assert.rejects(readFile(join(fixture.staging, preparationId, "commit-state.json")));
+
+  const repeatedCleanup = await request({
+    id: "preparation-cleanup-retry",
+    protocolVersion: 1,
+    operation: "preparation.artifacts.delete",
+    input: {
+      preparationId,
+      reportPath: commit.result.artifacts.report.path,
+      cvPdfPath: commit.result.artifacts.cvPdf.path,
+    },
+  }, fixture.env);
+  assert.equal(repeatedCleanup.ok, true, JSON.stringify(repeatedCleanup));
+});
+
+test("failed preparation cleanup removes only its bounded staging and is idempotent", async () => {
+  const fixture = await fakeCareerOps();
+  const preparationId = "88888888-8888-4888-8888-888888888888";
+  const adapterStaging = join(fixture.staging, preparationId);
+  const generatedStaging = join(
+    fixture.root,
+    "output/.hfw-preparation-staging",
+    preparationId,
+    "candidate",
+  );
+  await mkdir(adapterStaging, { recursive: true });
+  await mkdir(generatedStaging, { recursive: true });
+  await writeFile(join(adapterStaging, "provider-result.json"), "{}\n");
+  await writeFile(join(generatedStaging, "cv.html"), "staged only\n");
+
+  for (const id of ["failed-preparation-cleanup", "failed-preparation-cleanup-retry"]) {
+    const cleanup = await request({
+      id,
+      protocolVersion: 1,
+      operation: "preparation.artifacts.delete",
+      input: { preparationId, reportPath: null, cvPdfPath: null },
+    }, fixture.env);
+    assert.equal(cleanup.ok, true, JSON.stringify(cleanup));
+  }
+
+  await assert.rejects(stat(adapterStaging));
+  await assert.rejects(stat(join(fixture.root, "output/.hfw-preparation-staging", preparationId)));
+  assert.equal((await stat(join(fixture.root, "data/applications.md"))).isFile(), true);
 });
 
 test("preparation accepts career-ops profiles without optional cv-facts config", async () => {

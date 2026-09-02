@@ -2011,6 +2011,17 @@ impl Store {
         let tracker_id = tracker_id.ok_or_else(|| {
             StoreError::InvalidAdapterEffect("canonical tracker row is missing".to_string())
         })?;
+        let discard_in_progress = self.connection.query_row(
+            "SELECT COUNT(*) FROM adapter_effects
+              WHERE role_id = ?1 AND operation = 'role.discard' AND status = 'pending'",
+            [&role_id],
+            |row| row.get::<_, i64>(0),
+        )?;
+        if discard_in_progress > 0 {
+            return Err(StoreError::InvalidAdapterEffect(
+                "application dismissal is already in progress".to_string(),
+            ));
+        }
         let effect = self.begin_adapter_effect(
             &role_id,
             "application.applied.confirm",
@@ -2450,36 +2461,59 @@ impl Store {
         &mut self,
         preparation_id: &str,
     ) -> Result<PreparationCleanupWork, StoreError> {
-        let (role_id, report_path, cv_pdf_path) = self
+        let (role_id, preparation_status, report_path, cv_pdf_path) = self
             .connection
             .query_row(
-                "SELECT role_id, report_path, cv_pdf_path FROM preparation_jobs
-                  WHERE id = ?1 AND status IN ('completed', 'action_required')
-                    AND report_path IS NOT NULL AND cv_pdf_path IS NOT NULL",
+                "SELECT role_id, status, report_path, cv_pdf_path FROM preparation_jobs
+                  WHERE id = ?1",
                 [preparation_id],
                 |row| {
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
                     ))
                 },
             )
             .optional()?
             .ok_or_else(|| {
-                StoreError::InvalidPreparation(
-                    "completed preparation artifacts were not found".to_string(),
-                )
+                StoreError::InvalidPreparation("application preparation was not found".to_string())
             })?;
-        let applied_count = self.connection.query_row(
-            "SELECT COUNT(*) FROM browser_sessions
-              WHERE preparation_id = ?1 AND status = 'applied_recorded'",
-            [preparation_id],
+        let latest_application_status = self
+            .connection
+            .query_row(
+                "SELECT status FROM browser_sessions
+                  WHERE preparation_id = ?1 AND purpose = 'application'
+                  ORDER BY updated_at DESC, id DESC LIMIT 1",
+                [preparation_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        let dismissible = match (
+            preparation_status.as_str(),
+            latest_application_status.as_deref(),
+        ) {
+            ("action_required", None | Some("action_required") | Some("review_required")) => true,
+            ("completed", Some("action_required") | Some("review_required")) => true,
+            _ => false,
+        };
+        if !dismissible {
+            return Err(StoreError::InvalidPreparation(
+                "only a failed preparation or an application ready for review can be dismissed"
+                    .to_string(),
+            ));
+        }
+        let applied_effect_count = self.connection.query_row(
+            "SELECT COUNT(*) FROM adapter_effects
+              WHERE role_id = ?1 AND operation = 'application.applied.confirm'
+                AND status = 'pending'",
+            [&role_id],
             |row| row.get::<_, i64>(0),
         )?;
-        if applied_count > 0 {
+        if applied_effect_count > 0 {
             return Err(StoreError::InvalidPreparation(
-                "an applied application cannot be undone as preparation".to_string(),
+                "application tracking is already in progress".to_string(),
             ));
         }
         let effect = self.begin_adapter_effect(&role_id, "role.discard", None, None)?;
@@ -2539,6 +2573,10 @@ impl Store {
         )?;
         transaction.execute(
             "DELETE FROM browser_sessions WHERE preparation_id = ?1",
+            [&work.preparation_id],
+        )?;
+        transaction.execute(
+            "DELETE FROM notification_outbox WHERE preparation_id = ?1",
             [&work.preparation_id],
         )?;
         transaction.execute(
@@ -4410,7 +4448,7 @@ mod tests {
         claimed
     }
 
-    fn queue_completed_application_session(store: &mut Store) -> BrowserSessionSummary {
+    fn completed_preparation(store: &mut Store) -> PreparationWork {
         store.import_dataset(DATASET).unwrap();
         let role_id = store.dashboard().unwrap().roles[0].id.clone();
         let preparation = queue_and_claim(store, &role_id, "codex");
@@ -4434,6 +4472,11 @@ mod tests {
                 },
             )
             .unwrap();
+        preparation
+    }
+
+    fn queue_completed_application_session(store: &mut Store) -> BrowserSessionSummary {
+        let preparation = completed_preparation(store);
         store
             .configure_browser(
                 "abcdefghijklmnopabcdefghijklmnop",
@@ -4999,6 +5042,210 @@ mod tests {
         canonical.status = "Applied".to_string();
         store.reconcile_history(&[canonical]).unwrap();
         assert!(store.dashboard().unwrap().roles.is_empty());
+    }
+
+    #[test]
+    fn application_dismissal_accepts_failed_work_without_committed_artifacts_and_reuses_its_effect()
+    {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+        store.import_dataset(DATASET).unwrap();
+        let role_id = store.dashboard().unwrap().roles[0].id.clone();
+        let preparation = queue_and_claim(&mut store, &role_id, "codex");
+        store
+            .fail_preparation(
+                &preparation.id,
+                "provider_failed",
+                "provider.invoke",
+                "Provider failed.",
+            )
+            .unwrap();
+
+        let first = store.begin_preparation_cleanup(&preparation.id).unwrap();
+        assert!(first.report_path.is_none());
+        assert!(first.cv_pdf_path.is_none());
+        store
+            .fail_preparation_cleanup(
+                &preparation.id,
+                &first.effect.idempotency_key,
+                "canonical_writer_failed",
+            )
+            .unwrap();
+
+        let preserved = store.dashboard().unwrap();
+        assert_eq!(preserved.preparations.len(), 1);
+        assert_eq!(preserved.preparations[0].status, "action_required");
+        let retry = store.begin_preparation_cleanup(&preparation.id).unwrap();
+        assert_eq!(retry.effect.idempotency_key, first.effect.idempotency_key);
+    }
+
+    #[test]
+    fn failed_application_dismissal_preserves_committed_artifact_references_and_browser_state() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+        let session = queue_completed_application_session(&mut store);
+        let preparation_id = session.preparation_id.as_deref().unwrap();
+        store
+            .connection
+            .execute(
+                "UPDATE browser_sessions SET status = 'review_required' WHERE id = ?1",
+                [&session.id],
+            )
+            .unwrap();
+
+        let work = store.begin_preparation_cleanup(preparation_id).unwrap();
+        assert!(work.report_path.is_some());
+        assert!(work.cv_pdf_path.is_some());
+        store
+            .fail_preparation_cleanup(
+                preparation_id,
+                &work.effect.idempotency_key,
+                "canonical_writer_failed",
+            )
+            .unwrap();
+
+        let dashboard = store.dashboard().unwrap();
+        let preserved = dashboard
+            .preparations
+            .iter()
+            .find(|preparation| preparation.id == preparation_id)
+            .unwrap();
+        assert_eq!(preserved.status, "action_required");
+        assert_eq!(preserved.report_path, work.report_path);
+        assert_eq!(preserved.cv_pdf_path, work.cv_pdf_path);
+        let preserved_sessions = store.browser_sessions().unwrap();
+        assert_eq!(preserved_sessions.len(), 1);
+        assert_eq!(preserved_sessions[0].id, session.id);
+        assert_eq!(preserved_sessions[0].status, "review_required");
+    }
+
+    #[test]
+    fn application_dismissal_is_rejected_outside_failed_and_ready_for_review_states() {
+        for browser_status in [
+            "waiting_for_extension",
+            "inspecting",
+            "filling",
+            "submitted_tracking_pending",
+            "applied_recorded",
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+            let session = queue_completed_application_session(&mut store);
+            store
+                .connection
+                .execute(
+                    "UPDATE browser_sessions SET status = ?1 WHERE id = ?2",
+                    rusqlite::params![browser_status, &session.id],
+                )
+                .unwrap();
+
+            let error = store
+                .begin_preparation_cleanup(session.preparation_id.as_deref().unwrap())
+                .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("only a failed preparation or an application ready for review")
+            );
+            assert_eq!(store.dashboard().unwrap().preparations.len(), 1);
+            assert_eq!(store.browser_sessions().unwrap().len(), 1);
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let mut queued_store = Store::open(directory.path().join("queued.sqlite3")).unwrap();
+        queued_store.import_dataset(DATASET).unwrap();
+        let role_id = queued_store.dashboard().unwrap().roles[0].id.clone();
+        let queued = queued_store.begin_preparation(&role_id, "codex").unwrap();
+        assert!(
+            queued_store
+                .begin_preparation_cleanup(&queued.id)
+                .unwrap_err()
+                .to_string()
+                .contains("only a failed preparation or an application ready for review")
+        );
+    }
+
+    #[test]
+    fn completed_application_dismissal_removes_only_its_local_work_after_canonical_success() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+        let session = queue_completed_application_session(&mut store);
+        let preparation_id = session.preparation_id.clone().unwrap();
+        store
+            .connection
+            .execute(
+                "UPDATE browser_sessions SET status = 'review_required' WHERE id = ?1",
+                [&session.id],
+            )
+            .unwrap();
+        store
+            .connection
+            .execute(
+                "INSERT INTO notification_outbox(
+                   id, dedupe_key, title, body, status, attempts, next_attempt_at, created_at,
+                   event_kind, role_id, preparation_id
+                 ) VALUES ('dismiss-test', 'dismiss-test', 'Ready', 'Ready', 'pending', 0, ?1, ?1,
+                           'application_ready', ?2, ?3)",
+                rusqlite::params![
+                    chrono::Utc::now().to_rfc3339(),
+                    &session.role_id,
+                    &preparation_id
+                ],
+            )
+            .unwrap();
+
+        let work = store.begin_preparation_cleanup(&preparation_id).unwrap();
+        store
+            .complete_preparation_cleanup(&work, 42, "Discarded")
+            .unwrap();
+
+        let dashboard = store.dashboard().unwrap();
+        assert!(dashboard.preparations.is_empty());
+        assert!(dashboard.roles.is_empty());
+        assert_eq!(dashboard.recently_dismissed.len(), 1);
+        assert!(store.browser_sessions().unwrap().is_empty());
+        let notifications: i64 = store
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM notification_outbox WHERE preparation_id = ?1",
+                [&preparation_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(notifications, 0);
+    }
+
+    #[test]
+    fn application_dismissal_and_applied_tracking_cannot_start_together() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+        let session = queue_completed_application_session(&mut store);
+        let preparation_id = session.preparation_id.clone().unwrap();
+        store
+            .connection
+            .execute(
+                "UPDATE browser_sessions SET status = 'review_required' WHERE id = ?1",
+                [&session.id],
+            )
+            .unwrap();
+
+        let cleanup = store.begin_preparation_cleanup(&preparation_id).unwrap();
+        assert!(
+            store
+                .begin_applied_effect_for_session(&session.id)
+                .unwrap_err()
+                .to_string()
+                .contains("dismissal is already in progress")
+        );
+        store
+            .fail_preparation_cleanup(
+                &preparation_id,
+                &cleanup.effect.idempotency_key,
+                "canonical_writer_failed",
+            )
+            .unwrap();
+        let (_, applied) = store.begin_applied_effect_for_session(&session.id).unwrap();
+        assert_eq!(applied.tracker_id, Some(42));
     }
 
     #[test]

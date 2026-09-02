@@ -8,10 +8,10 @@
  * paths from callers. External job data is returned as data only.
  */
 
-import { access, constants, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { access, constants, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { spawn } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { dirname, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseDocument } from "yaml";
@@ -72,6 +72,22 @@ async function canRead(path) {
   } catch {
     return false;
   }
+}
+
+async function readJsonIfPresent(path) {
+  try {
+    return JSON.parse(await readFile(path, "utf8"));
+  } catch (error) {
+    if (error?.code === "ENOENT") return null;
+    throw error;
+  }
+}
+
+async function writeJsonAtomic(path, value) {
+  const temporary = `${path}.${randomUUID()}.tmp`;
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
+  await rename(temporary, path);
 }
 
 async function canExecute(path) {
@@ -1310,22 +1326,74 @@ async function execute(request) {
       if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(preparationId)) {
         throw new Error("preparationId must be a version-4 UUID.");
       }
-      const expectedReport = safeReportPath(request.input?.reportPath);
-      const expectedCvPdf = safeGeneratedArtifactPath(request.input?.cvPdfPath);
+      const expectedReport = request.input?.reportPath == null
+        ? null
+        : safeReportPath(request.input.reportPath);
+      const expectedCvPdf = request.input?.cvPdfPath == null
+        ? null
+        : safeGeneratedArtifactPath(request.input.cvPdfPath);
       const effectDirectory = resolve(stagingRoot, preparationId);
-      const state = JSON.parse(await readFile(resolve(effectDirectory, "commit-state.json"), "utf8"));
-      if (state.schemaVersion !== 2
-          || state.preparationId !== preparationId
-          || state.status !== "committed"
-          || state.artifacts?.report?.path !== expectedReport
-          || state.artifacts?.cvPdf?.path !== expectedCvPdf
-          || !Array.isArray(state.cleanupPaths)) {
+      const stagedPreparationDirectory = resolve(root, "output", ".hfw-preparation-staging", preparationId);
+      const receiptPath = resolve(stagingRoot, "cleanup-receipts", `${preparationId}.json`);
+      const receipt = await readJsonIfPresent(receiptPath);
+      if (receipt) {
+        if (receipt.schemaVersion !== 1 || receipt.preparationId !== preparationId
+            || (expectedReport && receipt.reportPath !== expectedReport)
+            || (expectedCvPdf && receipt.cvPdfPath !== expectedCvPdf)) {
+          throw new Error("Preparation cleanup references do not match the completed cleanup receipt.");
+        }
+        await rm(stagedPreparationDirectory, { recursive: true, force: true });
+        await rm(effectDirectory, { recursive: true, force: true });
+        return { outcome: "completed", preparationId };
+      }
+      const state = await readJsonIfPresent(resolve(effectDirectory, "commit-state.json"));
+      if (!state) {
+        if (expectedReport || expectedCvPdf) {
+          throw new Error("Preparation cleanup manifest is missing for recorded artifacts.");
+        }
+        await rm(stagedPreparationDirectory, { recursive: true, force: true });
+        await writeJsonAtomic(receiptPath, {
+          schemaVersion: 1,
+          preparationId,
+          reportPath: null,
+          cvPdfPath: null,
+        });
+        await rm(effectDirectory, { recursive: true, force: true });
+        return { outcome: "completed", preparationId };
+      }
+      if (state.schemaVersion !== 2 || state.preparationId !== preparationId) {
         throw new Error("Preparation cleanup references do not match the committed manifest.");
       }
-      const reportRelative = safeReportPath(state.artifacts.report.path);
-      const generated = state.cleanupPaths.map(safeGeneratedArtifactPath);
-      await rm(resolve(root, reportRelative), { force: true });
+      const hasPublishedArtifacts = Boolean(state.artifacts);
+      if (hasPublishedArtifacts && (!state.artifacts?.report?.path
+          || !state.artifacts?.cvPdf?.path || !Array.isArray(state.cleanupPaths))) {
+        throw new Error("Preparation cleanup manifest is incomplete.");
+      }
+      if (!hasPublishedArtifacts && (expectedReport || expectedCvPdf)) {
+        throw new Error("Preparation cleanup manifest does not contain the recorded artifacts.");
+      }
+      const reportRelative = hasPublishedArtifacts
+        ? safeReportPath(state.artifacts.report.path)
+        : null;
+      const cvPdfRelative = hasPublishedArtifacts
+        ? safeGeneratedArtifactPath(state.artifacts.cvPdf.path)
+        : null;
+      if ((expectedReport && expectedReport !== reportRelative)
+          || (expectedCvPdf && expectedCvPdf !== cvPdfRelative)) {
+        throw new Error("Preparation cleanup references do not match the committed manifest.");
+      }
+      const generated = hasPublishedArtifacts
+        ? state.cleanupPaths.map(safeGeneratedArtifactPath)
+        : [];
+      if (reportRelative) await rm(resolve(root, reportRelative), { force: true });
       for (const relativePath of generated) await rm(resolve(root, relativePath), { force: true });
+      await rm(stagedPreparationDirectory, { recursive: true, force: true });
+      await writeJsonAtomic(receiptPath, {
+        schemaVersion: 1,
+        preparationId,
+        reportPath: reportRelative,
+        cvPdfPath: cvPdfRelative,
+      });
       await rm(effectDirectory, { recursive: true, force: true });
       return { outcome: "completed", preparationId };
     }
