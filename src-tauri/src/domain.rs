@@ -65,6 +65,20 @@ pub struct RoleSummary {
     pub preparation_state: String,
     pub canonical_tracker_id: Option<i64>,
     pub canonical_status: Option<String>,
+    pub evaluation: Option<QueueEvaluationSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QueueEvaluationSummary {
+    pub native_score: f64,
+    pub strengths: Vec<String>,
+    pub blockers: Vec<String>,
+    pub gaps: Vec<String>,
+    pub compensation: Option<String>,
+    pub authorization_confidence: String,
+    pub authorization_question: String,
+    pub material_uncertainty: EvaluationMaterialUncertainty,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -80,6 +94,7 @@ pub struct ActivityEntry {
 #[serde(rename_all = "camelCase")]
 pub struct DashboardState {
     pub roles: Vec<RoleSummary>,
+    pub pre_queue_roles: Vec<PreQueueRoleSummary>,
     pub recently_dismissed: Vec<RoleSummary>,
     pub preparations: Vec<PreparationSummary>,
     pub activity: Vec<ActivityEntry>,
@@ -92,6 +107,18 @@ pub struct DashboardState {
     pub action_required_run_count: i64,
     pub sources: Vec<SourceScheduleSummary>,
     pub recent_runs: Vec<RunSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreQueueRoleSummary {
+    pub role_id: String,
+    pub company: String,
+    pub title: String,
+    pub state: String,
+    pub reason: String,
+    pub attempt: i64,
+    pub updated_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -509,7 +536,9 @@ where
     let evidence = Vec::<String>::deserialize(deserializer)?;
     if evidence.is_empty()
         || evidence.len() > 8
-        || evidence.iter().any(|item| item.trim().is_empty() || item.len() > 2_000)
+        || evidence
+            .iter()
+            .any(|item| item.trim().is_empty() || item.len() > 2_000)
     {
         return Err(serde::de::Error::custom(
             "authorization evidence must contain one to eight non-empty items",
@@ -537,6 +566,25 @@ pub struct EvaluationMaterialUncertainty {
     pub confidence: String,
     pub authorization_question: String,
     pub not_evaluated_risk_signals: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct EvaluationSyncRole {
+    pub role_id: String,
+    pub company: String,
+    pub title: String,
+    pub source_identity_hash: String,
+    pub canonical_status: Option<String>,
+    pub canonical_tracker_id: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct EvaluationSyncResult {
+    pub promoted: usize,
+    pub unchanged: usize,
+    pub held: usize,
+    pub terminal: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

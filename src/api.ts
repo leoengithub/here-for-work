@@ -27,6 +27,7 @@ const isTauri = (): boolean => "__TAURI_INTERNALS__" in window;
 
 const browserFallback: DashboardState = {
   roles: [],
+  preQueueRoles: [],
   recentlyDismissed: [],
   preparations: [],
   activity: [

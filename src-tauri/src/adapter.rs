@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -98,7 +99,6 @@ struct HistorySnapshot {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-#[allow(dead_code)]
 pub struct EvaluationResultReadInput {
     pub report_path: String,
     pub report_sha256: String,
@@ -392,7 +392,6 @@ impl AdapterConfig {
         Ok(snapshot.records)
     }
 
-    #[allow(dead_code)]
     pub fn evaluation_result_read(
         &self,
         input: &EvaluationResultReadInput,
@@ -402,6 +401,66 @@ impl AdapterConfig {
             serde_json::to_value(input).expect("evaluation result input serializes"),
         )?;
         serde_json::from_value(result).map_err(|error| AdapterError::InvalidData(error.to_string()))
+    }
+
+    pub fn evaluation_result_input(
+        &self,
+        record: &HistoryRecord,
+        compatibility_fingerprint: &str,
+    ) -> Result<EvaluationResultReadInput, AdapterError> {
+        let link = strict_tracker_report_link(&record.report)?;
+        let root = std::fs::canonicalize(&self.career_ops_root).map_err(|error| {
+            AdapterError::InvalidData(format!("career-ops root is unavailable: {error}"))
+        })?;
+        let tracker = if self.career_ops_root.join("data/applications.md").is_file() {
+            self.career_ops_root.join("data/applications.md")
+        } else {
+            self.career_ops_root.join("applications.md")
+        };
+        let tracker = std::fs::canonicalize(tracker).map_err(|error| {
+            AdapterError::InvalidData(format!("canonical tracker is unavailable: {error}"))
+        })?;
+        ensure_inside_root(&root, &tracker, "canonical tracker")?;
+        let report = std::fs::canonicalize(
+            tracker
+                .parent()
+                .ok_or_else(|| {
+                    AdapterError::InvalidData("canonical tracker has no parent".to_string())
+                })?
+                .join(link),
+        )
+        .map_err(|error| {
+            AdapterError::InvalidData(format!(
+                "canonical evaluation report is unavailable: {error}"
+            ))
+        })?;
+        ensure_inside_root(&root, &report, "canonical evaluation report")?;
+        let metadata = std::fs::metadata(&report).map_err(|error| {
+            AdapterError::InvalidData(format!(
+                "canonical evaluation report is unavailable: {error}"
+            ))
+        })?;
+        if !metadata.is_file() || metadata.len() > 500_000 {
+            return Err(AdapterError::InvalidData(
+                "canonical evaluation report is not a bounded regular file".to_string(),
+            ));
+        }
+        let bytes = std::fs::read(&report)?;
+        let relative = report
+            .strip_prefix(&root)
+            .map_err(|_| {
+                AdapterError::InvalidData(
+                    "canonical evaluation report escaped career-ops".to_string(),
+                )
+            })?
+            .to_string_lossy()
+            .replace('\\', "/");
+        Ok(EvaluationResultReadInput {
+            report_path: relative,
+            report_sha256: format!("{:x}", Sha256::digest(bytes)),
+            tracker_id: record.id,
+            compatibility_fingerprint: compatibility_fingerprint.to_string(),
+        })
     }
 
     pub fn queue_filter_defaults(&self) -> Result<QueueFilters, AdapterError> {
@@ -617,6 +676,37 @@ impl AdapterConfig {
     }
 }
 
+fn strict_tracker_report_link(value: &str) -> Result<&str, AdapterError> {
+    let value = value.trim();
+    let marker = value.find("](").ok_or_else(|| {
+        AdapterError::InvalidData("canonical tracker report link is missing".to_string())
+    })?;
+    if !value.starts_with('[')
+        || !value.ends_with(')')
+        || value[marker + 2..value.len() - 1].contains(['(', ')'])
+    {
+        return Err(AdapterError::InvalidData(
+            "canonical tracker report link is ambiguous".to_string(),
+        ));
+    }
+    let link = &value[marker + 2..value.len() - 1];
+    if link.trim().is_empty() || Path::new(link).is_absolute() {
+        return Err(AdapterError::InvalidData(
+            "canonical tracker report link must be relative".to_string(),
+        ));
+    }
+    Ok(link)
+}
+
+fn ensure_inside_root(root: &Path, candidate: &Path, label: &str) -> Result<(), AdapterError> {
+    if candidate == root || !candidate.starts_with(root) {
+        return Err(AdapterError::InvalidData(format!(
+            "{label} must stay inside the career-ops root"
+        )));
+    }
+    Ok(())
+}
+
 fn read_all(mut reader: impl Read) -> std::io::Result<Vec<u8>> {
     let mut bytes = Vec::new();
     reader.read_to_end(&mut bytes)?;
@@ -652,4 +742,79 @@ pub fn discover_executable(home: &std::path::Path, name: &str) -> Option<PathBuf
         .unwrap_or_default()
         .into_iter()
         .find(|path| path.is_file())
+}
+
+#[cfg(test)]
+mod evaluation_pointer_tests {
+    use super::{AdapterConfig, HistoryRecord};
+    use sha2::{Digest, Sha256};
+
+    fn record(report: &str) -> HistoryRecord {
+        HistoryRecord {
+            id: 17,
+            date: "2026-09-02".to_string(),
+            company: "Example".to_string(),
+            role: "Frontend Engineer".to_string(),
+            score: "4.2/5".to_string(),
+            status: "Evaluated".to_string(),
+            pdf: "yes".to_string(),
+            report: report.to_string(),
+            notes: String::new(),
+        }
+    }
+
+    #[test]
+    fn evaluation_input_hashes_the_tracker_relative_report_without_writing_upstream() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(directory.path().join("data")).unwrap();
+        std::fs::create_dir_all(directory.path().join("reports")).unwrap();
+        std::fs::write(directory.path().join("data/applications.md"), "tracker").unwrap();
+        let bytes = b"# report";
+        std::fs::write(directory.path().join("reports/017.md"), bytes).unwrap();
+        let adapter = AdapterConfig {
+            node_path: "node".into(),
+            script_path: "adapter.mjs".into(),
+            career_ops_root: directory.path().into(),
+            tracker_index_path: directory.path().join("data/applications.db"),
+            staging_path: directory.path().join("outside-staging"),
+        };
+
+        let input = adapter
+            .evaluation_result_input(&record("[017](../reports/017.md)"), &"a".repeat(64))
+            .unwrap();
+
+        assert_eq!(input.report_path, "reports/017.md");
+        assert_eq!(input.report_sha256, format!("{:x}", Sha256::digest(bytes)));
+        assert_eq!(input.tracker_id, 17);
+        assert_eq!(
+            std::fs::read_to_string(directory.path().join("data/applications.md")).unwrap(),
+            "tracker"
+        );
+    }
+
+    #[test]
+    fn evaluation_input_rejects_a_tracker_report_escape() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(directory.path().join("data")).unwrap();
+        std::fs::create_dir_all(directory.path().join("reports")).unwrap();
+        std::fs::write(directory.path().join("data/applications.md"), "tracker").unwrap();
+        let outside = tempfile::NamedTempFile::new().unwrap();
+        std::os::unix::fs::symlink(outside.path(), directory.path().join("reports/escape.md"))
+            .unwrap();
+        let adapter = AdapterConfig {
+            node_path: "node".into(),
+            script_path: "adapter.mjs".into(),
+            career_ops_root: directory.path().into(),
+            tracker_index_path: directory.path().join("data/applications.db"),
+            staging_path: directory.path().join("outside-staging"),
+        };
+        assert!(
+            adapter
+                .evaluation_result_input(
+                    &record("[outside](../reports/escape.md)"),
+                    &"a".repeat(64),
+                )
+                .is_err()
+        );
+    }
 }

@@ -25,6 +25,32 @@ export interface RoleSummary {
   preparationState: PreparationState;
   canonicalTrackerId: number | null;
   canonicalStatus: string | null;
+  evaluation?: QueueEvaluationSummary | null;
+}
+
+export interface QueueEvaluationSummary {
+  nativeScore: number;
+  strengths: string[];
+  blockers: string[];
+  gaps: string[];
+  compensation: string | null;
+  authorizationConfidence: string;
+  authorizationQuestion: string;
+  materialUncertainty: {
+    confidence: "Low" | "Medium" | "High";
+    authorizationQuestion: string;
+    notEvaluatedRiskSignals: string[];
+  };
+}
+
+export interface PreQueueRoleSummary {
+  roleId: string;
+  company: string;
+  title: string;
+  state: "awaiting_evaluation" | "needs_attention" | "syncing";
+  reason: string;
+  attempt: number;
+  updatedAt: string;
 }
 
 export interface ActivityEntry {
@@ -36,6 +62,7 @@ export interface ActivityEntry {
 
 export interface DashboardState {
   roles: RoleSummary[];
+  preQueueRoles: PreQueueRoleSummary[];
   recentlyDismissed: RoleSummary[];
   preparations: PreparationSummary[];
   activity: ActivityEntry[];

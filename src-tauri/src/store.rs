@@ -10,16 +10,18 @@ use uuid::Uuid;
 use crate::domain::{
     ActivityEntry, AdapterEffectContext, AdapterRoleContext, BrowserAnswerCommitWork,
     BrowserAnswerWork, BrowserCommand, BrowserInspection, BrowserSessionSummary, CvFallbackSetting,
-    DashboardState, DiscoveryDataset, DiscoveryFinding, HistoryRecord, ImportResult, LeasedRun,
-    OutcomeNotification, PreparationCleanupWork, PreparationSummary, PreparationWork, QueueFilters,
-    QueueGroup, ReconcileResult, RestorePreflight, RoleSummary, RunSummary, ScheduledRun,
-    SourceScheduleSummary,
+    DashboardState, DiscoveryDataset, DiscoveryFinding, EvaluationResultRead, EvaluationSyncRole,
+    HistoryRecord, ImportResult, LeasedRun, OutcomeNotification, PreQueueRoleSummary,
+    PreparationCleanupWork, PreparationSummary, PreparationWork, QueueEvaluationSummary,
+    QueueFilters, QueueGroup, ReconcileResult, RestorePreflight, RoleSummary, RunSummary,
+    ScheduledRun, SourceScheduleSummary,
 };
 
-const SCHEMA_VERSION: i64 = 16;
+const SCHEMA_VERSION: i64 = 17;
 const MAX_RUN_ATTEMPTS: i64 = 3;
 const MAX_BROWSER_COMMAND_ATTEMPTS: i64 = 3;
 const MAX_ACTIVE_PREPARATIONS: i64 = 2;
+const EVALUATION_LEASE_SECONDS: i64 = 120;
 const RUN_STEPS: [&str; 3] = ["discover", "reconcile", "notify"];
 
 #[derive(Debug, Error)]
@@ -446,6 +448,55 @@ impl Store {
             )?;
             version = 16;
         }
+        if version < 17 {
+            self.connection.execute_batch(
+                "BEGIN IMMEDIATE;
+                 CREATE TABLE IF NOT EXISTS evaluation_receipts (
+                   receipt_key TEXT PRIMARY KEY,
+                   role_id TEXT NOT NULL REFERENCES roles(id) ON DELETE CASCADE,
+                   tracker_id INTEGER NOT NULL,
+                   report_path TEXT NOT NULL,
+                   report_hash TEXT NOT NULL,
+                   upstream_revision TEXT NOT NULL,
+                   compatibility_fingerprint TEXT NOT NULL,
+                   source_identity_hash TEXT NOT NULL,
+                   native_score REAL NOT NULL,
+                   final_decision TEXT NOT NULL,
+                   legitimacy TEXT NOT NULL,
+                   strengths_json TEXT NOT NULL,
+                   blockers_json TEXT NOT NULL,
+                   gaps_json TEXT NOT NULL,
+                   compensation TEXT,
+                   authorization_confidence TEXT NOT NULL,
+                   authorization_question TEXT NOT NULL,
+                   material_uncertainty_json TEXT NOT NULL,
+                   created_at TEXT NOT NULL,
+                   UNIQUE(role_id, tracker_id, report_hash, upstream_revision, compatibility_fingerprint, source_identity_hash)
+                 );
+                 CREATE TABLE IF NOT EXISTS evaluation_sync (
+                   role_id TEXT PRIMARY KEY REFERENCES roles(id) ON DELETE CASCADE,
+                   state TEXT NOT NULL,
+                   reason TEXT NOT NULL,
+                   attempt INTEGER NOT NULL DEFAULT 0,
+                   input_hash TEXT,
+                   current_receipt_key TEXT REFERENCES evaluation_receipts(receipt_key),
+                   lease_expires_at TEXT,
+                   created_at TEXT NOT NULL,
+                   updated_at TEXT NOT NULL
+                 );
+                 CREATE INDEX IF NOT EXISTS evaluation_sync_claimable
+                   ON evaluation_sync(state, lease_expires_at, updated_at);
+                 INSERT OR IGNORE INTO evaluation_sync(
+                   role_id, state, reason, created_at, updated_at
+                 )
+                 SELECT id, 'awaiting_evaluation', 'evaluation_receipt_required',
+                        updated_at, updated_at
+                   FROM roles;
+                 UPDATE schema_meta SET version = 17;
+                 COMMIT;",
+            )?;
+            version = 17;
+        }
         if version != SCHEMA_VERSION {
             return Err(StoreError::Database(rusqlite::Error::InvalidQuery));
         }
@@ -507,6 +558,31 @@ impl Store {
                     finding.posted_at,
                 ],
             )?;
+            transaction.execute(
+                "INSERT OR IGNORE INTO evaluation_sync(
+                   role_id, state, reason, created_at, updated_at
+                 ) VALUES (?1, 'awaiting_evaluation', 'evaluation_receipt_required', ?2, ?2)",
+                params![role_id, Utc::now().to_rfc3339()],
+            )?;
+            if existing_hash.as_deref() != Some(payload_hash.as_str()) {
+                transaction.execute(
+                    "UPDATE evaluation_sync
+                        SET state = CASE
+                              WHEN (SELECT canonical_status FROM roles WHERE id = ?1)
+                                   IN ('Applied', 'Discarded') THEN 'terminal'
+                              ELSE 'awaiting_evaluation'
+                            END,
+                            reason = CASE
+                              WHEN (SELECT canonical_status FROM roles WHERE id = ?1)
+                                   IN ('Applied', 'Discarded') THEN 'canonical_terminal'
+                              ELSE 'source_identity_changed'
+                            END,
+                            input_hash = NULL, current_receipt_key = NULL,
+                            lease_expires_at = NULL, updated_at = ?2
+                      WHERE role_id = ?1",
+                    params![role_id, Utc::now().to_rfc3339()],
+                )?;
+            }
         }
 
         transaction.execute(
@@ -536,6 +612,309 @@ impl Store {
             params![if enabled { "true" } else { "false" }, Utc::now().to_rfc3339()],
         )?;
         Ok(())
+    }
+
+    pub fn evaluation_sync_roles(&self) -> Result<Vec<EvaluationSyncRole>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT r.id, r.company, r.title, r.canonical_status,
+                    r.canonical_tracker_id,
+                    r.normalized_key,
+                    COALESCE((
+                      SELECT group_concat(ordered.identity, '|') FROM (
+                        SELECT source_id || ':' || source_role_id || ':' || payload_hash AS identity
+                          FROM source_occurrences WHERE role_id = r.id
+                         ORDER BY source_id, source_role_id
+                      ) ordered
+                    ), '')
+               FROM roles r
+              ORDER BY r.id",
+        )?;
+        statement
+            .query_map([], |row| {
+                let normalized_key = row.get::<_, String>(5)?;
+                let occurrences = row.get::<_, String>(6)?;
+                Ok(EvaluationSyncRole {
+                    role_id: row.get(0)?,
+                    company: row.get(1)?,
+                    title: row.get(2)?,
+                    canonical_status: row.get(3)?,
+                    canonical_tracker_id: row.get(4)?,
+                    source_identity_hash: format!(
+                        "{:x}",
+                        Sha256::digest(format!("{normalized_key}\n{occurrences}"))
+                    ),
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
+    }
+
+    pub fn recover_expired_evaluation_syncs(&mut self) -> Result<usize, StoreError> {
+        let now = Utc::now().to_rfc3339();
+        self.connection
+            .execute(
+                "UPDATE evaluation_sync
+                    SET state = 'awaiting_evaluation', reason = 'evaluation_sync_lease_expired',
+                        current_receipt_key = NULL, lease_expires_at = NULL, updated_at = ?1
+                  WHERE state = 'syncing' AND lease_expires_at < ?1",
+                [&now],
+            )
+            .map_err(StoreError::from)
+    }
+
+    pub fn invalidate_evaluation_compatibility(
+        &mut self,
+        upstream_revision: Option<&str>,
+        compatibility_fingerprint: Option<&str>,
+    ) -> Result<usize, StoreError> {
+        let now = Utc::now().to_rfc3339();
+        self.connection
+            .execute(
+                "UPDATE evaluation_sync
+                    SET state = 'needs_attention', reason = 'evaluation_compatibility_changed',
+                        current_receipt_key = NULL, input_hash = NULL,
+                        lease_expires_at = NULL, updated_at = ?1
+                  WHERE current_receipt_key IS NOT NULL
+                    AND NOT EXISTS (
+                      SELECT 1 FROM evaluation_receipts receipt
+                       WHERE receipt.receipt_key = evaluation_sync.current_receipt_key
+                         AND receipt.upstream_revision = ?2
+                         AND receipt.compatibility_fingerprint = ?3
+                    )",
+                params![now, upstream_revision, compatibility_fingerprint],
+            )
+            .map_err(StoreError::from)
+    }
+
+    pub fn claim_evaluation_sync(
+        &mut self,
+        role_id: &str,
+        input_hash: &str,
+    ) -> Result<bool, StoreError> {
+        let transaction = self.connection.transaction()?;
+        let now = Utc::now();
+        let current = transaction
+            .query_row(
+                "SELECT state, input_hash, lease_expires_at FROM evaluation_sync WHERE role_id = ?1",
+                [role_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((state, stored_hash, lease)) = current else {
+            return Err(StoreError::InvalidPreparation(
+                "role has no evaluation lifecycle".to_string(),
+            ));
+        };
+        if state == "terminal"
+            || matches!(
+                state.as_str(),
+                "ready" | "needs_decision" | "hidden" | "needs_attention"
+            ) && stored_hash.as_deref() == Some(input_hash)
+        {
+            return Ok(false);
+        }
+        if state == "syncing"
+            && lease
+                .as_deref()
+                .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+                .is_some_and(|value| value.with_timezone(&Utc) >= now)
+        {
+            return Ok(false);
+        }
+        transaction.execute(
+            "UPDATE evaluation_sync
+                SET state = 'syncing', reason = 'evaluation_result_read_pending',
+                    attempt = attempt + 1, input_hash = ?1, current_receipt_key = NULL,
+                    lease_expires_at = ?2, updated_at = ?3
+              WHERE role_id = ?4",
+            params![
+                input_hash,
+                (now + Duration::seconds(EVALUATION_LEASE_SECONDS)).to_rfc3339(),
+                now.to_rfc3339(),
+                role_id
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(true)
+    }
+
+    pub fn hold_evaluation(
+        &mut self,
+        role_id: &str,
+        state: &str,
+        reason: &str,
+    ) -> Result<(), StoreError> {
+        if !matches!(
+            state,
+            "awaiting_evaluation" | "needs_attention" | "terminal"
+        ) {
+            return Err(StoreError::InvalidPreparation(
+                "invalid evaluation hold state".to_string(),
+            ));
+        }
+        let reason = sanitize_evaluation_reason(reason);
+        self.connection.execute(
+            "UPDATE evaluation_sync
+                SET state = ?1, reason = ?2, current_receipt_key = NULL,
+                    lease_expires_at = NULL, updated_at = ?3
+              WHERE role_id = ?4",
+            params![state, reason, Utc::now().to_rfc3339(), role_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn complete_evaluation_sync(
+        &mut self,
+        role: &EvaluationSyncRole,
+        input_hash: &str,
+        result: &EvaluationResultRead,
+    ) -> Result<bool, StoreError> {
+        if result.canonical.tracker_id < 1
+            || result.canonical.score != result.evaluation.score
+            || !(1.0..=5.0).contains(&result.evaluation.score)
+            || !company_matches(&role.company, &result.role.company)
+            || !title_matches(&role.title, &result.role.title)
+        {
+            return Err(StoreError::InvalidPreparation(
+                "evaluation result identity or native score does not match the role".to_string(),
+            ));
+        }
+        let transaction = self.connection.transaction()?;
+        let leased = transaction.query_row(
+            "SELECT COUNT(*) FROM evaluation_sync
+              WHERE role_id = ?1 AND state = 'syncing' AND input_hash = ?2",
+            params![role.role_id, input_hash],
+            |row| row.get::<_, i64>(0),
+        )?;
+        if leased != 1 {
+            return Err(StoreError::InvalidPreparation(
+                "evaluation sync lease is no longer current".to_string(),
+            ));
+        }
+        let needs_decision = result.evaluation.final_decision == "Research first"
+            || result.evaluation.confidence != "High"
+            || !result.evaluation.blockers.is_empty()
+            || !result.evaluation.gaps.is_empty()
+            || !result
+                .evaluation
+                .material_uncertainty
+                .not_evaluated_risk_signals
+                .is_empty();
+        let state = if result.evaluation.final_decision == "Skip"
+            || result.evaluation.legitimacy_tier == "Suspicious"
+        {
+            "hidden"
+        } else if needs_decision {
+            "needs_decision"
+        } else {
+            "ready"
+        };
+        let strengths = result
+            .evaluation
+            .strengths
+            .iter()
+            .take(3)
+            .cloned()
+            .collect::<Vec<_>>();
+        let blockers = result
+            .evaluation
+            .blockers
+            .iter()
+            .take(3)
+            .cloned()
+            .collect::<Vec<_>>();
+        let gaps = result
+            .evaluation
+            .gaps
+            .iter()
+            .take(3)
+            .cloned()
+            .collect::<Vec<_>>();
+        let material_uncertainty = serde_json::json!({
+            "confidence": result.evaluation.material_uncertainty.confidence,
+            "authorizationQuestion": result.evaluation.material_uncertainty.authorization_question,
+            "notEvaluatedRiskSignals": result.evaluation.material_uncertainty.not_evaluated_risk_signals,
+        });
+        let receipt_identity = serde_json::json!({
+            "roleId": role.role_id,
+            "trackerId": result.canonical.tracker_id,
+            "report": result.report,
+            "upstreamRevision": result.upstream_revision,
+            "compatibilityFingerprint": result.compatibility_fingerprint,
+            "sourceIdentityHash": role.source_identity_hash,
+        });
+        let receipt_key = format!(
+            "{:x}",
+            Sha256::digest(serde_json::to_vec(&receipt_identity)?)
+        );
+        let now = Utc::now().to_rfc3339();
+        transaction.execute(
+            "INSERT OR IGNORE INTO evaluation_receipts(
+               receipt_key, role_id, tracker_id, report_path, report_hash,
+               upstream_revision, compatibility_fingerprint, source_identity_hash,
+               native_score, final_decision, legitimacy, strengths_json,
+               blockers_json, gaps_json, compensation, authorization_confidence,
+               authorization_question, material_uncertainty_json, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
+                       ?14, ?15, ?16, ?17, ?18, ?19)",
+            params![
+                receipt_key,
+                role.role_id,
+                result.canonical.tracker_id,
+                result.report.path,
+                result.report.sha256,
+                result.upstream_revision,
+                result.compatibility_fingerprint,
+                role.source_identity_hash,
+                result.evaluation.score,
+                result.evaluation.final_decision,
+                result.evaluation.legitimacy_tier,
+                serde_json::to_string(&strengths)?,
+                serde_json::to_string(&blockers)?,
+                serde_json::to_string(&gaps)?,
+                result.evaluation.compensation.advertised,
+                result.evaluation.authorization.confidence,
+                result.evaluation.authorization.question,
+                material_uncertainty.to_string(),
+                now,
+            ],
+        )?;
+        transaction.execute(
+            "UPDATE evaluation_sync
+                SET state = ?1, reason = ?2, current_receipt_key = ?3,
+                    lease_expires_at = NULL, updated_at = ?4
+              WHERE role_id = ?5 AND state = 'syncing' AND input_hash = ?6",
+            params![
+                state,
+                if state == "hidden" {
+                    "canonical_evaluation_not_viable"
+                } else {
+                    "canonical_evaluation_verified"
+                },
+                receipt_key,
+                now,
+                role.role_id,
+                input_hash,
+            ],
+        )?;
+        transaction.execute(
+            "UPDATE roles SET canonical_tracker_id = ?1, canonical_status = ?2, updated_at = ?3
+              WHERE id = ?4",
+            params![
+                result.canonical.tracker_id,
+                result.canonical.status,
+                now,
+                role.role_id
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(matches!(state, "ready" | "needs_decision"))
     }
 
     pub fn background_enabled(&self) -> Result<bool, StoreError> {
@@ -1918,24 +2297,24 @@ impl Store {
              WHERE canonical_tracker_id IS NOT NULL",
             [],
         )?;
-        let mut role_statement = transaction.prepare("SELECT id, company, title FROM roles")?;
+        let mut role_statement =
+            transaction.prepare("SELECT id, company, title, application_url FROM roles")?;
         let roles = role_statement
             .query_map([], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
         drop(role_statement);
 
         let mut matched = 0;
-        for (role_id, company, title) in roles {
-            if let Some(record) = records
-                .iter()
-                .filter(|record| company_matches(&company, &record.company))
-                .find(|record| title_matches(&title, &record.role))
+        for (role_id, company, title, application_url) in roles {
+            if let Some(record) =
+                deterministic_history_match(records, &company, &title, application_url.as_deref())
             {
                 transaction.execute(
                     "UPDATE roles SET canonical_tracker_id = ?1, canonical_status = ?2, canonical_date = ?3,
@@ -1950,12 +2329,43 @@ impl Store {
                         role_id
                     ],
                 )?;
+                transaction.execute(
+                    "UPDATE evaluation_sync
+                        SET state = CASE
+                              WHEN ?1 IN ('Applied', 'Discarded') THEN 'terminal'
+                              WHEN state = 'terminal' THEN 'awaiting_evaluation'
+                              ELSE state END,
+                            reason = CASE
+                              WHEN ?1 IN ('Applied', 'Discarded') THEN 'canonical_terminal'
+                              WHEN state = 'terminal' THEN 'canonical_evaluation_requires_refresh'
+                              ELSE reason END,
+                            current_receipt_key = CASE
+                              WHEN ?1 IN ('Applied', 'Discarded') OR state = 'terminal'
+                              THEN NULL ELSE current_receipt_key END,
+                            input_hash = CASE WHEN state = 'terminal' THEN NULL ELSE input_hash END,
+                            lease_expires_at = CASE
+                              WHEN ?1 IN ('Applied', 'Discarded') OR state = 'terminal'
+                              THEN NULL ELSE lease_expires_at END,
+                            updated_at = ?2
+                      WHERE role_id = ?3",
+                    params![record.status, Utc::now().to_rfc3339(), role_id],
+                )?;
                 matched += 1;
             }
         }
         transaction.execute(
             "UPDATE roles SET canonical_visibility_override = 0 WHERE canonical_tracker_id IS NULL",
             [],
+        )?;
+        transaction.execute(
+            "UPDATE evaluation_sync
+                SET state = 'awaiting_evaluation', reason = 'canonical_evaluation_missing',
+                    current_receipt_key = NULL, input_hash = NULL,
+                    lease_expires_at = NULL, updated_at = ?1
+              WHERE role_id IN (
+                SELECT id FROM roles WHERE canonical_tracker_id IS NULL
+              )",
+            [Utc::now().to_rfc3339()],
         )?;
         transaction.execute(
             "INSERT INTO activity(id, kind, message, occurred_at) VALUES (?1, 'history', ?2, ?3)",
@@ -2039,6 +2449,22 @@ impl Store {
         if !matches!(provider, "codex" | "claude") {
             return Err(StoreError::InvalidPreparation(
                 "provider must be codex or claude".to_string(),
+            ));
+        }
+        let evaluation_ready = self.connection.query_row(
+            "SELECT EXISTS(
+               SELECT 1 FROM evaluation_sync evaluation
+              JOIN evaluation_receipts receipt
+                 ON receipt.receipt_key = evaluation.current_receipt_key
+              WHERE evaluation.role_id = ?1
+                AND evaluation.state = 'ready'
+             )",
+            [role_id],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if !evaluation_ready {
+            return Err(StoreError::InvalidPreparation(
+                "the role is awaiting a current canonical career-ops evaluation".to_string(),
             ));
         }
         let role = self.adapter_role_context(role_id)?;
@@ -2490,14 +2916,19 @@ impl Store {
                 |row| row.get::<_, String>(0),
             )
             .optional()?;
-        let dismissible = match (
-            preparation_status.as_str(),
-            latest_application_status.as_deref(),
-        ) {
-            ("action_required", None | Some("action_required") | Some("review_required")) => true,
-            ("completed", Some("action_required") | Some("review_required")) => true,
-            _ => false,
-        };
+        let dismissible = matches!(
+            (
+                preparation_status.as_str(),
+                latest_application_status.as_deref(),
+            ),
+            (
+                "action_required",
+                None | Some("action_required") | Some("review_required")
+            ) | (
+                "completed",
+                Some("action_required") | Some("review_required")
+            )
+        );
         if !dismissible {
             return Err(StoreError::InvalidPreparation(
                 "only a failed preparation or an application ready for review can be dismissed"
@@ -3513,13 +3944,23 @@ impl Store {
             "SELECT
                r.id, r.company, r.title, r.location,
                COALESCE(MIN(s.source), 'Unknown'), COUNT(s.id),
-               r.queue_group, r.eligibility_summary, r.uncertainty,
+               CASE WHEN evaluation.state = 'needs_decision' THEN 'needs_decision'
+                    ELSE r.queue_group END,
+               r.eligibility_summary, r.uncertainty,
                CASE WHEN COUNT(DISTINCT s.posted_at) = 1 THEN MIN(s.posted_at) ELSE NULL END,
                r.discovered_at, r.application_url, r.preparation_state,
-               r.canonical_tracker_id, r.canonical_status
+               r.canonical_tracker_id, r.canonical_status,
+               receipt.native_score, receipt.strengths_json, receipt.blockers_json,
+               receipt.gaps_json, receipt.compensation,
+               receipt.authorization_confidence, receipt.authorization_question,
+               receipt.material_uncertainty_json
              FROM roles r
              LEFT JOIN source_occurrences s ON s.role_id = r.id
-             WHERE (r.canonical_tracker_id IS NULL OR r.canonical_visibility_override = 1)
+             JOIN evaluation_sync evaluation ON evaluation.role_id = r.id
+             JOIN evaluation_receipts receipt
+               ON receipt.receipt_key = evaluation.current_receipt_key
+             WHERE evaluation.state IN ('ready', 'needs_decision')
+               AND COALESCE(r.canonical_status, '') NOT IN ('Applied', 'Discarded')
                AND COALESCE(r.legitimacy, '') <> 'suspicious'
                AND r.preparation_state = 'not_started'
              GROUP BY r.id
@@ -3551,6 +3992,14 @@ impl Store {
                     row.get::<_, String>(12)?,
                     row.get::<_, Option<i64>>(13)?,
                     row.get::<_, Option<String>>(14)?,
+                    row.get::<_, Option<f64>>(15)?,
+                    row.get::<_, Option<String>>(16)?,
+                    row.get::<_, Option<String>>(17)?,
+                    row.get::<_, Option<String>>(18)?,
+                    row.get::<_, Option<String>>(19)?,
+                    row.get::<_, Option<String>>(20)?,
+                    row.get::<_, Option<String>>(21)?,
+                    row.get::<_, Option<String>>(22)?,
                 ))
             })?
             .map(role_summary_from_tuple)
@@ -3564,9 +4013,16 @@ impl Store {
                r.queue_group, r.eligibility_summary, r.uncertainty,
                CASE WHEN COUNT(DISTINCT s.posted_at) = 1 THEN MIN(s.posted_at) ELSE NULL END,
                r.discovered_at, r.application_url, r.preparation_state,
-               r.canonical_tracker_id, r.canonical_status
+               r.canonical_tracker_id, r.canonical_status,
+               receipt.native_score, receipt.strengths_json, receipt.blockers_json,
+               receipt.gaps_json, receipt.compensation,
+               receipt.authorization_confidence, receipt.authorization_question,
+               receipt.material_uncertainty_json
              FROM roles r
              LEFT JOIN source_occurrences s ON s.role_id = r.id
+             LEFT JOIN evaluation_sync evaluation ON evaluation.role_id = r.id
+             LEFT JOIN evaluation_receipts receipt
+               ON receipt.receipt_key = evaluation.current_receipt_key
              WHERE r.review_state = 'dismissed' AND r.canonical_status = 'Discarded'
              GROUP BY r.id
              ORDER BY r.updated_at DESC LIMIT 5",
@@ -3590,6 +4046,14 @@ impl Store {
                     row.get::<_, String>(12)?,
                     row.get::<_, Option<i64>>(13)?,
                     row.get::<_, Option<String>>(14)?,
+                    row.get::<_, Option<f64>>(15)?,
+                    row.get::<_, Option<String>>(16)?,
+                    row.get::<_, Option<String>>(17)?,
+                    row.get::<_, Option<String>>(18)?,
+                    row.get::<_, Option<String>>(19)?,
+                    row.get::<_, Option<String>>(20)?,
+                    row.get::<_, Option<String>>(21)?,
+                    row.get::<_, Option<String>>(22)?,
                 ))
             })?
             .map(role_summary_from_tuple)
@@ -3652,11 +4116,35 @@ impl Store {
             setting(&self.connection, "background_enabled")?.as_deref() == Some("true");
         let adapter_ready = setting(&self.connection, "adapter_ready")?.as_deref() == Some("true");
         let handled_count = self.connection.query_row(
-            "SELECT COUNT(*) FROM roles
-              WHERE canonical_tracker_id IS NOT NULL AND canonical_visibility_override = 0",
+            "SELECT COUNT(*) FROM roles r
+               LEFT JOIN evaluation_sync evaluation ON evaluation.role_id = r.id
+              WHERE r.canonical_status IN ('Applied', 'Discarded')
+                 OR evaluation.state = 'hidden'",
             [],
             |row| row.get(0),
         )?;
+        let mut pre_queue_statement = self.connection.prepare(
+            "SELECT r.id, r.company, r.title, evaluation.state, evaluation.reason,
+                    evaluation.attempt, evaluation.updated_at
+               FROM evaluation_sync evaluation
+               JOIN roles r ON r.id = evaluation.role_id
+              WHERE evaluation.state IN ('awaiting_evaluation', 'needs_attention', 'syncing')
+                AND COALESCE(r.canonical_status, '') NOT IN ('Applied', 'Discarded')
+              ORDER BY evaluation.updated_at DESC, r.company COLLATE NOCASE",
+        )?;
+        let pre_queue_roles = pre_queue_statement
+            .query_map([], |row| {
+                Ok(PreQueueRoleSummary {
+                    role_id: row.get(0)?,
+                    company: row.get(1)?,
+                    title: row.get(2)?,
+                    state: row.get(3)?,
+                    reason: row.get(4)?,
+                    attempt: row.get(5)?,
+                    updated_at: row.get(6)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
         let pending_run_count = self.connection.query_row(
             "SELECT COUNT(*) FROM runs WHERE status IN ('queued', 'retryable', 'running')",
             [],
@@ -3713,6 +4201,7 @@ impl Store {
 
         Ok(DashboardState {
             roles,
+            pre_queue_roles,
             recently_dismissed,
             preparations,
             activity,
@@ -4058,6 +4547,21 @@ fn sanitize_preparation_error(value: &str) -> String {
     }
 }
 
+fn sanitize_evaluation_reason(value: &str) -> String {
+    let normalized = value
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(240)
+        .collect::<String>();
+    if normalized.is_empty() {
+        "evaluation_result_unavailable".to_string()
+    } else {
+        normalized
+    }
+}
+
 fn sanitize_retry_policy(value: &str) -> &'static str {
     match value {
         "retry_same_preparation" => "retry_same_preparation",
@@ -4118,6 +4622,14 @@ type RoleSummaryTuple = (
     String,
     Option<i64>,
     Option<String>,
+    Option<f64>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
 );
 
 fn role_summary_from_tuple(
@@ -4139,6 +4651,14 @@ fn role_summary_from_tuple(
         preparation_state,
         canonical_tracker_id,
         canonical_status,
+        native_score,
+        strengths_json,
+        blockers_json,
+        gaps_json,
+        compensation,
+        authorization_confidence,
+        authorization_question,
+        material_uncertainty_json,
     ) = result?;
     let parsed_group = QueueGroup::parse(&queue_group)
         .ok_or_else(|| StoreError::InvalidQueueGroup(queue_group.clone()))?;
@@ -4158,6 +4678,36 @@ fn role_summary_from_tuple(
         preparation_state,
         canonical_tracker_id,
         canonical_status,
+        evaluation: match (
+            native_score,
+            strengths_json,
+            blockers_json,
+            gaps_json,
+            authorization_confidence,
+            authorization_question,
+            material_uncertainty_json,
+        ) {
+            (
+                Some(native_score),
+                Some(strengths),
+                Some(blockers),
+                Some(gaps),
+                Some(authorization_confidence),
+                Some(authorization_question),
+                Some(material_uncertainty),
+            ) => Some(QueueEvaluationSummary {
+                native_score,
+                strengths: serde_json::from_str(&strengths).map_err(StoreError::InvalidDataset)?,
+                blockers: serde_json::from_str(&blockers).map_err(StoreError::InvalidDataset)?,
+                gaps: serde_json::from_str(&gaps).map_err(StoreError::InvalidDataset)?,
+                compensation,
+                authorization_confidence,
+                authorization_question,
+                material_uncertainty: serde_json::from_str(&material_uncertainty)
+                    .map_err(StoreError::InvalidDataset)?,
+            }),
+            _ => None,
+        },
     })
 }
 
@@ -4363,6 +4913,46 @@ fn company_matches(discovered: &str, canonical: &str) -> bool {
         || (canonical.len() >= 4 && discovered.contains(&canonical))
 }
 
+fn deterministic_history_match<'a>(
+    records: &'a [HistoryRecord],
+    company: &str,
+    title: &str,
+    application_url: Option<&str>,
+) -> Option<&'a HistoryRecord> {
+    if let Some(application_url) = application_url {
+        let exact_url = records
+            .iter()
+            .filter(|record| tracker_notes_contain_exact_url(&record.notes, application_url))
+            .collect::<Vec<_>>();
+        if exact_url.len() == 1 {
+            return exact_url.into_iter().next();
+        }
+        if exact_url.len() > 1 {
+            return None;
+        }
+    }
+    let fallback = records
+        .iter()
+        .filter(|record| company_matches(company, &record.company))
+        .filter(|record| title_matches(title, &record.role))
+        .collect::<Vec<_>>();
+    (fallback.len() == 1).then(|| fallback[0])
+}
+
+fn tracker_notes_contain_exact_url(notes: &str, expected: &str) -> bool {
+    let expected = normalized_history_url(expected);
+    notes
+        .split_whitespace()
+        .map(normalized_history_url)
+        .any(|candidate| candidate == expected)
+}
+
+fn normalized_history_url(value: &str) -> &str {
+    value
+        .trim_end_matches(['.', ',', ';', ')', ']', '}'])
+        .trim_end_matches('/')
+}
+
 fn title_matches(discovered: &str, canonical: &str) -> bool {
     let discovered = normalized_words(discovered);
     let canonical = normalized_words(canonical);
@@ -4417,7 +5007,11 @@ fn missed_nominal_times(
 #[cfg(test)]
 mod tests {
     use super::{PreparationCompletion, QueueFilters, Store};
-    use crate::domain::{BrowserSessionSummary, PreparationWork};
+    use crate::domain::{
+        BrowserSessionSummary, EvaluationResultRead, HistoryRecord, ImportResult, PreparationWork,
+        QueueGroup,
+    };
+    use sha2::Digest;
 
     const DATASET: &str = r#"{
       "schemaVersion": 1,
@@ -4441,6 +5035,81 @@ mod tests {
       ]
     }"#;
 
+    fn test_evaluation(
+        role: &crate::domain::EvaluationSyncRole,
+        final_decision: &str,
+        legitimacy: &str,
+        confidence: &str,
+    ) -> EvaluationResultRead {
+        let report_hash = format!("{:x}", sha2::Sha256::digest(role.role_id.as_bytes()));
+        serde_json::from_value(serde_json::json!({
+            "contract": "hereforwork.career-ops-evaluation-result",
+            "schemaVersion": 1,
+            "upstreamRevision": "d".repeat(40),
+            "compatibilityFingerprint": "c".repeat(64),
+            "report": { "path": format!("reports/{}.md", role.role_id), "sha256": report_hash },
+            "role": { "company": role.company, "title": role.title },
+            "canonical": { "trackerId": 42, "status": "Evaluated", "score": 4.2, "reportPath": format!("reports/{}.md", role.role_id) },
+            "evaluation": {
+                "score": 4.2,
+                "finalDecision": final_decision,
+                "legitimacyTier": legitimacy,
+                "archetype": "Frontend Engineer",
+                "nextAction": "Review the evaluated role.",
+                "strengths": ["Strong source-backed frontend match."],
+                "blockers": [],
+                "gaps": [],
+                "compensation": { "advertised": null },
+                "authorization": {
+                    "confidence": "interesting",
+                    "evidence": ["The source supports an eligible route."],
+                    "scope": "job-specific",
+                    "engagementMechanism": "employee_payroll",
+                    "question": "Confirm the employing entity.",
+                    "legacyWorkAuth": "unstated"
+                },
+                "riskLevel": "Low",
+                "confidence": confidence,
+                "riskSummary": {
+                    "legitimacy": if legitimacy == "Suspicious" { "suspicious" } else { "high_confidence" },
+                    "classification": "clear",
+                    "culture": "pass",
+                    "interviewRedflags": "none",
+                    "aiInfra": "consistent",
+                    "aiScreeningDisclosure": "no_match"
+                },
+                "materialUncertainty": {
+                    "confidence": confidence,
+                    "authorizationQuestion": "Confirm the employing entity.",
+                    "notEvaluatedRiskSignals": []
+                }
+            }
+        }))
+        .unwrap()
+    }
+
+    fn allow_all_test_roles(store: &mut Store) {
+        for role in store.evaluation_sync_roles().unwrap() {
+            let input_hash = format!("test:{}", role.source_identity_hash);
+            if !store
+                .claim_evaluation_sync(&role.role_id, &input_hash)
+                .unwrap()
+            {
+                continue;
+            }
+            let evaluation = test_evaluation(&role, "Apply", "High Confidence", "High");
+            store
+                .complete_evaluation_sync(&role, &input_hash, &evaluation)
+                .unwrap();
+        }
+    }
+
+    fn import_evaluated(store: &mut Store, payload: &str) -> ImportResult {
+        let result = store.import_dataset(payload).unwrap();
+        allow_all_test_roles(store);
+        result
+    }
+
     fn queue_and_claim(store: &mut Store, role_id: &str, provider: &str) -> PreparationWork {
         let queued = store.begin_preparation(role_id, provider).unwrap();
         let claimed = store.claim_preparation_work().unwrap().unwrap();
@@ -4449,7 +5118,7 @@ mod tests {
     }
 
     fn completed_preparation(store: &mut Store) -> PreparationWork {
-        store.import_dataset(DATASET).unwrap();
+        import_evaluated(store, DATASET);
         let role_id = store.dashboard().unwrap().roles[0].id.clone();
         let preparation = queue_and_claim(store, &role_id, "codex");
         store
@@ -4492,8 +5161,8 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
 
-        let first = store.import_dataset(DATASET).unwrap();
-        let second = store.import_dataset(DATASET).unwrap();
+        let first = import_evaluated(&mut store, DATASET);
+        let second = import_evaluated(&mut store, DATASET);
 
         assert_eq!(first.imported, 1);
         assert_eq!(second.unchanged, 1);
@@ -4503,13 +5172,206 @@ mod tests {
     }
 
     #[test]
-    fn reimporting_an_occurrence_without_a_publication_date_clears_it() {
+    fn imported_role_is_held_before_queue_and_cannot_prepare_without_a_receipt() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+
+        store.import_dataset(DATASET).unwrap();
+
+        let dashboard = store.dashboard().unwrap();
+        assert!(dashboard.roles.is_empty());
+        assert_eq!(dashboard.pre_queue_roles.len(), 1);
+        assert_eq!(dashboard.pre_queue_roles[0].state, "awaiting_evaluation");
+        assert_eq!(dashboard.handled_count, 0);
+        let error = store
+            .begin_preparation(&dashboard.pre_queue_roles[0].role_id, "codex")
+            .unwrap_err();
+        assert!(error.to_string().contains("awaiting a current canonical"));
+    }
+
+    #[test]
+    fn canonical_receipt_promotes_once_and_persists_only_the_bounded_projection() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("test.sqlite3");
+        let mut store = Store::open(&database).unwrap();
+        store.import_dataset(DATASET).unwrap();
+        let role = store.evaluation_sync_roles().unwrap().remove(0);
+        let input_hash = format!("receipt:{}", role.source_identity_hash);
+        assert!(
+            store
+                .claim_evaluation_sync(&role.role_id, &input_hash)
+                .unwrap()
+        );
+        let evaluation = test_evaluation(&role, "Apply", "High Confidence", "High");
+        assert!(
+            store
+                .complete_evaluation_sync(&role, &input_hash, &evaluation)
+                .unwrap()
+        );
+        assert!(
+            !store
+                .claim_evaluation_sync(&role.role_id, &input_hash)
+                .unwrap()
+        );
+
+        let dashboard = store.dashboard().unwrap();
+        assert_eq!(dashboard.roles.len(), 1);
+        let projection = dashboard.roles[0].evaluation.as_ref().unwrap();
+        assert_eq!(projection.native_score, 4.2);
+        assert_eq!(
+            projection.strengths,
+            ["Strong source-backed frontend match."]
+        );
+        assert_eq!(dashboard.handled_count, 0);
+        let receipts: i64 = store
+            .connection
+            .query_row("SELECT COUNT(*) FROM evaluation_receipts", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(receipts, 1);
+        drop(store);
+
+        let restarted = Store::open(&database).unwrap();
+        assert_eq!(restarted.dashboard().unwrap().roles.len(), 1);
+    }
+
+    #[test]
+    fn evaluated_human_decision_stays_in_queue_while_skip_and_suspicious_are_handled() {
+        for (decision, legitimacy, expected_roles, expected_handled) in [
+            ("Research first", "High Confidence", 1, 0),
+            ("Skip", "High Confidence", 0, 1),
+            ("Apply", "Suspicious", 0, 1),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+            store.import_dataset(DATASET).unwrap();
+            let role = store.evaluation_sync_roles().unwrap().remove(0);
+            let input_hash = format!(
+                "receipt:{}:{decision}:{legitimacy}",
+                role.source_identity_hash
+            );
+            assert!(
+                store
+                    .claim_evaluation_sync(&role.role_id, &input_hash)
+                    .unwrap()
+            );
+            let evaluation = test_evaluation(&role, decision, legitimacy, "High");
+            store
+                .complete_evaluation_sync(&role, &input_hash, &evaluation)
+                .unwrap();
+
+            let dashboard = store.dashboard().unwrap();
+            assert_eq!(dashboard.roles.len(), expected_roles);
+            assert_eq!(dashboard.handled_count, expected_handled);
+            if decision == "Research first" {
+                assert_eq!(dashboard.roles[0].queue_group, QueueGroup::NeedsDecision);
+                let error = store.begin_preparation(&role.role_id, "codex").unwrap_err();
+                assert!(error.to_string().contains("awaiting a current canonical"));
+            }
+        }
+    }
+
+    #[test]
+    fn changed_source_or_compatibility_invalidates_the_current_receipt() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+        import_evaluated(&mut store, DATASET);
+        assert_eq!(store.dashboard().unwrap().roles.len(), 1);
+
+        let changed = DATASET.replace("Remote, Europe", "Remote, Spain");
+        store.import_dataset(&changed).unwrap();
+        let held = store.dashboard().unwrap();
+        assert!(held.roles.is_empty());
+        assert_eq!(held.pre_queue_roles[0].reason, "source_identity_changed");
+
+        allow_all_test_roles(&mut store);
+        assert_eq!(store.dashboard().unwrap().roles.len(), 1);
+        assert_eq!(
+            store
+                .invalidate_evaluation_compatibility(Some(&"d".repeat(40)), Some(&"e".repeat(64)))
+                .unwrap(),
+            1
+        );
+        let invalidated = store.dashboard().unwrap();
+        assert!(invalidated.roles.is_empty());
+        assert_eq!(
+            invalidated.pre_queue_roles[0].reason,
+            "evaluation_compatibility_changed"
+        );
+    }
+
+    #[test]
+    fn expired_evaluation_lease_is_recoverable_without_duplicate_receipts() {
         let directory = tempfile::tempdir().unwrap();
         let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
         store.import_dataset(DATASET).unwrap();
+        let role = store.evaluation_sync_roles().unwrap().remove(0);
+        let input_hash = format!("receipt:{}", role.source_identity_hash);
+        assert!(
+            store
+                .claim_evaluation_sync(&role.role_id, &input_hash)
+                .unwrap()
+        );
+        store
+            .connection
+            .execute(
+                "UPDATE evaluation_sync SET lease_expires_at = '2020-01-01T00:00:00Z' WHERE role_id = ?1",
+                [&role.role_id],
+            )
+            .unwrap();
+        assert_eq!(store.recover_expired_evaluation_syncs().unwrap(), 1);
+        assert!(
+            store
+                .claim_evaluation_sync(&role.role_id, &input_hash)
+                .unwrap()
+        );
+        let evaluation = test_evaluation(&role, "Apply", "High Confidence", "High");
+        store
+            .complete_evaluation_sync(&role, &input_hash, &evaluation)
+            .unwrap();
+        assert_eq!(
+            store
+                .connection
+                .query_row("SELECT COUNT(*) FROM evaluation_receipts", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn ambiguous_history_fallback_does_not_bind_a_canonical_evaluation() {
+        let record = |id| HistoryRecord {
+            id,
+            date: "2026-09-02".to_string(),
+            company: "Northstar Tools".to_string(),
+            role: "Frontend Engineer".to_string(),
+            score: "4.2/5".to_string(),
+            status: "Evaluated".to_string(),
+            pdf: "yes".to_string(),
+            report: "[report](reports/example.md)".to_string(),
+            notes: String::new(),
+        };
+        assert!(
+            super::deterministic_history_match(
+                &[record(1), record(2)],
+                "Northstar Tools",
+                "Frontend Engineer",
+                None,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn reimporting_an_occurrence_without_a_publication_date_clears_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+        import_evaluated(&mut store, DATASET);
         let without_posted_at = DATASET.replace("          \"postedAt\": \"2026-08-28\",\n", "");
 
-        let result = store.import_dataset(&without_posted_at).unwrap();
+        let result = import_evaluated(&mut store, &without_posted_at);
 
         assert_eq!(result.updated, 1);
         assert!(store.dashboard().unwrap().roles[0].posted_at.is_none());
@@ -4519,13 +5381,13 @@ mod tests {
     fn conflicting_source_publication_dates_are_omitted_from_the_role() {
         let directory = tempfile::tempdir().unwrap();
         let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
-        store.import_dataset(DATASET).unwrap();
+        import_evaluated(&mut store, DATASET);
         let second_source = DATASET
             .replace("source-a", "source-b")
             .replace("role-1", "role-2")
             .replace("2026-08-28", "2026-08-27");
 
-        store.import_dataset(&second_source).unwrap();
+        import_evaluated(&mut store, &second_source);
 
         let dashboard = store.dashboard().unwrap();
         let role = &dashboard.roles[0];
@@ -4537,7 +5399,7 @@ mod tests {
     fn queue_filters_apply_to_existing_roles_and_future_imports() {
         let directory = tempfile::tempdir().unwrap();
         let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
-        store.import_dataset(DATASET).unwrap();
+        import_evaluated(&mut store, DATASET);
         store
             .set_queue_filters(&QueueFilters {
                 role_families: vec!["Frontend".to_string()],
@@ -4557,7 +5419,7 @@ mod tests {
                 "northstar-tools/frontend-engineer",
                 "backend-works/backend-engineer",
             );
-        store.import_dataset(&future_backend).unwrap();
+        import_evaluated(&mut store, &future_backend);
         let dashboard = store.dashboard().unwrap();
         assert_eq!(dashboard.roles.len(), 1);
         assert_eq!(dashboard.roles[0].title, "Frontend Engineer");
@@ -4584,7 +5446,7 @@ mod tests {
             "Remote scope appears compatible but authorization is not verified.",
             "Candidates must already be authorized; no sponsorship is available.",
         );
-        store.import_dataset(&conflict).unwrap();
+        import_evaluated(&mut store, &conflict);
         store
             .set_queue_filters(&QueueFilters {
                 role_families: vec!["Frontend".to_string()],
@@ -4607,7 +5469,7 @@ mod tests {
             "\"uncertainty\": \"Company identity could not be verified.\",\n          \"legitimacy\": \"suspicious\"",
         );
 
-        store.import_dataset(&suspicious).unwrap();
+        import_evaluated(&mut store, &suspicious);
 
         assert!(store.dashboard().unwrap().roles.is_empty());
     }
@@ -4621,7 +5483,7 @@ mod tests {
             "Possible impersonation: employer could not be verified.",
         );
 
-        store.import_dataset(&suspicious).unwrap();
+        import_evaluated(&mut store, &suspicious);
 
         assert!(store.dashboard().unwrap().roles.is_empty());
     }
@@ -4636,7 +5498,7 @@ mod tests {
                 "northstar-tools/frontend-engineer",
                 "northstar-tools/internationalization-engineer",
             );
-        store.import_dataset(&internationalization).unwrap();
+        import_evaluated(&mut store, &internationalization);
         store
             .set_queue_filters(&QueueFilters {
                 role_families: Vec::new(),
@@ -4656,7 +5518,7 @@ mod tests {
                 "northstar-tools/frontend-engineer",
                 "us-remote-co/frontend-engineer",
             );
-        store.import_dataset(&remote_us).unwrap();
+        import_evaluated(&mut store, &remote_us);
         assert_eq!(store.dashboard().unwrap().roles.len(), 1);
     }
 
@@ -4664,7 +5526,7 @@ mod tests {
     fn preparation_retries_the_same_work_and_persists_only_artifact_references() {
         let directory = tempfile::tempdir().unwrap();
         let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
-        store.import_dataset(DATASET).unwrap();
+        import_evaluated(&mut store, DATASET);
         let role_id = store.dashboard().unwrap().roles[0].id.clone();
 
         let queued = store.begin_preparation(&role_id, "codex").unwrap();
@@ -4734,7 +5596,7 @@ mod tests {
     fn cancelled_preparation_returns_role_to_not_started_without_artifacts() {
         let directory = tempfile::tempdir().unwrap();
         let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
-        store.import_dataset(DATASET).unwrap();
+        import_evaluated(&mut store, DATASET);
         let role_id = store.dashboard().unwrap().roles[0].id.clone();
         let work = store.begin_preparation(&role_id, "codex").unwrap();
 
@@ -4760,7 +5622,7 @@ mod tests {
     fn interrupted_preparation_can_return_to_queue_without_canonical_effect() {
         let directory = tempfile::tempdir().unwrap();
         let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
-        store.import_dataset(DATASET).unwrap();
+        import_evaluated(&mut store, DATASET);
         let role_id = store.dashboard().unwrap().roles[0].id.clone();
         store.begin_preparation(&role_id, "codex").unwrap();
         store.claim_preparation_work().unwrap().unwrap();
@@ -4794,7 +5656,7 @@ mod tests {
     fn ordinary_preparation_failure_cannot_be_cancelled_as_interrupted_work() {
         let directory = tempfile::tempdir().unwrap();
         let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
-        store.import_dataset(DATASET).unwrap();
+        import_evaluated(&mut store, DATASET);
         let role_id = store.dashboard().unwrap().roles[0].id.clone();
         let work = queue_and_claim(&mut store, &role_id, "codex");
         store
@@ -4821,7 +5683,7 @@ mod tests {
     fn preparation_queue_runs_at_most_two_jobs_and_preserves_fifo_order() {
         let directory = tempfile::tempdir().unwrap();
         let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
-        store.import_dataset(DATASET).unwrap();
+        import_evaluated(&mut store, DATASET);
         for index in 2..=3 {
             let dataset = DATASET
                 .replace("role-1", &format!("role-{index}"))
@@ -4830,7 +5692,7 @@ mod tests {
                     "northstar-tools/frontend-engineer",
                     &format!("company-{index}/frontend-engineer"),
                 );
-            store.import_dataset(&dataset).unwrap();
+            import_evaluated(&mut store, &dataset);
         }
         let role_ids = store
             .dashboard()
@@ -4890,7 +5752,7 @@ mod tests {
     fn restart_preserves_queued_work_and_marks_only_interrupted_active_work() {
         let directory = tempfile::tempdir().unwrap();
         let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
-        store.import_dataset(DATASET).unwrap();
+        import_evaluated(&mut store, DATASET);
         let second_dataset = DATASET
             .replace("role-1", "role-2")
             .replace("Northstar Tools", "Second Company")
@@ -4898,7 +5760,7 @@ mod tests {
                 "northstar-tools/frontend-engineer",
                 "second-company/frontend-engineer",
             );
-        store.import_dataset(&second_dataset).unwrap();
+        import_evaluated(&mut store, &second_dataset);
         let role_ids = store
             .dashboard()
             .unwrap()
@@ -4964,12 +5826,12 @@ mod tests {
     }
 
     #[test]
-    fn history_reconciliation_hides_only_deterministic_matches() {
+    fn evaluated_history_match_remains_queueable_only_with_its_current_receipt() {
         use crate::domain::HistoryRecord;
 
         let directory = tempfile::tempdir().unwrap();
         let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
-        store.import_dataset(DATASET).unwrap();
+        import_evaluated(&mut store, DATASET);
         let records = vec![HistoryRecord {
             id: 42,
             date: "2026-08-30".to_string(),
@@ -4985,8 +5847,8 @@ mod tests {
         let result = store.reconcile_history(&records).unwrap();
 
         assert_eq!(result.matched, 1);
-        assert_eq!(store.dashboard().unwrap().roles.len(), 0);
-        assert_eq!(store.dashboard().unwrap().handled_count, 1);
+        assert_eq!(store.dashboard().unwrap().roles.len(), 1);
+        assert_eq!(store.dashboard().unwrap().handled_count, 0);
     }
 
     #[test]
@@ -5003,7 +5865,7 @@ mod tests {
 
         let directory = tempfile::tempdir().unwrap();
         let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
-        store.import_dataset(DATASET).unwrap();
+        import_evaluated(&mut store, DATASET);
         let role_id = store.dashboard().unwrap().roles[0].id.clone();
         let discard = store.begin_discard_effect(&role_id).unwrap();
         store
@@ -5049,7 +5911,7 @@ mod tests {
     {
         let directory = tempfile::tempdir().unwrap();
         let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
-        store.import_dataset(DATASET).unwrap();
+        import_evaluated(&mut store, DATASET);
         let role_id = store.dashboard().unwrap().roles[0].id.clone();
         let preparation = queue_and_claim(&mut store, &role_id, "codex");
         store
@@ -5153,7 +6015,7 @@ mod tests {
 
         let directory = tempfile::tempdir().unwrap();
         let mut queued_store = Store::open(directory.path().join("queued.sqlite3")).unwrap();
-        queued_store.import_dataset(DATASET).unwrap();
+        import_evaluated(&mut queued_store, DATASET);
         let role_id = queued_store.dashboard().unwrap().roles[0].id.clone();
         let queued = queued_store.begin_preparation(&role_id, "codex").unwrap();
         assert!(
@@ -5421,7 +6283,7 @@ mod tests {
     fn browser_lane_finishes_or_fails_one_application_before_leasing_the_next() {
         let directory = tempfile::tempdir().unwrap();
         let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
-        store.import_dataset(DATASET).unwrap();
+        import_evaluated(&mut store, DATASET);
         let second_dataset = DATASET
             .replace("role-1", "role-2")
             .replace("Northstar Tools", "Second Company")
@@ -5430,7 +6292,7 @@ mod tests {
                 "second-company/frontend-engineer",
             )
             .replace("https://example.test/jobs/1", "https://example.test/jobs/2");
-        store.import_dataset(&second_dataset).unwrap();
+        import_evaluated(&mut store, &second_dataset);
         let role_ids = store
             .dashboard()
             .unwrap()
@@ -5503,7 +6365,7 @@ mod tests {
     fn application_session_with_no_compatible_fields_releases_for_manual_review() {
         let directory = tempfile::tempdir().unwrap();
         let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
-        store.import_dataset(DATASET).unwrap();
+        import_evaluated(&mut store, DATASET);
         let role_id = store.dashboard().unwrap().roles[0].id.clone();
         let preparation = queue_and_claim(&mut store, &role_id, "codex");
         store
@@ -5594,7 +6456,7 @@ mod tests {
     fn preparation_failure_is_sanitized_deduped_and_routed_once() {
         let directory = tempfile::tempdir().unwrap();
         let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
-        store.import_dataset(DATASET).unwrap();
+        import_evaluated(&mut store, DATASET);
         let role_id = store.dashboard().unwrap().roles[0].id.clone();
         let preparation = queue_and_claim(&mut store, &role_id, "codex");
         let detail = "Failed at /Users/private/cv.md for person@example.test https://private.test/token abcdefabcdefabcdefabcdefabcdefabcdef";
@@ -5648,7 +6510,7 @@ mod tests {
     fn cancelled_and_needs_decision_preparations_do_not_queue_failure_outcomes() {
         let directory = tempfile::tempdir().unwrap();
         let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
-        store.import_dataset(DATASET).unwrap();
+        import_evaluated(&mut store, DATASET);
         let role_id = store.dashboard().unwrap().roles[0].id.clone();
         let first = queue_and_claim(&mut store, &role_id, "codex");
         store
@@ -5669,7 +6531,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let database = directory.path().join("test.sqlite3");
         let mut store = Store::open(&database).unwrap();
-        store.import_dataset(DATASET).unwrap();
+        import_evaluated(&mut store, DATASET);
         let role_id = store.dashboard().unwrap().roles[0].id.clone();
         let first = queue_and_claim(&mut store, &role_id, "codex");
         store
@@ -5731,7 +6593,7 @@ mod tests {
             "https://example.test/jobs/1",
             "https://jobs.ashbyhq.com/northstar/frontend",
         );
-        store.import_dataset(&dataset).unwrap();
+        import_evaluated(&mut store, &dataset);
         let role_id = store.dashboard().unwrap().roles[0].id.clone();
         let preparation = queue_and_claim(&mut store, &role_id, "codex");
         store

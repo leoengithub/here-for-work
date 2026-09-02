@@ -33,6 +33,7 @@ function preparation(
 
 export const applicationsPreviewDashboard: DashboardState = {
   roles: [],
+  preQueueRoles: [],
   recentlyDismissed: [],
   preparations: [
     preparation("waiting", "Frontend Engineer", "Northstar", "queued", "queued"),

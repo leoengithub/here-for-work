@@ -11,10 +11,11 @@ use std::sync::{Arc, Mutex};
 
 use adapter::{AdapterConfig, CanonicalRoleInput, PreparationRoleInput, discover_executable};
 use domain::{
-    BrowserSessionSummary, BrowserSetup, CareerOpsCheckResult, ChromeProfile, CvFallbackSetting,
-    DashboardState, HistoryRecord, ImportResult, IntegrationHealth, MaintenanceResult,
-    OutcomeNotification, PreparationDetail, PreparationWork, PrepareRoleOutcome, QueueFilters,
-    ReconcileResult, RestorePreflight, ScheduledRun,
+    BrowserSessionSummary, BrowserSetup, CareerOpsCapabilityId, CareerOpsCapabilityStatus,
+    CareerOpsCheckResult, ChromeProfile, CvFallbackSetting, DashboardState, EvaluationSyncResult,
+    HistoryRecord, ImportResult, IntegrationHealth, MaintenanceResult, OutcomeNotification,
+    PreparationDetail, PreparationWork, PrepareRoleOutcome, QueueFilters, ReconcileResult,
+    RestorePreflight, ScheduledRun,
 };
 use sha2::Digest;
 use store::{PreparationCompletion, Store};
@@ -77,14 +78,15 @@ fn import_dataset(
         .import_dataset(&payload)
         .map_err(|error| error.to_string())?;
     drop(store);
-    if result.imported > 0 {
+    let sync = sync_evaluations_internal(&state)?;
+    if sync.promoted > 0 {
         let _ = app
             .notification()
             .builder()
             .title("New roles to review")
             .body(format!(
-                "{} new role(s) are ready in HereForWork.",
-                result.imported
+                "{} evaluated role(s) are ready in HereForWork.",
+                sync.promoted
             ))
             .show();
     }
@@ -268,6 +270,17 @@ fn start_outcome_notification_worker(app: tauri::AppHandle) -> Result<(), String
                     );
                 }
             }
+        })
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+fn start_evaluation_sync_worker(app: tauri::AppHandle) -> Result<(), String> {
+    std::thread::Builder::new()
+        .name("here-for-work-evaluation-sync-worker".to_string())
+        .spawn(move || {
+            let state = app.state::<AppState>();
+            let _ = sync_evaluations_internal(&state);
         })
         .map(|_| ())
         .map_err(|error| error.to_string())
@@ -1660,11 +1673,15 @@ fn reconcile_application_history(
         .adapter
         .history_snapshot()
         .map_err(|error| error.to_string())?;
-    let mut store = state
-        .store
-        .lock()
-        .map_err(|_| "Operational store lock was poisoned".to_string())?;
-    reconcile_history_preserving_adapter_gate(&mut store, &records)
+    let reconciliation = {
+        let mut store = state
+            .store
+            .lock()
+            .map_err(|_| "Operational store lock was poisoned".to_string())?;
+        reconcile_history_preserving_adapter_gate(&mut store, &records)?
+    };
+    sync_evaluations_with_records(&state, &records)?;
+    Ok(reconciliation)
 }
 
 fn reconcile_history_preserving_adapter_gate(
@@ -1674,6 +1691,270 @@ fn reconcile_history_preserving_adapter_gate(
     store
         .reconcile_history(records)
         .map_err(|error| error.to_string())
+}
+
+fn sync_evaluations_internal(state: &AppState) -> Result<EvaluationSyncResult, String> {
+    let records = match state.adapter.history_snapshot() {
+        Ok(records) => records,
+        Err(_) => {
+            let mut store = state
+                .store
+                .lock()
+                .map_err(|_| "Operational store lock was poisoned".to_string())?;
+            let roles = store
+                .evaluation_sync_roles()
+                .map_err(|error| error.to_string())?;
+            let mut result = EvaluationSyncResult::default();
+            for role in roles {
+                if matches!(
+                    role.canonical_status.as_deref(),
+                    Some("Applied" | "Discarded")
+                ) {
+                    store
+                        .hold_evaluation(&role.role_id, "terminal", "canonical_terminal")
+                        .map_err(|error| error.to_string())?;
+                    result.terminal += 1;
+                } else {
+                    store
+                        .hold_evaluation(
+                            &role.role_id,
+                            "awaiting_evaluation",
+                            "canonical_history_unavailable",
+                        )
+                        .map_err(|error| error.to_string())?;
+                    result.held += 1;
+                }
+            }
+            return Ok(result);
+        }
+    };
+    {
+        let mut store = state
+            .store
+            .lock()
+            .map_err(|_| "Operational store lock was poisoned".to_string())?;
+        reconcile_history_preserving_adapter_gate(&mut store, &records)?;
+    }
+    sync_evaluations_with_records(state, &records)
+}
+
+fn sync_evaluations_with_records(
+    state: &AppState,
+    records: &[HistoryRecord],
+) -> Result<EvaluationSyncResult, String> {
+    let manifest = state
+        .adapter
+        .capabilities()
+        .map_err(|error| error.to_string());
+    let (upstream_revision, compatibility_fingerprint) = match manifest {
+        Ok(manifest) => {
+            let capability = manifest
+                .capabilities
+                .iter()
+                .find(|capability| capability.id == CareerOpsCapabilityId::EvaluationResultReadV1);
+            match (manifest.upstream_revision, capability) {
+                (Some(revision), Some(capability))
+                    if capability.status == CareerOpsCapabilityStatus::Degraded
+                        && capability.source_revision.as_deref() == Some(revision.as_str())
+                        && capability.compatibility_fingerprint.is_some() =>
+                {
+                    (Some(revision), capability.compatibility_fingerprint.clone())
+                }
+                _ => (None, None),
+            }
+        }
+        Err(_) => (None, None),
+    };
+    let roles = {
+        let mut store = state
+            .store
+            .lock()
+            .map_err(|_| "Operational store lock was poisoned".to_string())?;
+        store
+            .recover_expired_evaluation_syncs()
+            .map_err(|error| error.to_string())?;
+        store
+            .invalidate_evaluation_compatibility(
+                upstream_revision.as_deref(),
+                compatibility_fingerprint.as_deref(),
+            )
+            .map_err(|error| error.to_string())?;
+        store
+            .evaluation_sync_roles()
+            .map_err(|error| error.to_string())?
+    };
+    let Some(compatibility_fingerprint) = compatibility_fingerprint else {
+        let mut store = state
+            .store
+            .lock()
+            .map_err(|_| "Operational store lock was poisoned".to_string())?;
+        let mut result = EvaluationSyncResult::default();
+        for role in roles {
+            if matches!(
+                role.canonical_status.as_deref(),
+                Some("Applied" | "Discarded")
+            ) {
+                store
+                    .hold_evaluation(&role.role_id, "terminal", "canonical_terminal")
+                    .map_err(|error| error.to_string())?;
+                result.terminal += 1;
+            } else {
+                store
+                    .hold_evaluation(
+                        &role.role_id,
+                        "needs_attention",
+                        "evaluation_result_capability_unavailable",
+                    )
+                    .map_err(|error| error.to_string())?;
+                result.held += 1;
+            }
+        }
+        return Ok(result);
+    };
+
+    let mut summary = EvaluationSyncResult::default();
+    for role in roles {
+        if matches!(
+            role.canonical_status.as_deref(),
+            Some("Applied" | "Discarded")
+        ) {
+            state
+                .store
+                .lock()
+                .map_err(|_| "Operational store lock was poisoned".to_string())?
+                .hold_evaluation(&role.role_id, "terminal", "canonical_terminal")
+                .map_err(|error| error.to_string())?;
+            summary.terminal += 1;
+            continue;
+        }
+        let Some(tracker_id) = role.canonical_tracker_id else {
+            state
+                .store
+                .lock()
+                .map_err(|_| "Operational store lock was poisoned".to_string())?
+                .hold_evaluation(
+                    &role.role_id,
+                    "awaiting_evaluation",
+                    "canonical_evaluation_missing_executor_unavailable",
+                )
+                .map_err(|error| error.to_string())?;
+            summary.held += 1;
+            continue;
+        };
+        let matches = records
+            .iter()
+            .filter(|record| record.id == tracker_id)
+            .collect::<Vec<_>>();
+        if matches.len() != 1 || matches[0].status != "Evaluated" {
+            state
+                .store
+                .lock()
+                .map_err(|_| "Operational store lock was poisoned".to_string())?
+                .hold_evaluation(
+                    &role.role_id,
+                    "needs_attention",
+                    if matches.len() == 1 {
+                        "canonical_status_not_evaluated"
+                    } else {
+                        "canonical_match_missing_or_ambiguous"
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+            summary.held += 1;
+            continue;
+        }
+        let record = matches[0];
+        let input = match state
+            .adapter
+            .evaluation_result_input(record, &compatibility_fingerprint)
+        {
+            Ok(input) => input,
+            Err(_) => {
+                state
+                    .store
+                    .lock()
+                    .map_err(|_| "Operational store lock was poisoned".to_string())?
+                    .hold_evaluation(
+                        &role.role_id,
+                        "needs_attention",
+                        "evaluation_receipt_pointer_unreadable",
+                    )
+                    .map_err(|error| error.to_string())?;
+                summary.held += 1;
+                continue;
+            }
+        };
+        let input_hash = format!(
+            "{:x}",
+            sha2::Sha256::digest(
+                serde_json::to_vec(&serde_json::json!({
+                    "roleId": role.role_id,
+                    "sourceIdentityHash": role.source_identity_hash,
+                    "input": input,
+                }))
+                .map_err(|error| error.to_string())?
+            )
+        );
+        let claimed = state
+            .store
+            .lock()
+            .map_err(|_| "Operational store lock was poisoned".to_string())?
+            .claim_evaluation_sync(&role.role_id, &input_hash)
+            .map_err(|error| error.to_string())?;
+        if !claimed {
+            summary.unchanged += 1;
+            continue;
+        }
+        let evaluation = match state.adapter.evaluation_result_read(&input) {
+            Ok(evaluation) => evaluation,
+            Err(_) => {
+                state
+                    .store
+                    .lock()
+                    .map_err(|_| "Operational store lock was poisoned".to_string())?
+                    .hold_evaluation(
+                        &role.role_id,
+                        "needs_attention",
+                        "evaluation_result_invalid_or_stale",
+                    )
+                    .map_err(|error| error.to_string())?;
+                summary.held += 1;
+                continue;
+            }
+        };
+        if evaluation.canonical.tracker_id != input.tracker_id
+            || evaluation.canonical.status != "Evaluated"
+            || evaluation.report.path != input.report_path
+            || evaluation.report.sha256 != input.report_sha256
+            || evaluation.compatibility_fingerprint != input.compatibility_fingerprint
+            || upstream_revision.as_deref() != Some(evaluation.upstream_revision.as_str())
+        {
+            state
+                .store
+                .lock()
+                .map_err(|_| "Operational store lock was poisoned".to_string())?
+                .hold_evaluation(
+                    &role.role_id,
+                    "needs_attention",
+                    "evaluation_result_identity_mismatch",
+                )
+                .map_err(|error| error.to_string())?;
+            summary.held += 1;
+            continue;
+        }
+        let promoted = state
+            .store
+            .lock()
+            .map_err(|_| "Operational store lock was poisoned".to_string())?
+            .complete_evaluation_sync(&role, &input_hash, &evaluation)
+            .map_err(|error| error.to_string())?;
+        if promoted {
+            summary.promoted += 1;
+        } else {
+            summary.terminal += 1;
+        }
+    }
+    Ok(summary)
 }
 
 fn madrid_today() -> String {
@@ -2026,6 +2307,7 @@ pub fn run() {
             });
             bridge::start(app.handle().clone(), bridge::socket_path(&app_data_dir))?;
             start_preparation_workers(app.handle().clone())?;
+            start_evaluation_sync_worker(app.handle().clone())?;
             start_browser_handoff_worker(app.handle().clone())?;
             start_answer_worker(app.handle().clone())?;
             start_outcome_notification_worker(app.handle().clone())?;
