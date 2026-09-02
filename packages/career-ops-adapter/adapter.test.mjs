@@ -1149,6 +1149,42 @@ test("failed preparation cleanup removes only its bounded staging and is idempot
   assert.equal((await stat(join(fixture.root, "data/applications.md"))).isFile(), true);
 });
 
+test("preparation recovery remains compatible with a valid staged v1 result", async () => {
+  const fixture = await fakeCareerOps();
+  const preparationId = "66666666-6666-4666-8666-666666666666";
+  const contextHash = "a".repeat(64);
+  const result = {
+    contractVersion: 1,
+    contextHash,
+    score: 4.2,
+    legitimacy: "High Confidence",
+    authorizationConfidence: "investigate",
+    reportBodyMarkdown: [
+      "## Machine Summary", "Legacy staged result.",
+      "## A) Role", "## B) Match", "## C) Level", "## D) Compensation",
+      "## E) Customization", "## F) Interview", "## G) Legitimacy",
+      "## Risk Summary", "No active content.", "## Keywords extracted",
+      "React TypeScript accessibility ".repeat(8),
+    ].join("\n\n"),
+    cvPayload: { candidate: { photo: "" } },
+    cvChangesMarkdown: "- Reordered verified evidence.",
+  };
+  const directory = join(fixture.staging, preparationId);
+  await mkdir(directory, { recursive: true });
+  await writeFile(join(directory, "provider-result.json"), `${JSON.stringify(result)}\n`);
+
+  const recovered = await request({
+    id: "recover-v1",
+    protocolVersion: 1,
+    operation: "preparation.result.recover",
+    input: { preparationId, contextHash },
+  }, fixture.env);
+
+  assert.equal(recovered.ok, true, JSON.stringify(recovered));
+  assert.equal(recovered.result.outcome, "completed");
+  assert.deepEqual(recovered.result.result, result);
+});
+
 test("preparation accepts career-ops profiles without optional cv-facts config", async () => {
   const fixture = await fakeCareerOps();
   const canonical = await seedCanonicalEvaluation(fixture);

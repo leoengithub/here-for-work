@@ -400,9 +400,19 @@ function reportWithProvenance(reportHeader, role, result, eventDate, reportNum, 
   return base.replace("\n---\n", `\n${notice}\n---\n`);
 }
 
+const FALLBACK_CHANGES_NOTICE = "> The attached PDF is the user's reviewed fallback CV. It is not tailored for this role. The items below are proposed changes only and were not applied to that PDF.";
+
+function changesWithoutFallbackNotice(changes) {
+  const normalized = changes.trim();
+  return normalized.startsWith(`${FALLBACK_CHANGES_NOTICE}\n\n`)
+    ? normalized.slice(FALLBACK_CHANGES_NOTICE.length).trim()
+    : normalized;
+}
+
 function changesWithProvenance(changes, provenance) {
-  if (provenance.source !== "user_reviewed_fallback") return `${changes.trim()}\n`;
-  return `> The attached PDF is the user's reviewed fallback CV. It is not tailored for this role. The items below are proposed changes only and were not applied to that PDF.\n\n${changes.trim()}\n`;
+  const clean = changesWithoutFallbackNotice(changes);
+  if (provenance.source !== "user_reviewed_fallback") return `${clean}\n`;
+  return `${FALLBACK_CHANGES_NOTICE}\n\n${clean}\n`;
 }
 
 /**
@@ -1095,7 +1105,11 @@ export async function commitSelectivePreparationTransaction(options) {
       const recovery = renderFailureMetadata(renderError);
       cvProvenance = { source: "user_reviewed_fallback", tailored: false, sourceSha256: fallback.sha256, renderRecovery: recovery };
       warnings.push({ code: recovery.code, stage: recovery.stage, recoveredBy: "user_reviewed_fallback", detail: recovery.detail });
+      await writePrivate(stagedChanges, changesWithProvenance(await readFile(stagedChanges, "utf8"), cvProvenance));
       await writePrivate(stagedIndex, `${PDF_INDEX_HEADER}${currentPlan.reportNumber}\t${relativeInside(root, stagedPdf)}\t${relativeInside(root, stagedHtml)}\t${format}\t${input.eventDate}\n`);
+    } else if (currentPlan.cv.scope === "pdf_only" && currentPlan.cv.provenance.source === "user_reviewed_fallback") {
+      cvProvenance = { source: "tailored_generated", tailored: true, sourceSha256: null, renderRecovery: null };
+      await writePrivate(stagedChanges, changesWithProvenance(await readFile(stagedChanges, "utf8"), cvProvenance));
     }
     const validPdf = await validatePdf(stagedPdf);
     if (!validPdf) failure("pdf_generation_failed", diagnostic);

@@ -88,6 +88,7 @@ async function selectiveHarness(options = {}) {
   delete fixture.input.result.legitimacy;
   delete fixture.input.result.authorizationConfidence;
   delete fixture.input.result.reportBodyMarkdown;
+  let failScript = options.failScript ?? null;
   const transactionOptions = {
     input: fixture.input,
     role: fixture.role,
@@ -113,7 +114,7 @@ async function selectiveHarness(options = {}) {
   // Reuse the harness command behavior without exposing private closures.
   const harnessRun = async (script, args, env = {}) => {
     fixture.calls.push({ script, args, env });
-    if (options.failScript === script) throw Object.assign(new Error("render failed"), { exitCode: 9 });
+      if (failScript === script) throw Object.assign(new Error("render failed"), { exitCode: 9 });
     if (script === "build-cv-html.mjs") {
       await mkdir(dirname(args[1]), { recursive: true });
       await writeFile(args[1], "<html><body>verified fixture</body></html>");
@@ -138,6 +139,7 @@ async function selectiveHarness(options = {}) {
     reportPath,
     canonicalEvaluation,
     basePlan,
+    setFailScript(value) { failScript = value; },
     setPlan(value) { inspectedPlan = structuredClone(value); fixture.input.artifactPlan = structuredClone(value); },
     commit: () => commitSelectivePreparationTransaction(transactionOptions),
   };
@@ -528,6 +530,46 @@ test("selective PDF fallback remains hash-bound and never changes its source", a
   assert.equal(committed.cvProvenance.sourceSha256, digest(fallbackBefore));
   assert.deepEqual(await readFile(fixture.fallbackPath), fallbackBefore);
   assert.deepEqual(await readFile(join(fixture.root, fixture.reportPath)), fixture.report);
+});
+
+test("successful PDF-only repair replaces prior fallback provenance and disclaimer", async () => {
+  const fixture = await selectiveHarness({ failScript: "generate-pdf.mjs", fallback: true });
+  const fallbackBefore = await readFile(fixture.fallbackPath);
+  const fallbackCommit = await fixture.commit();
+  const fallbackChanges = await readFile(join(fixture.root, fallbackCommit.artifacts.cvChanges.path), "utf8");
+  assert.match(fallbackChanges, /reviewed fallback CV/);
+
+  await writeFile(join(fixture.root, fallbackCommit.artifacts.cvPdf.path), "stale external bytes");
+  fixture.setFailScript(null);
+  fixture.calls.length = 0;
+  fixture.input.result = null;
+  fixture.setPlan({
+    ...fixture.basePlan,
+    cv: {
+      action: "refresh",
+      reason: "hfw_pdf_missing_or_changed",
+      scope: "pdf_only",
+      format: "a4",
+      artifacts: {
+        html: fallbackCommit.artifacts.cvHtml,
+        changes: fallbackCommit.artifacts.cvChanges,
+      },
+      provenance: fallbackCommit.cvProvenance,
+    },
+  });
+
+  const repaired = await fixture.commit();
+  const repairedChanges = await readFile(join(fixture.root, repaired.artifacts.cvChanges.path), "utf8");
+  assert.equal(repaired.cvProvenance.source, "tailored_generated");
+  assert.equal(repaired.cvProvenance.tailored, true);
+  assert.equal(repaired.cvProvenance.sourceSha256, null);
+  assert.equal(repaired.cvProvenance.renderRecovery, null);
+  assert.deepEqual(repaired.warnings, []);
+  assert.doesNotMatch(repairedChanges, /reviewed fallback CV|not tailored for this role/);
+  assert.match(repairedChanges, /Reordered verified React evidence/);
+  assert.deepEqual(await readFile(fixture.fallbackPath), fallbackBefore);
+  assert.equal(fixture.calls.some(({ script }) => script === "build-cv-html.mjs"), false);
+  assert.equal(fixture.calls.filter(({ script }) => script === "generate-pdf.mjs").length, 1);
 });
 
 test("selective commit rejects canonical identity and context drift before publication", async () => {

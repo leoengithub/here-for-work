@@ -768,7 +768,9 @@ pub fn discover_executable(home: &std::path::Path, name: &str) -> Option<PathBuf
 
 #[cfg(test)]
 mod evaluation_pointer_tests {
-    use super::{AdapterConfig, HistoryRecord};
+    use super::{AdapterConfig, HistoryRecord, PreparationRoleInput};
+    use crate::provider::bind_context_hash;
+    use serde_json::json;
     use sha2::{Digest, Sha256};
 
     fn record(report: &str) -> HistoryRecord {
@@ -838,5 +840,83 @@ mod evaluation_pointer_tests {
                 )
                 .is_err()
         );
+    }
+
+    #[test]
+    fn v2_full_cv_flows_from_context_through_binding_to_commit() {
+        let directory = tempfile::tempdir().unwrap();
+        let log = directory.path().join("requests.ndjson");
+        let script = directory.path().join("adapter.sh");
+        let context_hash = "a".repeat(64);
+        let script_body = format!(
+            r#"#!/bin/sh
+request=$(cat)
+printf '%s\n' "$request" >> '{}'
+id=$(printf '%s' "$request" | sed -E 's/.*"id":"([^"]+)".*/\1/')
+if printf '%s' "$request" | grep -q 'preparation.context.get'; then
+  printf '{{"id":"%s","ok":true,"result":{{"preparationId":"55555555-5555-4555-8555-555555555555","contextHash":"{}","prompt":"cv only","job":{{"url":"https://jobs.example.test/role"}},"canonicalEvaluation":{{}},"evaluationGate":{{"score":4.2,"legitimacy":"High Confidence","authorizationConfidence":"investigate"}},"artifactPlan":{{"cv":{{"action":"refresh","scope":"full_cv"}}}}}}}}\n' "$id"
+else
+  printf '{{"id":"%s","ok":true,"result":{{"preparationId":"55555555-5555-4555-8555-555555555555","contextHash":"{}","trackerId":42,"artifacts":{{"report":{{"path":"reports/042.md","sha256":"{}"}},"cvHtml":{{"path":"output/042/cv/tailored/v001/cv.html","sha256":"{}"}},"cvPdf":{{"path":"output/042/cv/tailored/v001/cv.pdf","sha256":"{}"}},"cvChanges":{{"path":"output/042/cv/tailored/v001/changes.md","sha256":"{}"}}}},"cvProvenance":{{"source":"tailored_generated","tailored":true,"sourceSha256":null,"renderRecovery":null}},"warnings":[]}}}}\n' "$id"
+fi
+"#,
+            log.display(),
+            context_hash,
+            context_hash,
+            "b".repeat(64),
+            "c".repeat(64),
+            "d".repeat(64),
+            "e".repeat(64),
+        );
+        std::fs::write(&script, script_body).unwrap();
+        let adapter = AdapterConfig {
+            node_path: "/bin/sh".into(),
+            script_path: script,
+            career_ops_root: directory.path().into(),
+            tracker_index_path: directory.path().join("applications.db"),
+            staging_path: directory.path().join("staging"),
+        };
+        let input = PreparationRoleInput {
+            preparation_id: "55555555-5555-4555-8555-555555555555".to_string(),
+            company: "Example".to_string(),
+            title: "Frontend Engineer".to_string(),
+            location: "Remote".to_string(),
+            url: "https://jobs.example.test/role".to_string(),
+            tracker_id: 42,
+            report_path: "reports/042.md".to_string(),
+            report_sha256: "b".repeat(64),
+            upstream_revision: "c".repeat(40),
+            evaluation_compatibility_fingerprint: "d".repeat(64),
+            artifact_compatibility_fingerprint: "e".repeat(64),
+        };
+
+        let context = adapter.preparation_context(&input).unwrap();
+        let provider_result = bind_context_hash(
+            json!({
+                "contractVersion": 2,
+                "contextHash": "f".repeat(64),
+                "cvPayload": { "page_format": "a4" },
+                "cvChangesMarkdown": "Verified source-backed reorder."
+            }),
+            &context.context_hash,
+        )
+        .unwrap();
+        let committed = adapter
+            .commit_preparation(
+                &input,
+                "2026-09-03",
+                context.job,
+                provider_result,
+                None,
+                context.canonical_evaluation,
+                context.artifact_plan,
+            )
+            .unwrap();
+
+        assert_eq!(committed.context_hash, context_hash);
+        let requests = std::fs::read_to_string(log).unwrap();
+        assert!(requests.contains("preparation.context.get"));
+        assert!(requests.contains("preparation.result.commit"));
+        assert!(requests.contains(r#""contractVersion":2"#));
+        assert!(requests.contains(&format!(r#""contextHash":"{}""#, context_hash)));
     }
 }

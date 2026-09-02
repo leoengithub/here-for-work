@@ -183,7 +183,10 @@ pub fn bind_context_hash(mut result: Value, expected_hash: &str) -> Result<Value
     let object = result
         .as_object_mut()
         .ok_or("Provider result must be an object before context binding.")?;
-    if object.get("contractVersion").and_then(Value::as_u64) != Some(1) {
+    if !matches!(
+        object.get("contractVersion").and_then(Value::as_u64),
+        Some(1 | 2)
+    ) {
         return Err("Provider result has the wrong contract version.".to_string());
     }
     let returned_hash = object
@@ -471,11 +474,32 @@ mod tests {
     }
 
     #[test]
+    fn preparation_v2_full_cv_binds_only_the_current_context() {
+        let expected = "a".repeat(64);
+        let generated = json!({
+            "contractVersion": 2,
+            "contextHash": "b".repeat(64),
+            "cvPayload": { "page_format": "a4" },
+            "cvChangesMarkdown": "Verified source-backed reorder."
+        });
+
+        let bound = bind_context_hash(generated, &expected).unwrap();
+
+        assert_eq!(bound["contractVersion"], 2);
+        assert_eq!(bound["contextHash"], expected);
+        assert_eq!(bound["cvPayload"]["page_format"], "a4");
+        assert_eq!(
+            bound["cvChangesMarkdown"],
+            "Verified source-backed reorder."
+        );
+    }
+
+    #[test]
     fn context_binding_does_not_hide_invalid_provider_contracts() {
         let expected = "a".repeat(64);
         assert!(
             bind_context_hash(
-                json!({ "contractVersion": 2, "contextHash": "b".repeat(64) }),
+                json!({ "contractVersion": 3, "contextHash": "b".repeat(64) }),
                 &expected,
             )
             .is_err()
