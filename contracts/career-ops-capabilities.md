@@ -1,6 +1,6 @@
 # career-ops capability boundary
 
-Status: version 1 manifest implemented; discovery/evaluation/browser operations are not implemented
+Status: version 1 manifest implemented; evaluation-result reading is conditional; discovery/evaluation execution/browser operations are not implemented
 Audit date: 2026-09-02
 
 This document records which existing career-ops interfaces HereForWork may safely wrap,
@@ -89,7 +89,7 @@ working implementation ideas; they are not a published external protocol.
 | Batch parallelism | `batch/batch-runner.sh --parallel N` with fixed in-repository input/state/log paths and canonical side effects | Conditional, side-effecting | Proven behavior exists, but it is not isolatable or idempotent enough for direct HFW orchestration. Require a supported invocation contract or an upstream-neutral wrapper boundary before use. |
 | Model tier/routing | `config/profile.yml` `spend_tier`; batch `--model`; economy pre-screen for standard/premium | Conditional | HFW may read and report the supported setting. It must not select an uncontracted model or rewrite the preference. |
 | Low-confidence escalation and audit sample | No matching behavior in the inspected batch/pipeline implementation | Missing | Approved target remains blocked; do not describe ordinary pre-screening as escalation or sampling. |
-| Complete evaluated report and native score | Report `## Machine Summary` YAML plus tracker score; `batch/batch-prompt.md` defines the fields | Conditional | Accept only a strict complete-report parser tied to a known revision, with numeric score 1–5 and report/tracker identity agreement. The advisory pipeline `rank:` value is never canonical. |
+| Complete evaluated report and native score | Report `## Machine Summary` YAML plus tracker score; `batch/batch-prompt.md` defines the fields | Conditional | `evaluation.result.read.v1` accepts only the richer authorization shape behind an exact content fingerprint, with numeric score 1–5, complete A–G sections, and report/tracker identity agreement. The advisory pipeline `rank:` value is never canonical. |
 | Evaluation result receipt | Batch worker's final fenced JSON, `batch-state.tsv`, report, tracker addition, and canonical tracker merge | Conditional | No single versioned atomic receipt exists. HFW must not mark evaluation complete from exit code or fenced JSON alone. |
 | Score-gated CV/PDF | `auto_pdf_score_threshold`; report PDF header; `generate-pdf.mjs --batch` results file | Conditional | Read and validate the configured/effective threshold. Never substitute the approved value or infer freshness from file existence. |
 | Artifact identity/provenance/freshness | Report path, PDF index rows, generated paths, and some hashes in HereForWork's current preparation journal | Missing for the approved boundary | Upstream exposes no structured source hashes, classified CV changes, stale reason, or review/block status. Artifact-aware Prepare must remain blocked or conservatively regenerate after explicit user intent. |
@@ -156,7 +156,7 @@ The smallest semantic capability set required by the approved workflow is:
 4. `evaluation.full_ag.run.v1` — fixed full evaluation producing an idempotent result
    receipt, complete report, canonical score, and optional threshold-gated artifacts.
 5. `evaluation.result.read.v1` — strict report/tracker reconciliation and evidence
-   projection.
+   projection; implemented as a conditional read operation, not a pre-Queue executor.
 6. `artifacts.inspect.v1` — source/output identity, validation outcome, provenance,
    freshness, and a reason for missing/failed/stale.
 7. `browser.review_fallback.v1` — explicit single-driver lease transfer, typed planned
@@ -164,7 +164,9 @@ The smallest semantic capability set required by the approved workflow is:
    action.
 8. `canonical.applied.write.v1` — existing idempotent tracking-only transition.
 
-Capabilities 3, 4, 6, and 7 are unavailable against both audited revisions. Capability 1
+Capabilities 3, 4, 6, and 7 are unavailable against both audited revisions. Capability 5
+is conditional and only accepts the installed checkout’s richer authorization shape
+when its exact compatibility fingerprint is supplied and remains stable. Capability 1
 is conditional; capability 2 and the narrow read/write pieces behind capability 8 have
 usable machine surfaces. The pre-Queue pipeline and Playwright fallback must not be
 enabled until their required capabilities are supported.
@@ -175,7 +177,8 @@ enabled until their required capabilities are supported.
   arbitrary JSON found in agent logs.
 - A full evaluation succeeds only when the report exists, all required A-G sections and
   strict Machine Summary exist, the native score is 1–5, and the canonical tracker row
-  agrees with the role URL/report identity.
+  agrees with the report path and role identity. The result reader does not infer a URL
+  from prose or from an advisory pipeline field.
 - A report/PDF file timestamp is not freshness or provenance. Missing structured evidence
   yields `unavailable`, never `fresh`.
 - `auto_pdf_score_threshold` is read and validated from career-ops. An absent key is

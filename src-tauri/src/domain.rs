@@ -421,6 +421,106 @@ pub struct HistoryRecord {
     pub notes: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[allow(dead_code)]
+pub struct EvaluationResultRead {
+    pub contract: String,
+    pub schema_version: u32,
+    pub upstream_revision: String,
+    pub compatibility_fingerprint: String,
+    pub report: EvaluationReportReference,
+    pub role: EvaluationRoleIdentity,
+    pub canonical: EvaluationCanonicalIdentity,
+    pub evaluation: EvaluationSummary,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[allow(dead_code)]
+pub struct EvaluationReportReference {
+    pub path: String,
+    pub sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[allow(dead_code)]
+pub struct EvaluationRoleIdentity {
+    pub company: String,
+    pub title: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[allow(dead_code)]
+pub struct EvaluationCanonicalIdentity {
+    pub tracker_id: i64,
+    pub status: String,
+    pub score: f64,
+    pub report_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[allow(dead_code)]
+pub struct EvaluationSummary {
+    pub score: f64,
+    pub final_decision: String,
+    pub legitimacy_tier: String,
+    pub archetype: String,
+    pub next_action: String,
+    pub strengths: Vec<String>,
+    pub blockers: Vec<String>,
+    pub gaps: Vec<String>,
+    pub compensation: EvaluationCompensation,
+    pub authorization: EvaluationAuthorization,
+    pub risk_level: String,
+    pub confidence: String,
+    pub risk_summary: EvaluationRiskSummary,
+    pub material_uncertainty: EvaluationMaterialUncertainty,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[allow(dead_code)]
+pub struct EvaluationCompensation {
+    pub advertised: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[allow(dead_code)]
+pub struct EvaluationAuthorization {
+    pub confidence: String,
+    pub evidence: Vec<String>,
+    pub scope: String,
+    pub engagement_mechanism: String,
+    pub question: String,
+    pub legacy_work_auth: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[allow(dead_code)]
+pub struct EvaluationRiskSummary {
+    pub legitimacy: String,
+    pub classification: String,
+    pub culture: String,
+    pub interview_redflags: String,
+    pub ai_infra: String,
+    pub ai_screening_disclosure: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[allow(dead_code)]
+pub struct EvaluationMaterialUncertainty {
+    pub confidence: String,
+    pub authorization_question: String,
+    pub not_evaluated_risk_signals: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ReconcileResult {
@@ -596,6 +696,7 @@ pub struct CareerOpsCapability {
     pub interface_class: CareerOpsInterfaceClass,
     pub source_revision: Option<String>,
     pub probe_revision: String,
+    pub compatibility_fingerprint: Option<String>,
     pub constraints: Vec<CareerOpsCapabilityConstraint>,
 }
 
@@ -720,6 +821,7 @@ impl CareerOpsCapabilityManifest {
             "capabilities.get",
             "health.check",
             "history.snapshot",
+            "evaluation.result.read.v1",
             "profile.queue_filters.get",
             "preparation.context.get",
             "preparation.result.recover",
@@ -761,6 +863,13 @@ impl CareerOpsCapabilityManifest {
             }
             if capability.probe_revision != "hereforwork.career-ops-capability-probes.v1" {
                 return Err("capability manifest has an unsupported probe revision".to_string());
+            }
+            if let Some(fingerprint) = &capability.compatibility_fingerprint
+                && !is_lowercase_sha256(fingerprint)
+            {
+                return Err(
+                    "capability manifest has an invalid compatibility fingerprint".to_string(),
+                );
             }
             if capability.source_revision != self.upstream_revision {
                 return Err("capability manifest mixes upstream revisions".to_string());
@@ -822,6 +931,13 @@ fn is_lowercase_git_sha(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
+fn is_lowercase_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 fn is_safe_declared_version(value: &str) -> bool {
     if value.is_empty()
         || value.len() > 100
@@ -872,6 +988,7 @@ mod capability_manifest_tests {
                 "interfaceClass": interface_class,
                 "sourceRevision": revision,
                 "probeRevision": "hereforwork.career-ops-capability-probes.v1",
+                "compatibilityFingerprint": null,
                 "constraints": constraints,
             })
         };
@@ -886,6 +1003,7 @@ mod capability_manifest_tests {
                 "capabilities.get",
                 "health.check",
                 "history.snapshot",
+                "evaluation.result.read.v1",
                 "profile.queue_filters.get",
                 "preparation.context.get",
                 "preparation.result.recover",
@@ -986,6 +1104,15 @@ mod capability_manifest_tests {
         let manifest: CareerOpsCapabilityManifest =
             serde_json::from_value(value).expect("manifest shape remains valid");
 
+        assert!(manifest.validate().is_err());
+    }
+
+    #[test]
+    fn capability_manifest_rejects_an_invalid_evaluation_result_fingerprint() {
+        let mut value = manifest_value();
+        value["capabilities"][4]["compatibilityFingerprint"] = json!("not-a-sha256");
+        let manifest: CareerOpsCapabilityManifest =
+            serde_json::from_value(value).expect("manifest deserializes");
         assert!(manifest.validate().is_err());
     }
 }

@@ -31,6 +31,8 @@ The implemented read-only operations are:
   browser or a valid hash-bound user-reviewed PDF fallback.
 - `history.snapshot`: asks career-ops' tracker to return structured canonical
   application records from its rebuildable SQLite index.
+- `evaluation.result.read.v1`: reads one known report/tracker result through the
+  conditional, fingerprint-bound contract in [`evaluation-result.md`](evaluation-result.md).
 - `profile.queue_filters.get`: derives editable queue-filter defaults from the
   verified career-ops profile without exposing the profile contents to the renderer.
 

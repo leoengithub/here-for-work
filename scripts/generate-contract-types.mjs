@@ -9,6 +9,7 @@ const contracts = [
   ["answer-draft.schema.json", "answer-draft.d.ts"],
   ["browser-bridge.schema.json", "browser-bridge.d.ts"],
   ["career-ops-capabilities.schema.json", "career-ops-capabilities.d.ts"],
+  ["evaluation-result.schema.json", "evaluation-result.d.ts"],
   ["discovery-dataset.schema.json", "discovery-dataset.d.ts"],
   ["discovery-run.schema.json", "discovery-run.d.ts"],
   ["preparation-result.schema.json", "preparation-result.d.ts"],

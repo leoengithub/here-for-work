@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdtemp, mkdir, readFile, stat, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -55,11 +56,116 @@ function runCommand(command, args, cwd) {
   });
 }
 
+const evaluationReport = `# Evaluation: Example Co — Frontend Engineer
+
+## Machine Summary
+
+\`\`\`yaml
+company: Example Co
+role: Frontend Engineer
+score: 4.2
+legitimacy_tier: High Confidence
+archetype: Frontend Engineer
+final_decision: Consider
+hard_stops: []
+soft_gaps:
+  - Confirm the team hiring timeline.
+top_strengths:
+  - Strong React and TypeScript delivery evidence.
+risk_level: Low
+confidence: High
+next_action: Confirm the employment arrangement before preparing.
+authorization_confidence: investigate
+authorization_evidence:
+  - Authorization details are not stated; verify with the employer at https://jobs.example.test/roles/7.
+authorization_scope: job-specific
+engagement_mechanism: unknown
+authorization_question: Confirm whether the role supports the candidate's authorization path.
+work_auth: unstated
+discard_reasons: []
+via: null
+company_confidential: false
+advertised_comp: null
+reports_to: null
+risk_summary:
+  legitimacy: high_confidence
+  classification: not_evaluated
+  culture: not_evaluated
+  interview_redflags: not_evaluated
+  ai_infra: not_evaluated
+  ai_screening_disclosure: not_evaluated
+\`\`\`
+
+## A) Role Summary
+Fixture.
+## B) CV Match
+Fixture.
+## C) Level and Strategy
+Fixture.
+## D) Compensation and Demand
+Fixture.
+## E) Personalization Plan
+Fixture.
+## F) Interview Plan
+Fixture.
+## G) Posting Legitimacy
+Fixture.
+## Risk Summary
+Fixture.
+`;
+
+async function evaluationFixture({ report = evaluationReport, tracker = {} } = {}) {
+  const fixtureRoot = await mkdtemp(join(tmpdir(), "hfw-evaluation-result-"));
+  await mkdir(join(fixtureRoot, "batch"), { recursive: true });
+  await mkdir(join(fixtureRoot, "modes"), { recursive: true });
+  await mkdir(join(fixtureRoot, "templates"), { recursive: true });
+  await writeFile(join(fixtureRoot, "batch/batch-prompt.md"), "#### Machine Summary\nauthorization_confidence:\nauthorization_evidence:\nauthorization_scope:\nengagement_mechanism:\nauthorization_question:\n");
+  await writeFile(join(fixtureRoot, "tracker-parse.mjs"), "// documented tracker projection\n");
+  await writeFile(join(fixtureRoot, "modes/oferta.md"), "## Machine Summary\n");
+  await writeFile(join(fixtureRoot, "templates/states.yml"), "states: []\n");
+  const trackerRecord = {
+    id: 7, date: "2026-09-02", company: tracker.company ?? "Example Co", role: tracker.role ?? "Frontend Engineer",
+    score: tracker.score ?? "4.2/5", status: tracker.status ?? "Evaluated", pdf: "❌",
+    report: tracker.report ?? "[007](reports/007-example.md)", notes: tracker.notes ?? "synthetic fixture",
+  };
+  await writeFile(join(fixtureRoot, "tracker.mjs"), `const row = ${JSON.stringify(trackerRecord)};
+if (process.argv.includes("--json")) process.stdout.write(JSON.stringify([row]));
+// SELECT id, date, company, role, score, status, pdf, report, notes FROM applications
+`);
+  await writeFile(join(fixtureRoot, "package.json"), '{"version":"1.31.0"}\n');
+  await writeFile(join(fixtureRoot, "VERSION"), "1.31.0\n");
+  const reportPath = join(fixtureRoot, "reports/007-example.md");
+  await mkdir(join(fixtureRoot, "reports"), { recursive: true });
+  await writeFile(reportPath, report);
+  for (const [command, args] of [
+    ["git", ["init", "--quiet"]],
+    ["git", ["add", "."]],
+    ["git", ["-c", "user.name=HereForWork Test", "-c", "user.email=test@hereforwork.local", "commit", "--quiet", "-m", "fixture"]],
+  ]) {
+    const result = await runCommand(command, args, fixtureRoot);
+    assert.equal(result.status, 0, result.stderr);
+  }
+  const capabilities = await request({ id: "evaluation-capabilities", protocolVersion: 1, operation: "capabilities.get", input: {} }, { HFW_CAREER_OPS_ROOT: fixtureRoot });
+  const compatibilityFingerprint = capabilities.result.capabilities.find(({ id }) => id === "evaluation.result.read.v1").compatibilityFingerprint;
+  assert.match(compatibilityFingerprint, /^[a-f0-9]{64}$/);
+  const reportBytes = Buffer.from(report);
+  return {
+    root: fixtureRoot,
+    env: { HFW_CAREER_OPS_ROOT: fixtureRoot, HFW_CAREER_OPS_INDEX: join(fixtureRoot, "applications.db"), HFW_CAREER_OPS_STAGING: join(fixtureRoot, "staging") },
+    input: { reportPath: "reports/007-example.md", reportSha256: createHash("sha256").update(reportBytes).digest("hex"), trackerId: 7, compatibilityFingerprint },
+  };
+}
+
+async function readEvaluation(fixture, input = fixture.input) {
+  return request({ id: "evaluation-read", protocolVersion: 1, operation: "evaluation.result.read.v1", input }, fixture.env);
+}
+
 test("capabilities expose the fixed safety boundary", async () => {
   const expectedOperations = [
     "capabilities.get",
     "health.check",
     "history.snapshot",
+    "evaluation.result.read.v1",
     "profile.queue_filters.get",
     "preparation.context.get",
     "preparation.result.recover",
@@ -194,6 +300,53 @@ test("capabilities reject unknown inputs and report malformed threshold without 
   }, { HFW_CAREER_OPS_ROOT: root });
   assert.equal(unknown.ok, false);
   assert.match(unknown.error.message, /unknown field/);
+});
+
+test("evaluation result read returns a typed, native-score projection", async () => {
+  const fixture = await evaluationFixture();
+  const response = await readEvaluation(fixture);
+  assert.equal(response.ok, true, JSON.stringify(response));
+  assert.equal(response.result.contract, "hereforwork.career-ops-evaluation-result");
+  assert.equal(response.result.canonical.score, 4.2);
+  assert.equal(response.result.evaluation.score, 4.2);
+  assert.equal(response.result.evaluation.authorization.confidence, "investigate");
+  assert.deepEqual(response.result.evaluation.materialUncertainty.notEvaluatedRiskSignals, [
+    "classification", "culture", "interviewRedflags", "aiInfra", "aiScreeningDisclosure",
+  ]);
+  assert.equal(response.result.evaluation.authorization.evidence.length, 1);
+});
+
+test("evaluation result read rejects the fail-closed fixture matrix", async () => {
+  const cases = [
+    ["missing A-G section", evaluationReport.replace("## D) Compensation and Demand", "## D-omitted Compensation and Demand")],
+    ["unknown Machine Summary field", evaluationReport.replace("company: Example Co", "unknown_field: nope\ncompany: Example Co")],
+    ["out-of-range score", evaluationReport.replace("score: 4.2", "score: 6")],
+    ["advisory rank cannot become canonical score", evaluationReport.replace("score: 4.2", "rank: 0.99\nscore: 4.2")],
+    ["malformed YAML", evaluationReport.replace("authorization_confidence: investigate", "authorization_confidence: [investigate")],
+  ];
+  for (const [label, report] of cases) {
+    const fixture = await evaluationFixture({ report });
+    const response = await readEvaluation(fixture);
+    assert.equal(response.ok, false, label);
+  }
+  const mismatch = await evaluationFixture({ tracker: { company: "Other Co" } });
+  assert.equal((await readEvaluation(mismatch)).ok, false, "report/tracker mismatch");
+  const stale = await evaluationFixture();
+  await writeFile(join(stale.root, "reports/007-example.md"), `${evaluationReport}\nchanged\n`);
+  assert.equal((await readEvaluation(stale)).ok, false, "stale report hash");
+  const escaped = await evaluationFixture();
+  const escapedResponse = await readEvaluation(escaped, { ...escaped.input, reportPath: "../secret.md" });
+  assert.equal(escapedResponse.ok, false, "path escape");
+  const drift = await evaluationFixture();
+  await writeFile(join(drift.root, "tracker.mjs"), "// format drift\n");
+  assert.equal((await readEvaluation(drift)).ok, false, "upstream format drift");
+});
+
+test("evaluation result operation preserves the no-submit boundary", async () => {
+  const fixture = await evaluationFixture();
+  const response = await request({ id: "submit", protocolVersion: 1, operation: "application.submit", input: {} }, fixture.env);
+  assert.equal(response.ok, false);
+  assert.match(response.error.message, /Unsupported operation/);
 });
 
 test("generic discovery resolves a source listing to its application form", async (context) => {

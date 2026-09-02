@@ -11,7 +11,9 @@ use serde_json::{Value, json};
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::domain::{CareerOpsCapabilityManifest, HistoryRecord, QueueFilters};
+use crate::domain::{
+    CareerOpsCapabilityManifest, EvaluationResultRead, HistoryRecord, QueueFilters,
+};
 
 #[derive(Debug, Clone)]
 pub struct AdapterConfig {
@@ -92,6 +94,16 @@ impl AdapterError {
 #[serde(rename_all = "camelCase")]
 struct HistorySnapshot {
     records: Vec<HistoryRecord>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
+pub struct EvaluationResultReadInput {
+    pub report_path: String,
+    pub report_sha256: String,
+    pub tracker_id: i64,
+    pub compatibility_fingerprint: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -378,6 +390,18 @@ impl AdapterConfig {
         let snapshot: HistorySnapshot = serde_json::from_value(result)
             .map_err(|error| AdapterError::InvalidData(error.to_string()))?;
         Ok(snapshot.records)
+    }
+
+    #[allow(dead_code)]
+    pub fn evaluation_result_read(
+        &self,
+        input: &EvaluationResultReadInput,
+    ) -> Result<EvaluationResultRead, AdapterError> {
+        let result = self.request(
+            "evaluation.result.read.v1",
+            serde_json::to_value(input).expect("evaluation result input serializes"),
+        )?;
+        serde_json::from_value(result).map_err(|error| AdapterError::InvalidData(error.to_string()))
     }
 
     pub fn queue_filter_defaults(&self) -> Result<QueueFilters, AdapterError> {

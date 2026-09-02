@@ -8,11 +8,11 @@
  * paths from callers. External job data is returned as data only.
  */
 
-import { access, constants, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { access, constants, mkdir, readFile, rename, rm, realpath, writeFile } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { dirname, resolve } from "node:path";
+import { dirname, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseDocument } from "yaml";
 import {
@@ -25,6 +25,21 @@ const CAPABILITY_SCHEMA_VERSION = 1;
 const CAPABILITY_PROBE_REVISION = "hereforwork.career-ops-capability-probes.v1";
 const UPSTREAM_AUTO_PDF_SCORE_THRESHOLD_DEFAULT = 3.0;
 const PRODUCT_AUTO_PDF_SCORE_THRESHOLD = 3.5;
+const EVALUATION_RESULT_PROBE_FILES = Object.freeze([
+  "batch/batch-prompt.md",
+  "tracker.mjs",
+  "tracker-parse.mjs",
+  "modes/oferta.md",
+  "templates/states.yml",
+]);
+const EVALUATION_RESULT_PROMPT_MARKERS = [
+  "#### Machine Summary",
+  "authorization_confidence:",
+  "authorization_evidence:",
+  "authorization_scope:",
+  "engagement_mechanism:",
+  "authorization_question:",
+];
 const SEMVER_RE = /^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$/;
 const GIT_SHA_RE = /^[0-9a-f]{40}$/;
 const GIT_EXECUTABLE = process.platform === "win32" ? "git" : "/usr/bin/git";
@@ -37,6 +52,7 @@ const operations = Object.freeze([
   "capabilities.get",
   "health.check",
   "history.snapshot",
+  "evaluation.result.read.v1",
   "profile.queue_filters.get",
   "preparation.context.get",
   "preparation.result.recover",
@@ -104,6 +120,31 @@ async function canExecute(path) {
   } catch {
     return false;
   }
+}
+
+async function evaluationResultCompatibilityProbe() {
+  if (!root) return { fingerprint: null, sourceFiles: [] };
+  const sourceFiles = [];
+  const hashes = [];
+  for (const relativePath of EVALUATION_RESULT_PROBE_FILES) {
+    try {
+      const contents = await readFile(resolve(root, relativePath), "utf8");
+      if (Buffer.byteLength(contents, "utf8") > 1_000_000) return { fingerprint: null, sourceFiles: [] };
+      if (relativePath === "batch/batch-prompt.md"
+          && EVALUATION_RESULT_PROMPT_MARKERS.some((marker) => !contents.includes(marker))) {
+        return { fingerprint: null, sourceFiles: [] };
+      }
+      if (relativePath === "tracker.mjs"
+          && !contents.includes("SELECT id, date, company, role, score, status, pdf, report, notes FROM applications")) {
+        return { fingerprint: null, sourceFiles: [] };
+      }
+      sourceFiles.push(relativePath);
+      hashes.push([relativePath, sha256(contents)]);
+    } catch {
+      return { fingerprint: null, sourceFiles: [] };
+    }
+  }
+  return { fingerprint: sha256(JSON.stringify(hashes)), sourceFiles };
 }
 
 async function gitHeadRevision() {
@@ -195,19 +236,20 @@ async function effectiveAutoPdfScoreThreshold() {
   }
 }
 
-function capability(id, status, interfaceClass, sourceRevision, constraints) {
+function capability(id, status, interfaceClass, sourceRevision, constraints, compatibilityFingerprint = null) {
   return {
     id,
     status: sourceRevision ? status : "unavailable",
     interfaceClass,
     sourceRevision,
     probeRevision: CAPABILITY_PROBE_REVISION,
+    compatibilityFingerprint,
     constraints,
   };
 }
 
 async function capabilityManifest() {
-  const [revision, declaredVersion, threshold, surfaces] = await Promise.all([
+  const [revision, declaredVersion, threshold, surfaces, evaluationProbe] = await Promise.all([
     gitHeadRevision(),
     upstreamDeclaredVersion(),
     effectiveAutoPdfScoreThreshold(),
@@ -218,6 +260,7 @@ async function capabilityManifest() {
       "merge-tracker.mjs",
       "set-status.mjs",
     ].map(async (name) => [name, Boolean(root && (await canRead(resolve(root, name))))])),
+    evaluationResultCompatibilityProbe(),
   ]);
   const readable = Object.fromEntries(surfaces);
   const diagnostics = [];
@@ -300,8 +343,12 @@ async function capabilityManifest() {
   addDiagnostic(
     "safe_shape_probe_required",
     "evaluation.result.read.v1",
-    "Report and tracker data exist, but no strict complete-result reconciliation probe is installed.",
-    "Add a revision-pinned strict parser that validates report sections, native score, and tracker identity.",
+    evaluationProbe.fingerprint
+      ? "The revision-pinned report/tracker format probe is available; the read operation remains conditional on its fingerprint."
+      : "Report and tracker data exist, but the strict complete-result reconciliation probe is unavailable.",
+    evaluationProbe.fingerprint
+      ? "Pass the exact compatibility fingerprint from capabilities.get and reject reads after any upstream source drift."
+      : "Require the documented Machine Summary authorization shape and tracker projection before enabling this capability.",
   );
   addDiagnostic(
     "structured_provenance_unavailable",
@@ -358,7 +405,7 @@ async function capabilityManifest() {
       "requires_safe_shape_probe",
       "native_score_1_to_5",
       "requires_report_tracker_identity",
-    ]),
+    ], evaluationProbe.fingerprint),
     capability("artifacts.inspect.v1", "unavailable", "missing", revision, [
       "requires_exact_upstream_revision",
       "requires_structured_artifact_provenance",
@@ -1398,6 +1445,237 @@ async function historyRecords(limit = 5000) {
   return records;
 }
 
+const MACHINE_SUMMARY_KEYS = Object.freeze([
+  "company", "role", "score", "legitimacy_tier", "archetype", "final_decision",
+  "hard_stops", "soft_gaps", "top_strengths", "risk_level", "confidence", "next_action",
+  "authorization_confidence", "authorization_evidence", "authorization_scope",
+  "engagement_mechanism", "authorization_question", "work_auth", "discard_reasons", "via",
+  "company_confidential", "advertised_comp", "reports_to", "risk_summary",
+]);
+const RISK_SUMMARY_KEYS = Object.freeze([
+  "legitimacy", "classification", "culture", "interview_redflags", "ai_infra", "ai_screening_disclosure",
+]);
+const A_G_HEADINGS = Object.freeze([
+  "## A)", "## B)", "## C)", "## D)", "## E)", "## F)", "## G)",
+]);
+
+function strictText(value, label, maxLength) {
+  if (typeof value !== "string" || value.trim().length < 1 || value.length > maxLength || /[\u0000-\u001f\u007f]/.test(value)) {
+    throw new Error(`${label} is invalid.`);
+  }
+  return value.trim();
+}
+
+function strictTextList(value, label, maxItems = 12) {
+  if (!Array.isArray(value) || value.length > maxItems) throw new Error(`${label} is invalid.`);
+  return value.map((item, index) => strictText(item, `${label}[${index}]`, 2_000));
+}
+
+function strictEnum(value, label, values) {
+  if (!values.includes(value)) throw new Error(`${label} is invalid.`);
+  return value;
+}
+
+function strictScore(value, label) {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 1 || value > 5) {
+    throw new Error(`${label} must be a numeric native score from 1 to 5.`);
+  }
+  return value;
+}
+
+function parseTrackerScore(value) {
+  if (typeof value !== "string") throw new Error("Canonical tracker score is invalid.");
+  const match = value.trim().match(/^([1-5](?:\.\d+)?)\/5$/);
+  if (!match) throw new Error("Canonical tracker score is not a native 1–5 score.");
+  return strictScore(Number(match[1]), "Canonical tracker score");
+}
+
+function normalizedReportPath(value) {
+  const reportPath = strictText(value, "reportPath", 2_000).replaceAll("\\", "/");
+  if (reportPath.startsWith("/") || reportPath.includes("\0")) throw new Error("reportPath must stay inside the career-ops root.");
+  const parts = reportPath.split("/").filter(Boolean);
+  if (parts.some((part) => part === ".." || part === ".")) throw new Error("reportPath must stay inside the career-ops root.");
+  return parts.join("/");
+}
+
+async function reportFile(reportPath) {
+  if (!root) throw new Error("career-ops root is not configured.");
+  const normalized = normalizedReportPath(reportPath);
+  const rootReal = await realpath(root).catch(() => { throw new Error("career-ops root is unavailable."); });
+  const candidate = resolve(rootReal, normalized);
+  const candidateReal = await realpath(candidate).catch(() => { throw new Error("The evaluation report is unavailable."); });
+  const relativeCandidate = relative(rootReal, candidateReal);
+  if (!relativeCandidate || relativeCandidate.startsWith("..") || relativeCandidate.startsWith("/")) {
+    throw new Error("reportPath must stay inside the career-ops root.");
+  }
+  return { normalized, path: candidateReal };
+}
+
+function machineSummaryFromReport(report) {
+  const headingMatches = [...report.matchAll(/^## Machine Summary[ \t]*$/gm)];
+  if (headingMatches.length !== 1) throw new Error("Evaluation report must contain exactly one Machine Summary section.");
+  const heading = headingMatches[0];
+  const afterHeading = report.slice(heading.index + heading[0].length);
+  const fence = afterHeading.match(/^\s*\n+```yaml\r?\n([\s\S]*?)\r?\n```[ \t]*(?:\n|$)/);
+  if (!fence) throw new Error("Machine Summary must use the documented YAML fence.");
+  const document = parseDocument(fence[1], {
+    schema: "core", merge: false, uniqueKeys: true, maxAliasCount: 0,
+  });
+  if (document.errors.length > 0 || document.warnings.length > 0) throw new Error("Machine Summary YAML is malformed.");
+  let summary;
+  try { summary = document.toJS({ maxAliasCount: 0 }); } catch { throw new Error("Machine Summary YAML is malformed."); }
+  if (!summary || typeof summary !== "object" || Array.isArray(summary)) throw new Error("Machine Summary must be a YAML object.");
+  const keys = Object.keys(summary);
+  if (keys.length !== MACHINE_SUMMARY_KEYS.length || keys.some((key) => !MACHINE_SUMMARY_KEYS.includes(key))) {
+    throw new Error("Machine Summary contains an unknown or missing field.");
+  }
+  return summary;
+}
+
+function validateEvaluationReport(report, tracker) {
+  const summary = machineSummaryFromReport(report);
+  const headingPositions = A_G_HEADINGS.map((heading) => {
+    const matches = [...report.matchAll(new RegExp(`^${heading.replace(")", "\\)")}[^\\n]*$`, "gm"))];
+    if (matches.length !== 1) throw new Error(`Evaluation report must contain exactly one ${heading} section.`);
+    return matches[0].index;
+  });
+  if (headingPositions.some((position, index) => index > 0 && position <= headingPositions[index - 1])) {
+    throw new Error("Evaluation report A–G sections are incomplete or out of order.");
+  }
+  if ([...report.matchAll(/^## Risk Summary[ \t]*$/gm)].length !== 1) throw new Error("Evaluation report must contain exactly one Risk Summary section.");
+
+  const company = strictText(summary.company, "Machine Summary company", 500);
+  const role = strictText(summary.role, "Machine Summary role", 500);
+  const reportScore = strictScore(summary.score, "Machine Summary score");
+  const trackerScore = parseTrackerScore(tracker.score);
+  if (reportScore !== trackerScore) throw new Error("Machine Summary score does not match the canonical tracker score.");
+  const legitimacyTier = strictEnum(summary.legitimacy_tier, "legitimacy_tier", ["High Confidence", "Proceed with Caution", "Suspicious"]);
+  const legitimacyKey = { "High Confidence": "high_confidence", "Proceed with Caution": "proceed_with_caution", Suspicious: "suspicious" }[legitimacyTier];
+  const riskSummary = summary.risk_summary;
+  if (!riskSummary || typeof riskSummary !== "object" || Array.isArray(riskSummary)
+      || Object.keys(riskSummary).length !== RISK_SUMMARY_KEYS.length
+      || RISK_SUMMARY_KEYS.some((key) => !Object.hasOwn(riskSummary, key))) throw new Error("risk_summary is invalid.");
+  strictEnum(riskSummary.legitimacy, "risk_summary.legitimacy", ["high_confidence", "proceed_with_caution", "suspicious"]);
+  if (riskSummary.legitimacy !== legitimacyKey) throw new Error("risk_summary legitimacy does not match legitimacy_tier.");
+  strictEnum(riskSummary.classification, "risk_summary.classification", ["clear", "flagged", "not_evaluated"]);
+  strictEnum(riskSummary.culture, "risk_summary.culture", ["pass", "caution", "fail", "not_evaluated"]);
+  strictEnum(riskSummary.interview_redflags, "risk_summary.interview_redflags", ["none", "caution", "warning", "not_evaluated"]);
+  strictEnum(riskSummary.ai_infra, "risk_summary.ai_infra", ["consistent", "mismatch", "not_evaluated"]);
+  strictEnum(riskSummary.ai_screening_disclosure, "risk_summary.ai_screening_disclosure", ["disclosed", "corroborating_only", "no_match", "not_evaluated"]);
+  const authorizationConfidence = strictEnum(summary.authorization_confidence, "authorization_confidence", ["excellent", "interesting", "investigate", "problem"]);
+  const authorizationEvidence = strictTextList(summary.authorization_evidence, "authorization_evidence", 8);
+  if (authorizationEvidence.some((item) => !/https:\/\/[^\s)]+/i.test(item))) throw new Error("authorization_evidence must include HTTPS source URLs.");
+  const authorizationQuestion = strictText(summary.authorization_question, "authorization_question", 2_000);
+  strictEnum(summary.authorization_scope, "authorization_scope", ["job-specific", "company-wide", "mixed", "none"]);
+  strictEnum(summary.engagement_mechanism, "engagement_mechanism", ["employee_payroll", "contractor", "eor", "unknown"]);
+  const workAuth = strictEnum(summary.work_auth, "work_auth", ["sponsors", "not_needed", "unstated", "no_sponsorship"]);
+  if (authorizationConfidence === "problem" && summary.final_decision === "Apply") throw new Error("An authorization problem cannot produce an Apply decision.");
+  if (summary.company_confidential !== true && summary.company_confidential !== false) throw new Error("company_confidential is invalid.");
+  if (summary.via !== null && (typeof summary.via !== "string" || summary.via.length > 500)) throw new Error("via is invalid.");
+  if (summary.advertised_comp !== null) strictText(summary.advertised_comp, "advertised_comp", 2_000);
+  if (summary.reports_to !== null) strictText(summary.reports_to, "reports_to", 2_000);
+  strictTextList(summary.discard_reasons, "discard_reasons");
+  return {
+    company, role, score: reportScore,
+    finalDecision: strictEnum(summary.final_decision, "final_decision", ["Apply", "Consider", "Research first", "Skip"]),
+    legitimacyTier, archetype: strictText(summary.archetype, "archetype", 500),
+    nextAction: strictText(summary.next_action, "next_action", 2_000),
+    strengths: strictTextList(summary.top_strengths, "top_strengths"),
+    blockers: strictTextList(summary.hard_stops, "hard_stops"),
+    gaps: strictTextList(summary.soft_gaps, "soft_gaps"),
+    compensation: { advertised: summary.advertised_comp === null ? null : strictText(summary.advertised_comp, "advertised_comp", 2_000) },
+    authorization: {
+      confidence: authorizationConfidence,
+      evidence: authorizationEvidence,
+      scope: summary.authorization_scope,
+      engagementMechanism: summary.engagement_mechanism,
+      question: authorizationQuestion,
+      legacyWorkAuth: workAuth,
+    },
+    riskLevel: strictEnum(summary.risk_level, "risk_level", ["Low", "Medium", "High"]),
+    confidence: strictEnum(summary.confidence, "confidence", ["Low", "Medium", "High"]),
+    riskSummary: {
+      legitimacy: riskSummary.legitimacy,
+      classification: riskSummary.classification,
+      culture: riskSummary.culture,
+      interviewRedflags: riskSummary.interview_redflags,
+      aiInfra: riskSummary.ai_infra,
+      aiScreeningDisclosure: riskSummary.ai_screening_disclosure,
+    },
+  };
+}
+
+function strictTrackerRecord(record) {
+  if (!record || typeof record !== "object" || Array.isArray(record)) throw new Error("Canonical tracker row is invalid.");
+  const expected = ["id", "date", "company", "role", "score", "status", "pdf", "report", "notes"];
+  const keys = Object.keys(record);
+  if (keys.length !== expected.length || keys.some((key) => !expected.includes(key))) throw new Error("Canonical tracker row contains an unknown or missing field.");
+  if (!Number.isSafeInteger(record.id) || record.id < 1) throw new Error("Canonical tracker row id is invalid.");
+  strictText(record.company, "Canonical tracker company", 500);
+  strictText(record.role, "Canonical tracker role", 500);
+  strictText(record.status, "Canonical tracker status", 100);
+  strictText(record.report, "Canonical tracker report", 2_000);
+  if (typeof record.notes !== "string" || record.notes.length > 5_000) throw new Error("Canonical tracker notes are invalid.");
+  parseTrackerScore(record.score);
+  return record;
+}
+
+function trackerReportPath(value) {
+  const match = typeof value === "string" && value.match(/\]\(([^)]+)\)/);
+  if (!match) throw new Error("Canonical tracker report link is not a verifiable path.");
+  return normalizedReportPath(match[1]);
+}
+
+async function readEvaluationResult(input) {
+  assertInputKeys(input, ["reportPath", "reportSha256", "trackerId", "compatibilityFingerprint"], "evaluation.result.read.v1");
+  const reportHash = requiredText(input, "reportSha256", 64).toLowerCase();
+  if (!/^[a-f0-9]{64}$/.test(reportHash)) throw new Error("reportSha256 must be a SHA-256 hash.");
+  const trackerId = input?.trackerId;
+  if (!Number.isSafeInteger(trackerId) || trackerId < 1) throw new Error("trackerId must be a positive integer.");
+  const expectedFingerprint = requiredText(input, "compatibilityFingerprint", 64).toLowerCase();
+  if (!/^[a-f0-9]{64}$/.test(expectedFingerprint)) throw new Error("compatibilityFingerprint must be a SHA-256 hash.");
+  const before = await capabilityManifest();
+  const capabilityEntry = before.capabilities.find(({ id }) => id === "evaluation.result.read.v1");
+  if (!capabilityEntry?.compatibilityFingerprint || capabilityEntry.compatibilityFingerprint !== expectedFingerprint) {
+    throw new Error("The career-ops evaluation result format is unavailable or has drifted.");
+  }
+  const report = await reportFile(input.reportPath);
+  const bytes = await readFile(report.path);
+  if (bytes.length > 500_000 || sha256(bytes) !== reportHash) throw new Error("The evaluation report hash is stale or invalid.");
+  const { output } = await runTracker(["query", "--id", String(trackerId), "--limit", "2", "--json"]);
+  let records;
+  try { records = JSON.parse(output); } catch { throw new Error("career-ops returned malformed tracker JSON."); }
+  if (!Array.isArray(records) || records.length !== 1) throw new Error("The canonical tracker result is missing or ambiguous.");
+  const tracker = strictTrackerRecord(records[0]);
+  if (tracker.id !== trackerId || trackerReportPath(tracker.report) !== report.normalized) throw new Error("Report and canonical tracker identity do not match.");
+  const evaluation = validateEvaluationReport(bytes.toString("utf8"), tracker);
+  if (tracker.company.trim() !== evaluation.company || tracker.role.trim() !== evaluation.role) throw new Error("Report and canonical tracker role identity do not match.");
+  const after = await capabilityManifest();
+  if (after.upstreamRevision !== before.upstreamRevision || after.capabilities.find(({ id }) => id === "evaluation.result.read.v1")?.compatibilityFingerprint !== expectedFingerprint) {
+    throw new Error("career-ops evaluation result format changed during the read.");
+  }
+  const notEvaluatedRiskSignals = Object.entries(evaluation.riskSummary)
+    .filter(([, value]) => value === "not_evaluated")
+    .map(([key]) => key);
+  return {
+    contract: "hereforwork.career-ops-evaluation-result",
+    schemaVersion: 1,
+    upstreamRevision: before.upstreamRevision,
+    compatibilityFingerprint: expectedFingerprint,
+    report: { path: report.normalized, sha256: reportHash },
+    role: { company: evaluation.company, title: evaluation.role },
+    canonical: { trackerId, status: tracker.status, score: evaluation.score, reportPath: report.normalized },
+    evaluation: {
+      ...evaluation,
+      materialUncertainty: {
+        confidence: evaluation.confidence,
+        authorizationQuestion: evaluation.authorization.question,
+        notEvaluatedRiskSignals,
+      },
+    },
+  };
+}
+
 function recordForEffect(records, key) {
   return records.find((record) => typeof record.notes === "string" && record.notes.includes(`HereForWork effect ${key}`)) ?? null;
 }
@@ -1533,6 +1811,8 @@ async function execute(request) {
       if (!Array.isArray(records)) throw new Error("career-ops returned an invalid history snapshot.");
       return { records, diagnostics: diagnostics || null };
     }
+    case "evaluation.result.read.v1":
+      return readEvaluationResult(request.input ?? {});
     case "profile.queue_filters.get": {
       assertInputKeys(request.input, [], request.operation);
       return profileQueueFilters();

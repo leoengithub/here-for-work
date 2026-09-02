@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hereforwork.local/contracts/evaluation-result.schema.json",
+  "title": "HereForWork career-ops evaluation result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contract", "schemaVersion", "upstreamRevision", "compatibilityFingerprint", "report", "role", "canonical", "evaluation"],
+  "properties": {
+    "contract": { "type": "string", "const": "hereforwork.career-ops-evaluation-result" },
+    "schemaVersion": { "type": "integer", "const": 1 },
+    "upstreamRevision": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "compatibilityFingerprint": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "report": {
+      "type": "object", "additionalProperties": false, "required": ["path", "sha256"],
+      "properties": { "path": { "$ref": "#/$defs/relativePath" }, "sha256": { "$ref": "#/$defs/sha256" } }
+    },
+    "role": {
+      "type": "object", "additionalProperties": false, "required": ["company", "title"],
+      "properties": { "company": { "$ref": "#/$defs/shortText" }, "title": { "$ref": "#/$defs/shortText" } }
+    },
+    "canonical": {
+      "type": "object", "additionalProperties": false, "required": ["trackerId", "status", "score", "reportPath"],
+      "properties": {
+        "trackerId": { "type": "integer", "minimum": 1 }, "status": { "$ref": "#/$defs/shortText" },
+        "score": { "$ref": "#/$defs/score" }, "reportPath": { "$ref": "#/$defs/relativePath" }
+      }
+    },
+    "evaluation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["score", "finalDecision", "legitimacyTier", "archetype", "nextAction", "strengths", "blockers", "gaps", "compensation", "authorization", "riskLevel", "confidence", "riskSummary", "materialUncertainty"],
+      "properties": {
+        "score": { "$ref": "#/$defs/score" },
+        "finalDecision": { "type": "string", "enum": ["Apply", "Consider", "Research first", "Skip"] },
+        "legitimacyTier": { "type": "string", "enum": ["High Confidence", "Proceed with Caution", "Suspicious"] },
+        "archetype": { "$ref": "#/$defs/shortText" }, "nextAction": { "$ref": "#/$defs/longText" },
+        "strengths": { "$ref": "#/$defs/textList" }, "blockers": { "$ref": "#/$defs/textList" }, "gaps": { "$ref": "#/$defs/textList" },
+        "compensation": {
+          "type": "object", "additionalProperties": false, "required": ["advertised"],
+          "properties": { "advertised": { "anyOf": [{ "$ref": "#/$defs/longText" }, { "type": "null" }] } }
+        },
+        "authorization": {
+          "type": "object", "additionalProperties": false,
+          "required": ["confidence", "evidence", "scope", "engagementMechanism", "question", "legacyWorkAuth"],
+          "properties": {
+            "confidence": { "type": "string", "enum": ["excellent", "interesting", "investigate", "problem"] },
+            "evidence": { "type": "array", "minItems": 1, "maxItems": 8, "items": { "$ref": "#/$defs/longText" } },
+            "scope": { "type": "string", "enum": ["job-specific", "company-wide", "mixed", "none"] },
+            "engagementMechanism": { "type": "string", "enum": ["employee_payroll", "contractor", "eor", "unknown"] },
+            "question": { "$ref": "#/$defs/longText" },
+            "legacyWorkAuth": { "type": "string", "enum": ["sponsors", "not_needed", "unstated", "no_sponsorship"] }
+          }
+        },
+        "riskLevel": { "type": "string", "enum": ["Low", "Medium", "High"] },
+        "confidence": { "type": "string", "enum": ["Low", "Medium", "High"] },
+        "materialUncertainty": {
+          "type": "object", "additionalProperties": false,
+          "required": ["confidence", "authorizationQuestion", "notEvaluatedRiskSignals"],
+          "properties": {
+            "confidence": { "type": "string", "enum": ["Low", "Medium", "High"] },
+            "authorizationQuestion": { "$ref": "#/$defs/longText" },
+            "notEvaluatedRiskSignals": { "type": "array", "items": { "type": "string", "enum": ["classification", "culture", "interviewRedflags", "aiInfra", "aiScreeningDisclosure"] }, "uniqueItems": true, "maxItems": 5 }
+          }
+        },
+        "riskSummary": {
+          "type": "object", "additionalProperties": false,
+          "required": ["legitimacy", "classification", "culture", "interviewRedflags", "aiInfra", "aiScreeningDisclosure"],
+          "properties": {
+            "legitimacy": { "$ref": "#/$defs/legitimacyKey" },
+            "classification": { "type": "string", "enum": ["clear", "flagged", "not_evaluated"] },
+            "culture": { "type": "string", "enum": ["pass", "caution", "fail", "not_evaluated"] },
+            "interviewRedflags": { "type": "string", "enum": ["none", "caution", "warning", "not_evaluated"] },
+            "aiInfra": { "type": "string", "enum": ["consistent", "mismatch", "not_evaluated"] },
+            "aiScreeningDisclosure": { "type": "string", "enum": ["disclosed", "corroborating_only", "no_match", "not_evaluated"] }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "shortText": { "type": "string", "minLength": 1, "maxLength": 500 },
+    "longText": { "type": "string", "minLength": 1, "maxLength": 2000 },
+    "textList": { "type": "array", "maxItems": 12, "items": { "$ref": "#/$defs/longText" } },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "relativePath": { "type": "string", "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$)).+" },
+    "score": { "type": "number", "minimum": 1, "maximum": 5 },
+    "legitimacyKey": { "type": "string", "enum": ["high_confidence", "proceed_with_caution", "suspicious"] }
+  }
+}
