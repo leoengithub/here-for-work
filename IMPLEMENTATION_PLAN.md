@@ -52,10 +52,12 @@ Continue from the current implementation in this dependency order:
    CV/PDF for a below-threshold role before the browser lane begins.
 5. **Add single-driver browser fallback.** Keep the extension primary and require one
    result per planned field plus settled read-back for every required fillable. Release
-   its lease before the unchanged career-ops `apply` Playwright path takes ownership after
-   an eligible hard pre-fill failure. Partial fill, authentication, CAPTCHA, anti-bot, or
-   uncertain state goes to visible human handoff; retain ordered copy/paste recovery and
-   the hard no-submit boundary.
+   its lease before a separately supported review-only fallback driver takes ownership
+   after an eligible hard pre-fill failure. Partial fill, authentication, CAPTCHA,
+   anti-bot, or uncertain state goes to visible human handoff; retain ordered copy/paste
+   recovery and the hard no-submit boundary. Do not treat the current internal
+   career-ops Playwright/apply surfaces as callable from HereForWork until they expose
+   a stable public lease and result contract without modifying career-ops.
 6. **Close and prove the terminal workflow.** After physical submission and explicit user
    confirmation, retry only the canonical Applied writer. Applied ends HereForWork's
    scope. Add focused contract, recovery, and live no-finalization evidence, including

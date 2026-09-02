@@ -141,10 +141,10 @@ planned field and correct settled read-back for every required fillable. Expired
 or handshake, wrong or missing tab, zero compatible fields, missing results, read-back
 mismatch, and unsupported multi-page, modal, or iframe behavior are fallback-eligible.
 
-Only one driver may own a preparation. The extension must release its lease before the
-unchanged career-ops `apply` Playwright behavior takes over. Automatic fallback is limited
-to a hard pre-fill failure without authentication, CAPTCHA, anti-bot, partial-fill, or
-uncertain state; those conditions require a visible human handoff. The fallback returns a
+Only one driver may own a preparation. The extension must release its lease before any
+review-only fallback driver takes over. Automatic fallback is limited to a hard pre-fill
+failure without authentication, CAPTCHA, anti-bot, partial-fill, or uncertain state;
+those conditions require a visible human handoff. The approved target fallback returns a
 grounded ordered answer plan and, if autofill cannot proceed, copy/paste recovery. No
 fallback may add a submit or finalization operation.
 
@@ -153,7 +153,10 @@ The inspected career-ops `modes/apply.md` is an agent instruction, and
 contains an internal Playwright implementation, but it is not a versioned public process
 contract, does not expose a transferable HereForWork lease, and opens its own browser
 context. Therefore the fallback above is an approved requirement, not currently callable
-adapter behavior.
+adapter behavior. HereForWork may adapt around a future review-only fallback only through
+an HFW-owned strict contract or a supported upstream-neutral boundary; it must not import
+internal modules, call private local web routes, or add product-specific entry points to
+career-ops to obtain it.
 
 `preparation.artifacts.delete` is a narrowly scoped cleanup operation used by Undo
 preparation. It accepts only the committed preparation UUID plus the exact report and
