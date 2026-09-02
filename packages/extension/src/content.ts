@@ -20,6 +20,7 @@ function releaseFinalizationGuard(): void {
   releaseGuard = null;
   activeFingerprint = null;
   activeRequiredFields = new Set();
+  verifiedFillCompleted = false;
 }
 
 async function applyPlan(plan: FillPlan, uploads: FileUploadInstruction[] = []) {

@@ -1,3 +1,5 @@
+import { requireSuccessfulRelease } from "./popup-result";
+
 export {};
 
 const status = document.querySelector<HTMLElement>("[data-status]");
@@ -27,7 +29,7 @@ copyInstallation?.addEventListener("click", () => {
 inspect?.addEventListener("click", () => {
   void activeTab().then(async (tab) => {
     if (!tab?.id) throw new Error("No active tab.");
-    const result = await chrome.tabs.sendMessage(tab.id, { type: "inspect" });
+    const result = await chrome.runtime.sendMessage({ type: "manual_inspect", tabId: tab.id });
     if (status) status.textContent = result?.ok ? `${result.snapshot.fields.length} fields inspected; final action is guarded.` : result?.error;
   }).catch((error) => {
     if (status) status.textContent = String(error);
@@ -37,7 +39,8 @@ inspect?.addEventListener("click", () => {
 release?.addEventListener("click", () => {
   void activeTab().then(async (tab) => {
     if (!tab?.id) throw new Error("No active tab.");
-    await chrome.tabs.sendMessage(tab.id, { type: "release_for_review" });
+    const result = await chrome.runtime.sendMessage({ type: "manual_release", tabId: tab.id });
+    requireSuccessfulRelease(result);
     if (status) status.textContent = "Released for your review. HereForWork cannot trigger the final action.";
   }).catch((error) => {
     if (status) status.textContent = String(error);

@@ -22,7 +22,19 @@ describe("focusReviewTab", () => {
       getTab: async () => ({}),
       activateTab,
       focusWindow,
-    })).rejects.toThrow("review tab window is unavailable");
+    })).rejects.toThrow("review_tab_unavailable");
+    expect(activateTab).not.toHaveBeenCalled();
+    expect(focusWindow).not.toHaveBeenCalled();
+  });
+
+  it("returns a typed failure when the remembered tab no longer exists", async () => {
+    const activateTab = vi.fn(async () => undefined);
+    const focusWindow = vi.fn(async () => undefined);
+    await expect(focusReviewTab(42, {
+      getTab: async () => { throw new Error("No tab with id: 42"); },
+      activateTab,
+      focusWindow,
+    })).rejects.toThrow("review_tab_unavailable");
     expect(activateTab).not.toHaveBeenCalled();
     expect(focusWindow).not.toHaveBeenCalled();
   });

@@ -362,7 +362,8 @@ fn handle_command_result(
         }
         "fill_plan" => {
             if result.get("ok").and_then(Value::as_bool) != Some(true) {
-                return match store.fail_browser_command(command_id, "fill_failed") {
+                let error_code = command_result_error_code(&result, "fill_failed");
+                return match store.fail_browser_command(command_id, &error_code) {
                     Ok(_) => json!({ "protocolVersion": 1, "ok": true, "type": "result_ack" }),
                     Err(_) => {
                         json!({ "protocolVersion": 1, "ok": false, "error": "invalid_command_state" })
@@ -385,6 +386,14 @@ fn handle_command_result(
         }
         _ => json!({ "protocolVersion": 1, "ok": false, "error": "unsupported_command_result" }),
     }
+}
+
+fn command_result_error_code(result: &Value, fallback: &str) -> String {
+    result
+        .get("error")
+        .and_then(Value::as_str)
+        .map(normalize_error_code)
+        .unwrap_or_else(|| fallback.to_string())
 }
 
 fn valid_fill_results(value: &Value) -> bool {
@@ -604,6 +613,10 @@ fn normalize_error_code(error: &str) -> String {
         "snapshot_mismatch"
             | "form_drift_before_fill"
             | "invalid_fill_plan_duplicate_field"
+            | "fill_restart_uncertain"
+            | "review_tab_unavailable"
+            | "finalization_guard_unavailable"
+            | "finalization_guard_permission_required"
             | "verified_fill_required"
     ) {
         return normalized;
@@ -759,6 +772,25 @@ mod tests {
                 "The approved Chrome profile did not return the expected application tab."
             ),
             "application_tab_recovery_failed"
+        );
+        assert_eq!(
+            super::normalize_error_code("form_drift_before_fill"),
+            "form_drift_before_fill"
+        );
+        assert_eq!(
+            super::normalize_error_code("fill_restart_uncertain"),
+            "fill_restart_uncertain"
+        );
+        assert_eq!(
+            super::normalize_error_code("review_tab_unavailable"),
+            "review_tab_unavailable"
+        );
+        assert_eq!(
+            super::command_result_error_code(
+                &json!({ "ok": false, "error": "snapshot_mismatch" }),
+                "fill_failed"
+            ),
+            "snapshot_mismatch"
         );
     }
 

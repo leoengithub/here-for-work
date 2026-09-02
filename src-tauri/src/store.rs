@@ -8944,6 +8944,30 @@ mod tests {
     }
 
     #[test]
+    fn only_proven_pre_fill_failures_release_the_driver_for_future_retry() {
+        for code in [
+            "snapshot_mismatch",
+            "form_drift_before_fill",
+            "invalid_fill_plan_duplicate_field",
+        ] {
+            assert!(super::browser_failure_is_fallback_eligible(
+                "fill_plan",
+                code
+            ));
+        }
+        for code in [
+            "fill_restart_uncertain",
+            "readback_mismatch",
+            "extension_command_failed",
+        ] {
+            assert!(!super::browser_failure_is_fallback_eligible(
+                "fill_plan",
+                code
+            ));
+        }
+    }
+
+    #[test]
     fn diagnostics_omit_browser_page_and_field_data() {
         let directory = tempfile::tempdir().unwrap();
         let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();

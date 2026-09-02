@@ -8,9 +8,11 @@ export async function focusReviewTab(
   tabId: number,
   browser: FocusReviewBrowser,
 ): Promise<{ ok: true }> {
-  const tab = await browser.getTab(tabId);
+  const tab = await browser.getTab(tabId).catch(() => {
+    throw new Error("review_tab_unavailable");
+  });
   if (typeof tab.windowId !== "number") {
-    throw new Error("The review tab window is unavailable.");
+    throw new Error("review_tab_unavailable");
   }
   await browser.activateTab(tabId);
   await browser.focusWindow(tab.windowId);

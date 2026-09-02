@@ -5,8 +5,10 @@ Status: extension driver implemented; review fallback unavailable
 The ordinary Chrome extension is the only enabled form driver. Each application browser
 session owns one durable, opaque, role-scoped driver lease. Every command and result carries
 the exact session and lease identity; stale, mismatched, expired, or replayed identities are
-rejected. Reconnect may redeliver a command, but the extension caches a completed fill result
-for that command so the same fill is not executed twice.
+rejected. Before a fill, the extension writes a bounded durable `in_progress` marker keyed by
+command, session, and lease. Reconnect may reuse a durable completed result, while an
+`in_progress` marker surviving a browser restart becomes human handoff uncertainty instead of
+executing the fill again. Entries expire after 24 hours and are capped at 32.
 
 ## Inspection
 
@@ -41,7 +43,13 @@ or failed controls remain visible in the review record.
 `release_for_review` is accepted only after a verified fill (except the explicit connection
 check, which never fills). It removes the extension's no-finalization guard and durably releases
 the driver lease. `focus_review` only focuses the already released tab; it cannot inspect, fill,
-release, or submit.
+release, submit, or create a replacement tab when the reviewed tab is gone.
+
+The finalization guard blocks captured submit/click events plus programmatic
+`HTMLFormElement.submit()` and `requestSubmit()` calls from page listeners while fill events are
+dispatched. Installing and restoring that guard in the page's main JavaScript world requires the
+extension `scripting` permission. Until that permission is explicitly approved and declared, the
+driver fails closed with `finalization_guard_permission_required` before inspection.
 
 A hard inspection failure or a fill-plan rejection proven to occur before mutation may release
 the extension lease and mark a future fallback eligible. A partial fill, read-back uncertainty,

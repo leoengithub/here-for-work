@@ -430,4 +430,59 @@ describe("ATS trust boundary", () => {
     doc.querySelector("form")?.dispatchEvent(released);
     expect(released.defaultPrevented).toBe(false);
   });
+
+  it("blocks direct finalization attempted by page listeners during fill and restores only on release", async () => {
+    const doc = document;
+    const priorMarkup = doc.body.innerHTML;
+    doc.body.innerHTML = "<form><input id='email' type='email'><button type='submit'>Submit application</button></form>";
+    const FormConstructor = doc.defaultView!.HTMLFormElement;
+    const prototype = FormConstructor.prototype;
+    const originalSubmit = Object.getOwnPropertyDescriptor(prototype, "submit");
+    const originalRequestSubmit = Object.getOwnPropertyDescriptor(prototype, "requestSubmit");
+    const directSubmit = vi.fn();
+    const directRequestSubmit = vi.fn();
+    Object.defineProperty(prototype, "submit", { configurable: true, writable: true, value: directSubmit });
+    Object.defineProperty(prototype, "requestSubmit", { configurable: true, writable: true, value: directRequestSubmit });
+    const form = doc.querySelector<HTMLFormElement>("form")!;
+    const button = doc.querySelector<HTMLButtonElement>("button")!;
+    const terminalClick = vi.fn();
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      terminalClick();
+    });
+    const attemptFinalization = () => {
+      form.submit();
+      form.requestSubmit();
+      button.click();
+    };
+    form.addEventListener("input", attemptFinalization);
+    form.addEventListener("change", attemptFinalization);
+
+    try {
+      const release = installFinalizationGuard(doc);
+      const snapshot = await inspectForm(doc, new URL("https://apply.example.com/form"));
+      const results = await applyFillPlan({
+        protocolVersion: 1,
+        snapshotFingerprint: snapshot.fingerprint,
+        instructions: [{ fieldId: "email", value: "safe@example.test", classification: "safe_verified" }],
+      }, snapshot.fingerprint, doc, [], undefined, { settleDelaysMs: [] });
+
+      expect(results[0]?.status).toBe("verified");
+      expect(directSubmit).not.toHaveBeenCalled();
+      expect(directRequestSubmit).not.toHaveBeenCalled();
+      expect(terminalClick).not.toHaveBeenCalled();
+
+      release();
+      form.submit();
+      form.requestSubmit();
+      button.click();
+      expect(directSubmit).toHaveBeenCalledTimes(1);
+      expect(directRequestSubmit).toHaveBeenCalledTimes(1);
+      expect(terminalClick).toHaveBeenCalledTimes(1);
+    } finally {
+      if (originalSubmit) Object.defineProperty(prototype, "submit", originalSubmit);
+      if (originalRequestSubmit) Object.defineProperty(prototype, "requestSubmit", originalRequestSubmit);
+      doc.body.innerHTML = priorMarkup;
+    }
+  });
 });

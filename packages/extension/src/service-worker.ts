@@ -5,6 +5,12 @@ import { retryMessage } from "./message-retry";
 import { focusReviewTab } from "./focus-review";
 import { isConfirmedNativeResponse, postMessageSafely } from "./native-port";
 import { EXPECTED_TAB_POLL_INTERVAL_MS, resolveExpectedTabId } from "./tab-recovery";
+import {
+  beginDurableCommand,
+  clearDurableCommand,
+  completeDurableCommand,
+} from "./durable-command-cache";
+import { installMainWorldFinalizationGuard, releaseMainWorldFinalizationGuard } from "./main-world-guard";
 
 const HOST_NAME = "com.hereforwork.bridge";
 const POLL_INTERVAL_MS = 750;
@@ -13,7 +19,7 @@ let pollTimer: ReturnType<typeof setTimeout> | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let awaitingResponse = false;
 let nativeConfirmed = false;
-let pendingResultCacheKey: string | null = null;
+let pendingResultIdentity: { commandId: string; sessionId: string; driverLeaseId: string | null } | null = null;
 
 const installationId = createInstallationIdResolver(
   async () => (await chrome.storage.local.get("installationId")).installationId,
@@ -105,8 +111,39 @@ function sessionTabKey(sessionId: string): string {
   return `browser-session:${sessionId}`;
 }
 
-function commandResultKey(commandId: string): string {
-  return `browser-command-result:${commandId}`;
+function mainGuardKey(tabId: number): string {
+  return `browser-main-guard:v1:${tabId}`;
+}
+
+async function installMainGuard(tabId: number): Promise<void> {
+  if (!chrome.scripting?.executeScript) throw new Error("finalization_guard_permission_required");
+  const key = mainGuardKey(tabId);
+  const stored = (await chrome.storage.local.get(key))[key] as { tabId?: number; token?: string } | undefined;
+  const token = stored?.tabId === tabId && typeof stored.token === "string"
+    ? stored.token
+    : crypto.randomUUID();
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    world: "MAIN",
+    func: installMainWorldFinalizationGuard,
+    args: [token],
+  });
+  await chrome.storage.local.set({ [key]: { tabId, token, updatedAt: Date.now() } });
+}
+
+async function releaseMainGuard(tabId: number): Promise<void> {
+  if (!chrome.scripting?.executeScript) throw new Error("finalization_guard_permission_required");
+  const key = mainGuardKey(tabId);
+  const stored = (await chrome.storage.local.get(key))[key] as { tabId?: number; token?: string } | undefined;
+  if (stored?.tabId !== tabId || typeof stored.token !== "string") throw new Error("finalization_guard_unavailable");
+  const [execution] = await chrome.scripting.executeScript({
+    target: { tabId },
+    world: "MAIN",
+    func: releaseMainWorldFinalizationGuard,
+    args: [stored.token],
+  });
+  if (execution?.result !== true) throw new Error("finalization_guard_unavailable");
+  await chrome.storage.local.remove(key);
 }
 
 async function rememberedTabId(sessionId: string): Promise<number> {
@@ -121,10 +158,18 @@ async function executeCommand(command: BrowserCommand): Promise<unknown> {
   if (command.commandType === "inspect_request") {
     const expectedUrl = command.payload.expectedUrl;
     const tabId = typeof expectedUrl === "string" ? await expectedTabId(expectedUrl) : await activeTabId();
-    const result = await retryMessage(
-      () => chrome.tabs.sendMessage(tabId, { type: "inspect" }),
-      () => new Promise((resolve) => setTimeout(resolve, 250)),
-    );
+    await installMainGuard(tabId);
+    let result;
+    try {
+      result = await retryMessage(
+        () => chrome.tabs.sendMessage(tabId, { type: "inspect" }),
+        () => new Promise((resolve) => setTimeout(resolve, 250)),
+      );
+    } catch (error) {
+      await releaseMainGuard(tabId).catch(() => undefined);
+      throw error;
+    }
+    if (!result?.ok) await releaseMainGuard(tabId).catch(() => undefined);
     if (result?.ok) await chrome.storage.session.set({ [sessionTabKey(command.sessionId)]: tabId });
     return result;
   }
@@ -149,16 +194,13 @@ async function executeCommand(command: BrowserCommand): Promise<unknown> {
       type: "release_for_review",
       connectionCheck: command.payload.connectionCheck === true,
     });
+    if (result?.ok) await releaseMainGuard(tabId);
     return result;
   }
   if (command.commandType === "focus_review") {
-    let tabId: number;
-    try {
-      tabId = await rememberedTabId(command.sessionId);
-    } catch {
-      const expectedUrl = command.payload.expectedUrl;
-      tabId = typeof expectedUrl === "string" ? await expectedTabId(expectedUrl) : await activeTabId();
-    }
+    const tabId = await rememberedTabId(command.sessionId).catch(() => {
+      throw new Error("review_tab_unavailable");
+    });
     return focusReviewTab(tabId, {
       getTab: (id) => chrome.tabs.get(id),
       activateTab: (id) => chrome.tabs.update(id, { active: true }),
@@ -170,35 +212,26 @@ async function executeCommand(command: BrowserCommand): Promise<unknown> {
 
 function returnCommandResult(command: BrowserCommand): void {
   void (async () => {
-    const cacheKey = commandResultKey(command.commandId);
+    let cacheIdentity: typeof pendingResultIdentity = null;
     if (command.commandType === "fill_plan") {
-      const cached = (await chrome.storage.session.get(cacheKey))[cacheKey] as {
-        sessionId?: string;
-        driverLeaseId?: string | null;
-        status?: string;
-        result?: unknown;
-      } | undefined;
-      if (cached?.sessionId === command.sessionId
-          && cached?.driverLeaseId === command.driverLeaseId
-          && cached?.status === "completed") {
-        return { result: cached.result, cacheKey };
-      }
+      const identity = { commandId: command.commandId, sessionId: command.sessionId, driverLeaseId: command.driverLeaseId };
+      const cached = await beginDurableCommand(chrome.storage.local, identity);
+      cacheIdentity = identity;
+      if (cached.state === "completed") return { result: cached.result, cacheIdentity };
+      if (cached.state === "uncertain") throw new Error("fill_restart_uncertain");
     }
     const result = await executeCommand(command);
     if (command.commandType === "fill_plan") {
-      await chrome.storage.session.set({
-        [cacheKey]: {
-          sessionId: command.sessionId,
-          driverLeaseId: command.driverLeaseId,
-          status: "completed",
-          result,
-        },
-      });
-      return { result, cacheKey };
+      await completeDurableCommand(chrome.storage.local, {
+        commandId: command.commandId,
+        sessionId: command.sessionId,
+        driverLeaseId: command.driverLeaseId,
+      }, result);
+      return { result, cacheIdentity };
     }
-    return { result, cacheKey: null };
-  })().then(({ result, cacheKey }) => {
-    pendingResultCacheKey = cacheKey;
+    return { result, cacheIdentity: null };
+  })().then(({ result, cacheIdentity }) => {
+    pendingResultIdentity = cacheIdentity;
     void postNative({
       protocolVersion: 1,
       type: "command_result",
@@ -241,9 +274,9 @@ function connect(): void {
         schedulePoll();
         return;
       }
-      if (message.type === "result_ack" && pendingResultCacheKey) {
-        void chrome.storage.session.remove(pendingResultCacheKey);
-        pendingResultCacheKey = null;
+      if (message.type === "result_ack" && pendingResultIdentity) {
+        void clearDurableCommand(chrome.storage.local, pendingResultIdentity);
+        pendingResultIdentity = null;
       }
       if (message.type === "command" && isBrowserCommand(message)) returnCommandResult(message);
       schedulePoll();
@@ -278,6 +311,24 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
         installationId: value,
       });
     })();
+    return true;
+  }
+  if (message?.type === "manual_inspect" && typeof message.tabId === "number") {
+    void (async () => {
+      await installMainGuard(message.tabId);
+      const result = await chrome.tabs.sendMessage(message.tabId, { type: "inspect" });
+      if (!result?.ok) await releaseMainGuard(message.tabId).catch(() => undefined);
+      return result;
+    })().then(respond).catch((error) => respond({ ok: false, error: error instanceof Error ? error.message : String(error) }));
+    return true;
+  }
+  if (message?.type === "manual_release" && typeof message.tabId === "number") {
+    void (async () => {
+      const result = await chrome.tabs.sendMessage(message.tabId, { type: "release_for_review" });
+      if (!result?.ok) return result;
+      await releaseMainGuard(message.tabId);
+      return result;
+    })().then(respond).catch((error) => respond({ ok: false, error: error instanceof Error ? error.message : String(error) }));
     return true;
   }
 });
