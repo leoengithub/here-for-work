@@ -280,6 +280,32 @@ describe("App", () => {
     );
   });
 
+  it("keeps post-submit recovery tracking-only and leaves recorded applications terminal", async () => {
+    window.history.replaceState({}, "", "/?application-preview=states");
+    const { container } = render(<App />);
+    await screen.findByRole("heading", { name: "Review queue" });
+    fireEvent.click(screen.getByRole("tab", { name: "applications" }));
+    await screen.findByText("Tracking update failed");
+    await screen.findByText("Application recorded");
+
+    const trackingRow = container.querySelector<HTMLElement>('[data-preparation-id="tracking"]')!;
+    expect(within(trackingRow).getByText("Tracking update failed")).toBeInTheDocument();
+    expect(within(trackingRow).getByText("The form is not touched again. Retry only the career-ops tracking update.")).toBeInTheDocument();
+    expect(within(trackingRow).getByRole("button", { name: "Retry tracking update" })).toBeEnabled();
+    expect(within(trackingRow).queryByRole("button", { name: "Reopen and refill" })).not.toBeInTheDocument();
+    expect(within(trackingRow).queryByRole("button", { name: "Dismiss" })).not.toBeInTheDocument();
+    expect(within(trackingRow).queryByRole("button", { name: "I submitted this application" })).not.toBeInTheDocument();
+
+    const recordedRow = container.querySelector<HTMLElement>('[data-preparation-id="recorded"]')!;
+    expect(within(recordedRow).getByText("Application recorded")).toBeInTheDocument();
+    expect(within(recordedRow).getByRole("button", { name: "Details" })).toBeEnabled();
+    expect(within(recordedRow).getByRole("button", { name: "Open tailored CV" })).toBeEnabled();
+    expect(within(recordedRow).queryByRole("button", { name: "Retry tracking update" })).not.toBeInTheDocument();
+    expect(within(recordedRow).queryByRole("button", { name: "Reopen and refill" })).not.toBeInTheDocument();
+    expect(within(recordedRow).queryByRole("button", { name: "Dismiss" })).not.toBeInTheDocument();
+    expect(within(recordedRow).queryByRole("button", { name: "I submitted this application" })).not.toBeInTheDocument();
+  });
+
   it("starts an explicit refill attempt from a ready application", async () => {
     const invoke = vi.fn(async (command: string) => {
       if (command === "get_dashboard") return applicationsPreviewDashboard;
