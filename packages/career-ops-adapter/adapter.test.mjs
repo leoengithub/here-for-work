@@ -129,6 +129,10 @@ async function evaluationFixture({ report = evaluationReport, tracker = {}, init
   await writeFile(join(fixtureRoot, "tracker-parse.mjs"), "// documented tracker projection\n");
   await writeFile(join(fixtureRoot, "modes/oferta.md"), "## Machine Summary\n");
   await writeFile(join(fixtureRoot, "templates/states.yml"), "states: []\n");
+  await writeFile(join(fixtureRoot, "application-artifacts.mjs"), "// applicationArtifactPaths writeReuseDecision schema_version: 1\n");
+  await writeFile(join(fixtureRoot, "build-cv-html.mjs"), "// cv-payload page_format\n");
+  await writeFile(join(fixtureRoot, "verify-cv-facts.mjs"), "// --json verdict\n");
+  await writeFile(join(fixtureRoot, "generate-pdf.mjs"), "// CAREER_OPS_PDF_INDEX # report\\tpdf\\thtml\\tformat\\tdate\n");
   const trackerRecord = {
     id: 7, date: "2026-09-02", company: tracker.company ?? "Example Co", role: tracker.role ?? "Frontend Engineer",
     score: tracker.score ?? "4.2/5", status: tracker.status ?? "Evaluated", pdf: "❌",
@@ -168,12 +172,36 @@ async function readEvaluation(fixture, input = fixture.input) {
   return request({ id: "evaluation-read", protocolVersion: 1, operation: "evaluation.result.read.v1", input }, fixture.env);
 }
 
+async function inspectArtifacts(fixture, overrides = {}) {
+  const capabilities = await request({ id: "artifact-capabilities", protocolVersion: 1, operation: "capabilities.get", input: {} }, fixture.env);
+  const artifactCompatibilityFingerprint = capabilities.result.capabilities
+    .find(({ id }) => id === "artifacts.inspect.v1").compatibilityFingerprint;
+  return request({
+    id: "artifact-inspection",
+    protocolVersion: 1,
+    operation: "artifacts.inspect.v1",
+    input: {
+      preparationId: "11111111-1111-4111-8111-111111111111",
+      contextHash: "c".repeat(64),
+      company: "Example Co",
+      title: "Frontend Engineer",
+      reportPath: fixture.input.reportPath,
+      reportSha256: fixture.input.reportSha256,
+      trackerId: fixture.input.trackerId,
+      evaluationCompatibilityFingerprint: fixture.input.compatibilityFingerprint,
+      artifactCompatibilityFingerprint,
+      ...overrides,
+    },
+  }, fixture.env);
+}
+
 test("capabilities expose the fixed safety boundary", async () => {
   const expectedOperations = [
     "capabilities.get",
     "health.check",
     "history.snapshot",
     "evaluation.result.read.v1",
+    "artifacts.inspect.v1",
     "profile.queue_filters.get",
     "preparation.context.get",
     "preparation.result.recover",
@@ -322,6 +350,86 @@ test("evaluation result read returns a typed, native-score projection", async ()
     "classification", "culture", "interviewRedflags", "aiInfra", "aiScreeningDisclosure",
   ]);
   assert.equal(response.result.evaluation.authorization.evidence.length, 1);
+});
+
+test("artifact inspection reuses the canonical report but refreshes an unproven CV without writing", async () => {
+  const fixture = await evaluationFixture();
+  const before = await stat(join(fixture.root, "reports/007-example.md"));
+  const response = await inspectArtifacts(fixture);
+  const after = await stat(join(fixture.root, "reports/007-example.md"));
+  assert.equal(response.ok, true, JSON.stringify(response));
+  assert.equal(response.result.report.action, "reuse");
+  assert.equal(response.result.cv.action, "refresh");
+  assert.equal(response.result.cv.reason, "no_hfw_bundle");
+  assert.equal(response.result.trackerId, 7);
+  assert.equal(after.mtimeMs, before.mtimeMs);
+});
+
+test("artifact inspection reuses only an exact HFW manifest and detects PDF drift", async () => {
+  const fixture = await evaluationFixture();
+  const preparationId = "11111111-1111-4111-8111-111111111111";
+  const root = join(fixture.root, "output/007-example-co-frontend-engineer/cv/tailored/v001");
+  await mkdir(root, { recursive: true });
+  const html = Buffer.from("<html><body>fixture</body></html>");
+  const pdf = Buffer.from("%PDF-1.4 fixture %%EOF");
+  const changes = Buffer.from("verified changes\n");
+  await Promise.all([
+    writeFile(join(root, "cv.html"), html),
+    writeFile(join(root, "cv.pdf"), pdf),
+    writeFile(join(root, "changes.md"), changes),
+  ]);
+  const capabilities = await request({ id: "artifact-capabilities", protocolVersion: 1, operation: "capabilities.get", input: {} }, fixture.env);
+  const artifactFingerprint = capabilities.result.capabilities.find(({ id }) => id === "artifacts.inspect.v1").compatibilityFingerprint;
+  const revision = capabilities.result.upstreamRevision;
+  await mkdir(join(fixture.env.HFW_CAREER_OPS_STAGING, preparationId), { recursive: true });
+  await writeFile(join(fixture.env.HFW_CAREER_OPS_STAGING, preparationId, "commit-state.json"), JSON.stringify({
+    schemaVersion: 3,
+    preparationId,
+    contextHash: "c".repeat(64),
+    status: "committed",
+    artifacts: {
+      report: { path: fixture.input.reportPath, sha256: fixture.input.reportSha256 },
+      cvHtml: { path: "output/007-example-co-frontend-engineer/cv/tailored/v001/cv.html", sha256: createHash("sha256").update(html).digest("hex") },
+      cvPdf: { path: "output/007-example-co-frontend-engineer/cv/tailored/v001/cv.pdf", sha256: createHash("sha256").update(pdf).digest("hex") },
+      cvChanges: { path: "output/007-example-co-frontend-engineer/cv/tailored/v001/changes.md", sha256: createHash("sha256").update(changes).digest("hex") },
+    },
+    cvProvenance: { source: "tailored_generated", tailored: true, sourceSha256: null, renderRecovery: null },
+    cvFormat: "a4",
+    canonicalEvaluation: {
+      trackerId: 7,
+      reportPath: fixture.input.reportPath,
+      reportSha256: fixture.input.reportSha256,
+      upstreamRevision: revision,
+      evaluationCompatibilityFingerprint: fixture.input.compatibilityFingerprint,
+      artifactCompatibilityFingerprint: artifactFingerprint,
+    },
+  }));
+  const reusable = await inspectArtifacts(fixture);
+  assert.equal(reusable.ok, true, JSON.stringify(reusable));
+  assert.equal(reusable.result.cv.action, "reuse");
+
+  await writeFile(join(root, "cv.pdf"), "changed");
+  const stale = await inspectArtifacts(fixture);
+  assert.equal(stale.ok, true, JSON.stringify(stale));
+  assert.equal(stale.result.cv.action, "refresh");
+  assert.equal(stale.result.cv.scope, "pdf_only");
+});
+
+test("artifact inspection fails closed on fingerprint, report identity, and symlink drift", async () => {
+  const fixture = await evaluationFixture();
+  const badFingerprint = await inspectArtifacts(fixture, { artifactCompatibilityFingerprint: "a".repeat(64) });
+  assert.equal(badFingerprint.ok, false);
+  assert.match(badFingerprint.error.message, /unavailable or has drifted/);
+
+  const wrongTracker = await inspectArtifacts(fixture, { trackerId: 8 });
+  assert.equal(wrongTracker.ok, false);
+
+  const outside = join(await mkdtemp(join(tmpdir(), "hfw-artifact-outside-")), "outside.md");
+  await writeFile(outside, evaluationReport);
+  await unlink(join(fixture.root, "reports/007-example.md"));
+  await symlink(outside, join(fixture.root, "reports/007-example.md"));
+  const escaped = await inspectArtifacts(fixture);
+  assert.equal(escaped.ok, false);
 });
 
 test("evaluation result read fails closed without an exact upstream revision", async () => {
@@ -519,6 +627,9 @@ async function fakeCareerOps() {
   const root = await mkdtemp(join(tmpdir(), "hfw-career-ops-"));
   const staging = join(root, "staging");
   await mkdir(join(root, "data"), { recursive: true });
+  await mkdir(join(root, "batch"), { recursive: true });
+  await mkdir(join(root, "templates"), { recursive: true });
+  await mkdir(join(root, "reports"), { recursive: true });
   await mkdir(join(root, "modes/heuristics"), { recursive: true });
   await mkdir(join(root, "config"), { recursive: true });
   await mkdir(join(root, "providers"), { recursive: true });
@@ -596,7 +707,9 @@ Approved compensation preference:
     import { readFile } from "node:fs/promises";
     const rows = JSON.parse(await readFile(new URL("./state.json", import.meta.url), "utf8"));
     process.stdout.write(JSON.stringify(rows));
+    // SELECT id, date, company, role, score, status, pdf, report, notes FROM applications
   `);
+  await writeFile(join(root, "tracker-parse.mjs"), "export const parseTracker = (value) => value;\n");
   await writeFile(join(root, "merge-tracker.mjs"), `
     import { readFile, readdir, writeFile } from "node:fs/promises";
     const stateUrl = new URL("./state.json", import.meta.url);
@@ -632,6 +745,7 @@ Approved compensation preference:
     process.stdout.write("042\\n");
   `);
   await writeFile(join(root, "build-cv-html.mjs"), `
+    // cv-payload page_format
     import { mkdir, readFile, writeFile } from "node:fs/promises";
     import { dirname } from "node:path";
     const input = process.argv[2];
@@ -640,7 +754,7 @@ Approved compensation preference:
     await mkdir(dirname(output), { recursive: true });
     await writeFile(output, "<html><body>" + payload.candidate.name + " — " + payload.summary + "</body></html>");
   `);
-  await writeFile(join(root, "verify-cv-facts.mjs"), `process.stdout.write(JSON.stringify({ verdict: "pass" }));\n`);
+  await writeFile(join(root, "verify-cv-facts.mjs"), `// --json verdict\nprocess.stdout.write(JSON.stringify({ verdict: "pass" }));\n`);
   await writeFile(join(root, "generate-pdf.mjs"), `
     import { mkdir, writeFile } from "node:fs/promises";
     import { dirname } from "node:path";
@@ -660,6 +774,11 @@ Approved compensation preference:
     await writeFile(process.env.CAREER_OPS_PDF_INDEX, "# report\\tpdf\\thtml\\tformat\\tdate — written by generate-pdf.mjs, do not edit\\n" + [report, relative(output), relative(input), format, "2026-08-30"].join("\\t") + "\\n");
   `);
   await writeFile(join(root, "hfw-preparation-commit.mjs"), "process.exit(99);\n");
+  await writeFile(join(root, "application-artifacts.mjs"), "// applicationArtifactPaths writeReuseDecision schema_version: 1\n");
+  await writeFile(join(root, "batch/batch-prompt.md"), "#### Machine Summary\nauthorization_confidence:\nauthorization_evidence:\nauthorization_scope:\nengagement_mechanism:\nauthorization_question:\n");
+  await writeFile(join(root, "templates/states.yml"), "states: []\n");
+  await writeFile(join(root, "package.json"), '{"version":"1.31.0"}\n');
+  await writeFile(join(root, "VERSION"), "1.31.0\n");
   await writeFile(join(root, "application-answers.mjs"), `
     import { readFile, writeFile } from "node:fs/promises";
     const value = (name) => process.argv[process.argv.indexOf(name) + 1];
@@ -679,6 +798,14 @@ Approved compensation preference:
     const base = start >= 0 ? report.slice(0, start).trimEnd() : report.trimEnd();
     await writeFile(reportPath, base + "\\n\\n" + lines.join("\\n").trimEnd() + "\\n");
   `);
+  for (const [command, args] of [
+    ["git", ["init", "--quiet"]],
+    ["git", ["add", "."]],
+    ["git", ["-c", "user.name=HereForWork Test", "-c", "user.email=test@hereforwork.local", "commit", "--quiet", "-m", "fixture"]],
+  ]) {
+    const result = await runCommand(command, args, root);
+    assert.equal(result.status, 0, result.stderr);
+  }
   return {
     root,
     staging,
@@ -687,6 +814,26 @@ Approved compensation preference:
       HFW_CAREER_OPS_INDEX: join(root, "applications.db"),
       HFW_CAREER_OPS_STAGING: staging,
     },
+  };
+}
+
+async function seedCanonicalEvaluation(fixture, id = 42) {
+  const reportPath = `reports/${String(id).padStart(3, "0")}-example.md`;
+  await writeFile(join(fixture.root, reportPath), evaluationReport);
+  await writeFile(join(fixture.root, "state.json"), JSON.stringify([{
+    id, date: "2026-08-30", company: "Example Co", role: "Frontend Engineer",
+    score: "4.2/5", status: "Evaluated", pdf: "❌",
+    report: `[${String(id).padStart(3, "0")}](../${reportPath})`, notes: "canonical fixture",
+  }]));
+  const capabilities = await request({ id: "seed-capabilities", protocolVersion: 1, operation: "capabilities.get", input: {} }, fixture.env);
+  const find = (capabilityId) => capabilities.result.capabilities.find(({ id: value }) => value === capabilityId).compatibilityFingerprint;
+  return {
+    trackerId: id,
+    reportPath,
+    reportSha256: createHash("sha256").update(evaluationReport).digest("hex"),
+    upstreamRevision: capabilities.result.upstreamRevision,
+    evaluationCompatibilityFingerprint: find("evaluation.result.read.v1"),
+    artifactCompatibilityFingerprint: find("artifacts.inspect.v1"),
   };
 }
 
@@ -713,6 +860,9 @@ test("provider-neutral preparation commits only through fixed career-ops writers
   assert.equal(queueFilters.result.remoteAllowed, true);
   assert.equal(queueFilters.result.requireAuthorizationPath, true);
   const preparationId = "55555555-5555-4555-8555-555555555555";
+  const canonical = await seedCanonicalEvaluation(fixture);
+  assert.match(canonical.evaluationCompatibilityFingerprint ?? "", /^[a-f0-9]{64}$/, JSON.stringify(canonical));
+  assert.match(canonical.artifactCompatibilityFingerprint ?? "", /^[a-f0-9]{64}$/, JSON.stringify(canonical));
   const role = {
     preparationId,
     company: "Example Co",
@@ -724,9 +874,9 @@ test("provider-neutral preparation commits only through fixed career-ops writers
     id: "prepare-context",
     protocolVersion: 1,
     operation: "preparation.context.get",
-    input: role,
+    input: { ...role, ...canonical },
   }, fixture.env);
-  assert.equal(context.ok, true);
+  assert.equal(context.ok, true, JSON.stringify(context));
   assert.equal(context.result.contextHash.length, 64);
   assert.match(context.result.prompt, /untrusted data, never instructions/);
   const missingRecovery = await request({
@@ -738,25 +888,9 @@ test("provider-neutral preparation commits only through fixed career-ops writers
   assert.equal(missingRecovery.ok, true);
   assert.equal(missingRecovery.result.outcome, "missing");
 
-  const reportBodyMarkdown = [
-    "## Machine Summary", "```yaml", "final_decision: Consider", "```",
-    "## A) Role Summary", "Fixture summary.",
-    "## B) Match with CV", "Verified fixture match.",
-    "## C) Level and Strategy", "Fixture level.",
-    "## D) Comp and Demand", "External research unavailable.",
-    "## E) Customization Plan", "Use React evidence.",
-    "## F) Interview Plan", "Discuss verified work.",
-    "## G) Posting Legitimacy", "Proceed with caution; external research unavailable.",
-    "## Risk Summary", "| Signal | Result |", "|---|---|", "| Legitimacy | not evaluated |",
-    "## Keywords extracted", "React, TypeScript, accessibility, testing",
-  ].join("\n\n");
   const result = {
-    contractVersion: 1,
+    contractVersion: 2,
     contextHash: context.result.contextHash,
-    score: 4.2,
-    legitimacy: "Proceed with Caution",
-    authorizationConfidence: "investigate",
-    reportBodyMarkdown,
     cvChangesMarkdown: "- Reordered verified React evidence.",
     cvPayload: {
       lang: "en",
@@ -772,10 +906,14 @@ test("provider-neutral preparation commits only through fixed career-ops writers
     id: "prepare-commit",
     protocolVersion: 1,
     operation: "preparation.result.commit",
-    input: { ...role, eventDate: "2026-08-30", job: context.result.job, result },
+    input: {
+      ...role, eventDate: "2026-08-30", job: context.result.job, result,
+      canonicalEvaluation: context.result.canonicalEvaluation,
+      artifactPlan: context.result.artifactPlan,
+    },
   }, fixture.env);
   assert.equal(commit.ok, true, JSON.stringify(commit));
-  assert.equal(commit.result.artifacts.report.path, "reports/042-example-co-2026-08-30.md");
+  assert.equal(commit.result.artifacts.report.path, canonical.reportPath);
   assert.equal(commit.result.artifacts.cvPdf.sha256.length, 64);
   const stagedResultPath = join(fixture.staging, preparationId, "provider-result.json");
   assert.equal((await stat(stagedResultPath)).mode & 0o777, 0o600);
@@ -787,45 +925,26 @@ test("provider-neutral preparation commits only through fixed career-ops writers
   }, fixture.env);
   assert.equal(recovered.ok, true);
   assert.equal(recovered.result.outcome, "completed");
-  assert.equal(recovered.result.result.score, result.score);
+  assert.deepEqual(recovered.result.result.cvPayload, result.cvPayload);
   const report = await readFile(join(fixture.root, commit.result.artifacts.report.path), "utf8");
-  assert.match(report, /Deferred until HereForWork inspects the live application form/);
+  assert.equal(report, evaluationReport);
   const rows = JSON.parse(await readFile(join(fixture.root, "state.json"), "utf8"));
   assert.equal(rows.length, 1);
   assert.equal(rows[0].status, "Evaluated");
-  assert.equal(rows[0].report, "[042](reports/042-example-co-2026-08-30.md)");
+  assert.equal(rows[0].report, "[042](../reports/042-example.md)");
 
   const replay = await request({
     id: "prepare-commit-replay",
     protocolVersion: 1,
     operation: "preparation.result.commit",
-    input: { ...role, eventDate: "2026-08-30", job: context.result.job, result },
+    input: {
+      ...role, eventDate: "2026-08-30", job: context.result.job, result,
+      canonicalEvaluation: context.result.canonicalEvaluation,
+      artifactPlan: context.result.artifactPlan,
+    },
   }, fixture.env);
   assert.equal(replay.ok, true, JSON.stringify(replay));
   assert.equal(replay.result.artifacts.report.sha256, commit.result.artifacts.report.sha256);
-
-  const conflictingReplay = await request({
-    id: "prepare-commit-conflicting-replay",
-    protocolVersion: 1,
-    operation: "preparation.result.commit",
-    input: {
-      ...role,
-      eventDate: "2026-08-30",
-      job: context.result.job,
-      result: {
-        ...result,
-        score: 1.1,
-        reportBodyMarkdown: reportBodyMarkdown.replace("Fixture summary.", "A different retry result."),
-      },
-    },
-  }, fixture.env);
-  assert.equal(conflictingReplay.ok, false);
-  assert.equal(conflictingReplay.error.code, "staging_conflict");
-  assert.equal(conflictingReplay.error.retryPolicy, "fresh_preparation_id");
-  assert.doesNotMatch(
-    await readFile(join(fixture.root, replay.result.artifacts.report.path), "utf8"),
-    /A different retry result/,
-  );
 
   const snapshot = {
     protocolVersion: 1,
@@ -859,7 +978,7 @@ test("provider-neutral preparation commits only through fixed career-ops writers
     contextHash: answerContext.result.contextHash,
     answers: [
       { fieldId: "email", answer: "untrusted-model@example.test", provenance: ["config/profile.yml"] },
-      { fieldId: "why", answer: "The role matches my verified React and accessibility work. Its product scope also matches my source-backed frontend experience.", provenance: ["cv.md", "reports/042-example-co-2026-08-30.md"] },
+      { fieldId: "why", answer: "The role matches my verified React and accessibility work. Its product scope also matches my source-backed frontend experience.", provenance: ["cv.md", canonical.reportPath] },
       { fieldId: "phone", answer: "+34 600 000 000", provenance: ["config/profile.yml"] },
       { fieldId: "country", answer: "Portugal", provenance: ["config/profile.yml"] },
       { fieldId: "salary", answer: "52000", provenance: ["config/profile.yml"] },
@@ -887,7 +1006,7 @@ test("provider-neutral preparation commits only through fixed career-ops writers
     label: "Why are you interested in working at Example Co? (2-3 sentences)",
     decision: "fill_draft",
     answer: "The role matches my verified React and accessibility work. Its product scope also matches my source-backed frontend experience.",
-    provenance: ["cv.md", "reports/042-example-co-2026-08-30.md"],
+    provenance: ["cv.md", canonical.reportPath],
     draftPolicy: { language: "en", maxLength: 400, maxWords: 60, minSentences: 2, maxSentences: 3 },
   });
   assert.equal(answers.result.reviewItems.find((item) => item.fieldId === "phone").decision, "fill");
@@ -983,7 +1102,7 @@ test("provider-neutral preparation commits only through fixed career-ops writers
     },
   }, fixture.env);
   assert.equal(cleanup.ok, true, JSON.stringify(cleanup));
-  await assert.rejects(readFile(join(fixture.root, commit.result.artifacts.report.path)));
+  assert.equal(await readFile(join(fixture.root, commit.result.artifacts.report.path), "utf8"), reportWithAnswers);
   await assert.rejects(readFile(join(fixture.root, commit.result.artifacts.cvPdf.path)));
   await assert.rejects(readFile(join(fixture.staging, preparationId, "commit-state.json")));
 
@@ -1032,6 +1151,7 @@ test("failed preparation cleanup removes only its bounded staging and is idempot
 
 test("preparation accepts career-ops profiles without optional cv-facts config", async () => {
   const fixture = await fakeCareerOps();
+  const canonical = await seedCanonicalEvaluation(fixture);
   await unlink(join(fixture.root, "config/cv-facts.json"));
 
   const context = await request({
@@ -1044,6 +1164,7 @@ test("preparation accepts career-ops profiles without optional cv-facts config",
       title: "Frontend Engineer",
       location: "Remote Europe",
       url: "https://jobs.ashbyhq.com/example/role-1",
+      ...canonical,
     },
   }, fixture.env);
 

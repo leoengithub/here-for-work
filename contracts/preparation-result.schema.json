@@ -1,93 +1,35 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://hereforwork.local/contracts/preparation-result.v1.schema.json",
-  "title": "HereForWork provider-neutral preparation result",
+  "$id": "https://hereforwork.local/contracts/preparation-result.schema.json",
+  "title": "HereForWork selective preparation CV result",
   "type": "object",
   "additionalProperties": false,
-  "required": [
-    "contractVersion",
-    "contextHash",
-    "score",
-    "legitimacy",
-    "authorizationConfidence",
-    "reportBodyMarkdown",
-    "cvPayload",
-    "cvChangesMarkdown"
-  ],
+  "required": ["contractVersion", "contextHash", "cvPayload", "cvChangesMarkdown"],
   "properties": {
-    "contractVersion": { "type": "integer", "const": 1 },
+    "contractVersion": { "type": "integer", "const": 2 },
     "contextHash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
-    "score": { "type": "number", "minimum": 1, "maximum": 5 },
-    "legitimacy": {
-      "type": "string",
-      "enum": ["High Confidence", "Proceed with Caution", "Suspicious"]
-    },
-    "authorizationConfidence": {
-      "type": "string",
-      "enum": ["excellent", "interesting", "investigate", "problem"]
-    },
-    "reportBodyMarkdown": { "type": "string", "minLength": 200, "maxLength": 120000 },
-    "cvChangesMarkdown": { "type": "string", "minLength": 1, "maxLength": 30000 },
+    "cvPayload": { "$ref": "#/$defs/cvPayload" },
+    "cvChangesMarkdown": { "type": "string", "minLength": 1, "maxLength": 30000 }
+  },
+  "$defs": {
     "cvPayload": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "lang",
-        "page_format",
-        "candidate",
-        "summary",
-        "competencies",
-        "experience",
-        "projects",
-        "education",
-        "certifications",
-        "awards",
-        "skills"
-      ],
+      "required": ["lang", "page_format", "candidate", "summary", "competencies", "experience", "projects", "education", "certifications", "awards", "skills"],
       "properties": {
         "lang": { "type": "string", "minLength": 2, "maxLength": 12 },
         "page_format": { "type": "string", "enum": ["a4", "letter"] },
         "candidate": { "$ref": "#/$defs/candidate" },
         "summary": { "type": "string", "minLength": 1, "maxLength": 3000 },
-        "competencies": {
-          "type": "array",
-          "maxItems": 12,
-          "items": { "type": "string", "minLength": 1, "maxLength": 160 }
-        },
-        "experience": {
-          "type": "array",
-          "maxItems": 20,
-          "items": { "$ref": "#/$defs/experience" }
-        },
-        "projects": {
-          "type": "array",
-          "maxItems": 12,
-          "items": { "$ref": "#/$defs/project" }
-        },
-        "education": {
-          "type": "array",
-          "maxItems": 12,
-          "items": { "$ref": "#/$defs/education" }
-        },
-        "certifications": {
-          "type": "array",
-          "maxItems": 20,
-          "items": { "$ref": "#/$defs/certification" }
-        },
-        "awards": {
-          "type": "array",
-          "maxItems": 20,
-          "items": { "$ref": "#/$defs/certification" }
-        },
-        "skills": {
-          "type": "array",
-          "maxItems": 20,
-          "items": { "$ref": "#/$defs/skill" }
-        }
+        "competencies": { "type": "array", "maxItems": 12, "items": { "type": "string", "minLength": 1, "maxLength": 160 } },
+        "experience": { "type": "array", "maxItems": 20, "items": { "$ref": "#/$defs/experience" } },
+        "projects": { "type": "array", "maxItems": 12, "items": { "$ref": "#/$defs/project" } },
+        "education": { "type": "array", "maxItems": 12, "items": { "$ref": "#/$defs/education" } },
+        "certifications": { "type": "array", "maxItems": 20, "items": { "$ref": "#/$defs/certification" } },
+        "awards": { "type": "array", "maxItems": 20, "items": { "$ref": "#/$defs/certification" } },
+        "skills": { "type": "array", "maxItems": 20, "items": { "$ref": "#/$defs/skill" } }
       }
-    }
-  },
-  "$defs": {
+    },
     "link": {
       "type": "object",
       "additionalProperties": false,

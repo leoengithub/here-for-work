@@ -5,48 +5,45 @@
  * and run json-schema-to-typescript to regenerate this file.
  */
 
-export interface HereForWorkProviderNeutralPreparationResult {
-  contractVersion: 1;
+export interface HereForWorkSelectivePreparationCVResult {
+  contractVersion: 2;
   contextHash: string;
-  score: number;
-  legitimacy: "High Confidence" | "Proceed with Caution" | "Suspicious";
-  authorizationConfidence: "excellent" | "interesting" | "investigate" | "problem";
-  reportBodyMarkdown: string;
+  cvPayload: CvPayload;
   cvChangesMarkdown: string;
-  cvPayload: {
-    lang: string;
-    page_format: "a4" | "letter";
-    candidate: Candidate;
-    summary: string;
-    /**
-     * @maxItems 12
-     */
-    competencies: string[];
-    /**
-     * @maxItems 20
-     */
-    experience: Experience[];
-    /**
-     * @maxItems 12
-     */
-    projects: Project[];
-    /**
-     * @maxItems 12
-     */
-    education: Education[];
-    /**
-     * @maxItems 20
-     */
-    certifications: Certification[];
-    /**
-     * @maxItems 20
-     */
-    awards: Certification[];
-    /**
-     * @maxItems 20
-     */
-    skills: Skill[];
-  };
+}
+export interface CvPayload {
+  lang: string;
+  page_format: "a4" | "letter";
+  candidate: Candidate;
+  summary: string;
+  /**
+   * @maxItems 12
+   */
+  competencies: string[];
+  /**
+   * @maxItems 20
+   */
+  experience: Experience[];
+  /**
+   * @maxItems 12
+   */
+  projects: Project[];
+  /**
+   * @maxItems 12
+   */
+  education: Education[];
+  /**
+   * @maxItems 20
+   */
+  certifications: Certification[];
+  /**
+   * @maxItems 20
+   */
+  awards: Certification[];
+  /**
+   * @maxItems 20
+   */
+  skills: Skill[];
 }
 export interface Candidate {
   name: string;

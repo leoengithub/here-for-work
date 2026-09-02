@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hereforwork.local/contracts/preparation-artifact-plan.v1.schema.json",
+  "title": "HereForWork selective preparation artifact plan",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contract", "schemaVersion", "upstreamRevision", "compatibilityFingerprint", "contextHash", "trackerId", "reportNumber", "report", "cv"],
+  "properties": {
+    "contract": { "type": "string", "const": "hereforwork.preparation-artifact-plan" },
+    "schemaVersion": { "type": "integer", "const": 1 },
+    "upstreamRevision": { "$ref": "#/$defs/gitSha" },
+    "compatibilityFingerprint": { "$ref": "#/$defs/sha256" },
+    "contextHash": { "$ref": "#/$defs/sha256" },
+    "trackerId": { "type": "integer", "minimum": 1 },
+    "reportNumber": { "type": "integer", "minimum": 1 },
+    "report": {
+      "type": "object", "additionalProperties": false,
+      "required": ["action", "reason", "artifact"],
+      "properties": {
+        "action": { "type": "string", "const": "reuse" },
+        "reason": { "type": "string", "const": "canonical_evaluation_current" },
+        "artifact": { "$ref": "#/$defs/reportReference" }
+      }
+    },
+    "cv": {
+      "type": "object", "additionalProperties": false,
+      "required": ["action", "reason", "scope", "format", "artifacts", "provenance"],
+      "properties": {
+        "action": { "type": "string", "enum": ["reuse", "refresh"] },
+        "reason": { "type": "string", "enum": ["no_hfw_bundle", "hfw_manifest_not_reusable", "canonical_report_changed", "hfw_manifest_identity_changed", "hfw_cv_bundle_changed", "hfw_pdf_missing_or_changed", "hfw_provenance_invalid", "hfw_manifest_current"] },
+        "scope": { "type": "string", "enum": ["none", "pdf_only", "full_cv"] },
+        "format": { "type": ["string", "null"], "enum": ["a4", "letter", null] },
+        "artifacts": {
+          "anyOf": [
+            { "type": "null" },
+            {
+              "type": "object", "additionalProperties": false,
+              "required": ["html", "changes"],
+              "properties": {
+                "html": { "$ref": "#/$defs/htmlReference" },
+                "pdf": { "$ref": "#/$defs/pdfReference" },
+                "changes": { "$ref": "#/$defs/changesReference" }
+              }
+            }
+          ]
+        },
+        "provenance": { "anyOf": [{ "type": "null" }, { "$ref": "#/$defs/provenance" }] }
+      }
+    }
+  },
+  "$defs": {
+    "gitSha": { "type": "string", "pattern": "^[a-f0-9]{40}$" },
+    "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "reportPath": { "type": "string", "pattern": "^reports/[a-zA-Z0-9._-]+\\.md$" },
+    "htmlPath": { "type": "string", "pattern": "^output/[a-zA-Z0-9._-]+/cv/tailored/v[0-9]{3}/cv\\.html$" },
+    "pdfPath": { "type": "string", "pattern": "^output/[a-zA-Z0-9._-]+/cv/tailored/v[0-9]{3}/cv\\.pdf$" },
+    "changesPath": { "type": "string", "pattern": "^output/[a-zA-Z0-9._-]+/cv/tailored/v[0-9]{3}/changes\\.md$" },
+    "reference": {
+      "type": "object", "additionalProperties": false, "required": ["path", "sha256"],
+      "properties": { "path": { "type": "string" }, "sha256": { "$ref": "#/$defs/sha256" } }
+    },
+    "reportReference": { "allOf": [{ "$ref": "#/$defs/reference" }, { "properties": { "path": { "$ref": "#/$defs/reportPath" } } }] },
+    "htmlReference": { "allOf": [{ "$ref": "#/$defs/reference" }, { "properties": { "path": { "$ref": "#/$defs/htmlPath" } } }] },
+    "pdfReference": { "allOf": [{ "$ref": "#/$defs/reference" }, { "properties": { "path": { "$ref": "#/$defs/pdfPath" } } }] },
+    "changesReference": { "allOf": [{ "$ref": "#/$defs/reference" }, { "properties": { "path": { "$ref": "#/$defs/changesPath" } } }] },
+    "provenance": {
+      "type": "object", "additionalProperties": false,
+      "required": ["source", "tailored", "sourceSha256", "renderRecovery"],
+      "properties": {
+        "source": { "type": "string", "enum": ["tailored_generated", "user_reviewed_fallback"] },
+        "tailored": { "type": "boolean" },
+        "sourceSha256": { "anyOf": [{ "type": "null" }, { "$ref": "#/$defs/sha256" }] },
+        "renderRecovery": { "type": ["object", "null"] }
+      }
+    }
+  }
+}

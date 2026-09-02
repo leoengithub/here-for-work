@@ -40,16 +40,20 @@ implementation work:
 - Typed company-to-ATS preview and conditional reverse-ATS JSON discovery exist, but the
   latter still writes `data/cache/ats-companies/*.json`; it cannot run in the career-ops
   checkout. Configured `scan.mjs` output and per-role liveness remain prose-oriented.
-- Full A-G evaluation, low-confidence escalation/audit sampling, artifact freshness and
-  structured CV-change provenance have no versioned public process contract.
+- Full A-G evaluation and low-confidence escalation/audit sampling have no versioned
+  public process contract. Generic career-ops CV/PDF output still lacks freshness and
+  structured CV-change provenance; exact HFW-committed bundles now have a conditional
+  hash-bound reuse contract.
 - career-ops contains review-only Playwright behavior in its internal web implementation,
   but no supported external lease/result contract that HereForWork may call as fallback.
 - The effective PDF threshold is currently the upstream default `3.0` because no explicit
   setting was present during the audit; HereForWork cannot silently enforce the approved
   initial `3.5`.
 
-Pre-Queue publication, artifact-aware reuse, and Playwright fallback therefore remain
-disabled until the required capabilities pass the fail-closed manifest and probes.
+Pre-Queue publication and Playwright fallback remain disabled until their required
+capabilities pass the fail-closed manifest and probes. Artifact-aware Prepare is enabled
+only for a canonical evaluation plus the exact conditional proof described in
+`contracts/preparation-artifacts.md`; everything else refreshes conservatively.
 
 The version-1 capability manifest is now implemented as JSON Schema plus generated
 TypeScript and closed Rust DTOs. `capabilities.get` reports the exact Git revision
@@ -57,8 +61,8 @@ separately from declared version, the effective PDF threshold and whether it is 
 or the upstream default, the fixed eight-capability status set, constraints, and bounded
 actionable diagnostics without renderer-facing filesystem paths. Startup and the existing
 integration health check both validate this manifest before treating future capabilities as
-available. This is compatibility gating only: it does not enable discovery, evaluation,
-artifact inspection, or a browser fallback.
+available. `evaluation.result.read.v1` and `artifacts.inspect.v1` are conditional reads;
+the manifest does not enable discovery, evaluation execution, or a browser fallback.
 
 Health compares the exact career-ops revision before and after its compatibility checks.
 Future gated operations must still revalidate immediately before execution because this
@@ -124,6 +128,10 @@ pre-certify semantic compatibility.
   unknown or bounded research is inconclusive. Confirmed authorization or legitimacy
   incompatibilities are discarded; other material fit or legitimacy uncertainty returns
   to Needs decision without generating artifacts.
+- Prepare binds work to the current evaluation receipt, reuses its canonical report in
+  place, and reuses only an exact prior HFW CV/PDF manifest. A stale PDF can be repaired
+  without a provider; an unproven or stale CV causes a full CV refresh. The report and
+  canonical tracker row are never duplicated or overwritten by this transaction.
 - Applications Dismiss is limited to failed or ready-for-review work. It records
   Discarded through the canonical adapter before removing generated artifacts and local
   preparation/browser state. Failed canonical writes preserve that local work for retry.
@@ -203,8 +211,9 @@ pre-certify semantic compatibility.
 
 ## Current validation
 
-The current adapter persists artifact and context hashes and reports bounded validation
-outcomes. It does not yet carry structured, source-backed CV change provenance with
+The current adapter persists bounded artifact identities, provenance labels, context
+hashes, canonical report identity, and compatibility fingerprints. It does not yet carry
+structured, source-backed CV change provenance with
 classified changes, source references, unresolved additions, and an explicit review or
 block result. Therefore the implementation may not describe a CV as fully verified or
 proven truthful. Match scoring remains career-ops-owned and must be presented on its native

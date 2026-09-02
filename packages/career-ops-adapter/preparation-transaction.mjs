@@ -4,6 +4,7 @@ import {
   copyFile,
   mkdir,
   readFile,
+  readdir,
   realpath,
   rename,
   rm,
@@ -862,6 +863,311 @@ export async function commitPreparationTransaction(options) {
       }
       if (rollbackIncomplete) throw failureError;
     }
+    throw original;
+  } finally {
+    await rm(lockPath, { recursive: true, force: true }).catch(() => null);
+  }
+}
+
+function selectiveStateResult(state) {
+  return {
+    outcome: "completed",
+    preparationId: state.preparationId,
+    contextHash: state.contextHash,
+    trackerId: state.canonicalEvaluation.trackerId,
+    artifacts: state.artifacts,
+    cvProvenance: state.cvProvenance,
+    warnings: state.warnings ?? [],
+  };
+}
+
+async function nextTailoredVersion(root, trackerId, company, title) {
+  const key = `${String(trackerId).padStart(3, "0")}-${safeSlug(company)}-${safeSlug(title)}`;
+  const tailoredRoot = resolve(root, "output", key, "cv", "tailored");
+  const entries = await readdir(tailoredRoot, { withFileTypes: true }).catch((error) => {
+    if (error?.code === "ENOENT") return [];
+    throw error;
+  });
+  const versions = entries
+    .filter((entry) => entry.isDirectory() && /^v\d{3}$/.test(entry.name))
+    .map((entry) => Number(entry.name.slice(1)))
+    .filter(Number.isSafeInteger);
+  const number = Math.max(0, ...versions) + 1;
+  if (number > 999) failure("publication_conflict", { stage: "stage.version" });
+  return { key, version: `v${String(number).padStart(3, "0")}`, tailoredRoot };
+}
+
+async function rollbackSelective(publication, state) {
+  if (!publication) return false;
+  let incomplete = false;
+  try {
+    const currentIndex = await readFile(publication.indexPath, "utf8").catch((error) => error?.code === "ENOENT" ? null : Promise.reject(error));
+    if (currentIndex === publication.newIndex) {
+      if (publication.oldIndex === null) await unlink(publication.indexPath).catch((error) => { if (error?.code !== "ENOENT") throw error; });
+      else await writeAtomic(publication.indexPath, publication.oldIndex);
+    } else if (currentIndex !== publication.oldIndex) {
+      incomplete = true;
+    }
+    if (await existsAsDirectory(publication.finalVersionRoot)) {
+      const unchanged = (publication.bundleChecks ?? []).length > 0
+        && (await Promise.all(publication.bundleChecks.map(async ([path, digest]) => await existsAsFile(path) && await fileHash(path) === digest))).every(Boolean);
+      if (unchanged) await rm(publication.finalVersionRoot, { recursive: true, force: true });
+      else incomplete = true;
+    }
+  } catch {
+    incomplete = true;
+  }
+  if (!incomplete) {
+    state.publication = null;
+    state.artifacts = null;
+  }
+  return incomplete;
+}
+
+/**
+ * Publish only the missing CV portion for an already-canonical evaluation.
+ * The report and tracker row are immutable inputs; this transaction never reserves a
+ * new report number, writes the report, or merges another canonical tracker row.
+ */
+export async function commitSelectivePreparationTransaction(options) {
+  const {
+    input, root: configuredRoot, trackerDb, stagingRoot: configuredStagingRoot,
+    fallbackConfiguration, preparationSources, contextHash, assertPreparationResult,
+    runCareerOpsScript, inspectArtifacts,
+  } = options;
+  const preparationId = String(input?.preparationId ?? "").toLowerCase();
+  const diagnostic = { diagnosticId: UUID_V4_RE.test(preparationId) ? preparationId : null };
+  if (!UUID_V4_RE.test(preparationId) || !configuredRoot || !configuredStagingRoot || !trackerDb) {
+    failure("invalid_request", diagnostic);
+  }
+  await mkdir(configuredStagingRoot, { recursive: true, mode: 0o700 });
+  const root = await realpath(resolve(configuredRoot));
+  const stagingRoot = await realpath(resolve(configuredStagingRoot));
+  const effectDirectory = resolve(stagingRoot, preparationId);
+  await mkdir(effectDirectory, { recursive: true, mode: 0o700 });
+  const lockPath = resolve(effectDirectory, "transaction.lock");
+  try { await mkdir(lockPath); } catch (error) {
+    if (error?.code === "EEXIST") failure("preparation_in_progress", diagnostic);
+    throw error;
+  }
+  const statePath = resolve(effectDirectory, "commit-state.json");
+  const providerResultPath = resolve(effectDirectory, "provider-result.json");
+  const stagedRoot = resolve(root, "output", ".hfw-preparation-staging", preparationId);
+  const canonicalIndex = resolve(root, "data", "pdf-index.tsv");
+  let state = null;
+  let publication = null;
+  const command = async (script, args, env, code, stage, retryPolicy) => {
+    try { return await runCareerOpsScript(script, args, env); } catch (error) {
+      throw new PreparationTransactionError(code, { ...diagnostic, stage, retryPolicy, exitCode: error?.exitCode });
+    }
+  };
+  try {
+    const sources = await preparationSources();
+    const currentContextHash = contextHash(options.role, input.job, sources, input.canonicalEvaluation);
+    if (input.artifactPlan?.contextHash !== currentContextHash) failure("context_changed", diagnostic);
+    const {
+      upstreamRevision: _upstreamRevision,
+      ...artifactInspectionIdentity
+    } = input.canonicalEvaluation;
+    const identityHash = sha256(JSON.stringify(canonicalJson({
+      preparationId, role: options.role, job: input.job, canonicalEvaluation: input.canonicalEvaluation,
+      artifactPlan: input.artifactPlan, result: input.result,
+    })));
+    state = await readJson(statePath);
+    const currentPlan = await inspectArtifacts({ ...artifactInspectionIdentity, preparationId, contextHash: currentContextHash, company: options.role.company, title: options.role.title });
+    if (state?.schemaVersion === 3 && state.status === "committed"
+        && state.identityHash === identityHash && state.contextHash === currentContextHash
+        && currentPlan.cv.action === "reuse") {
+      return selectiveStateResult(state);
+    }
+    if (JSON.stringify(canonicalJson(currentPlan)) !== JSON.stringify(canonicalJson(input.artifactPlan))) {
+      failure("context_changed", { ...diagnostic, stage: "preflight.artifacts" });
+    }
+    if (currentPlan.cv.action === "reuse") {
+      return {
+        outcome: "completed", preparationId, contextHash: currentContextHash,
+        trackerId: currentPlan.trackerId,
+        artifacts: {
+          report: currentPlan.report.artifact,
+          cvHtml: currentPlan.cv.artifacts.html,
+          cvPdf: currentPlan.cv.artifacts.pdf,
+          cvChanges: currentPlan.cv.artifacts.changes,
+        },
+        cvProvenance: currentPlan.cv.provenance,
+        warnings: [],
+      };
+    }
+    if (currentPlan.cv.scope === "full_cv") assertPreparationResult(input.result, currentContextHash);
+    else if (currentPlan.cv.scope !== "pdf_only" || input.result != null) failure("invalid_request");
+
+    if (state?.status === "committed") {
+      const replayPlan = await inspectArtifacts({ ...artifactInspectionIdentity, preparationId, contextHash: currentContextHash, company: options.role.company, title: options.role.title });
+      if (replayPlan.cv.action === "reuse") return selectiveStateResult(state);
+      if (currentPlan.cv.scope !== "pdf_only") failure("canonical_identity_mismatch", diagnostic);
+      state = {
+        ...state,
+        identityHash,
+        status: "initialized",
+        stage: "preflight.pdf_refresh",
+        artifacts: null,
+        publication: null,
+        cleanupPaths: Array.isArray(state.cleanupPaths) ? state.cleanupPaths : [],
+      };
+    }
+    if (state && (state.schemaVersion !== 3 || state.identityHash !== identityHash || state.contextHash !== currentContextHash)) {
+      failure("staging_conflict", diagnostic);
+    }
+    if (state?.publication) {
+      publication = {
+        ...state.publication,
+        indexPath: canonicalIndex,
+        finalVersionRoot: resolvePersistedPath(root, state.publication.finalVersionRoot),
+        bundleChecks: state.publication.bundleChecks.map(([path, hash]) => [resolvePersistedPath(root, path), hash]),
+      };
+      if (await rollbackSelective(publication, state)) failure("rollback_failed", diagnostic);
+    }
+    state = state ?? {
+      schemaVersion: 3, preparationId, contextHash: currentContextHash, identityHash,
+      canonicalEvaluation: input.canonicalEvaluation, status: "initialized", stage: "preflight.complete",
+      artifacts: null, cvProvenance: null, warnings: [], cleanupPaths: [], reportOwned: false,
+      publication: null,
+    };
+    await saveState(statePath, state);
+    if (input.result) {
+      const bytes = Buffer.from(`${JSON.stringify(input.result, null, 2)}\n`);
+      if (await existsAsFile(providerResultPath)) {
+        if (sha256(await readFile(providerResultPath)) !== sha256(bytes)) failure("staging_conflict", diagnostic);
+      } else await writePrivate(providerResultPath, bytes, { flag: "wx" });
+    }
+    await rm(stagedRoot, { recursive: true, force: true });
+    const version = await nextTailoredVersion(root, currentPlan.trackerId, options.role.company, options.role.title);
+    const candidate = resolve(stagedRoot, version.version);
+    const stagedPayload = resolve(candidate, "cv-payload.json");
+    const stagedHtml = resolve(candidate, "cv.html");
+    const stagedPdf = resolve(candidate, "cv.pdf");
+    const stagedChanges = resolve(candidate, "changes.md");
+    await mkdir(candidate, { recursive: true, mode: 0o700 });
+    await saveState(statePath, state, { status: "staging", stage: "stage.cv_html" });
+    if (currentPlan.cv.scope === "full_cv") {
+      await writePrivate(stagedPayload, `${JSON.stringify(input.result.cvPayload, null, 2)}\n`);
+      await command("build-cv-html.mjs", [stagedPayload, stagedHtml], {}, "cv_build_failed", "stage.cv_html", "retry_same_preparation");
+      if (!await validateHtml(stagedHtml)) failure("cv_build_failed", diagnostic);
+      await writePrivate(stagedChanges, changesWithProvenance(input.result.cvChangesMarkdown, { source: "tailored_generated" }));
+    } else {
+      await copyFile(resolve(root, currentPlan.cv.artifacts.html.path), stagedHtml);
+      await copyFile(resolve(root, currentPlan.cv.artifacts.changes.path), stagedChanges);
+      if (!await validateHtml(stagedHtml)) failure("cv_build_failed", diagnostic);
+    }
+    await saveState(statePath, state, { stage: "stage.fact_verification" });
+    const factArgs = [stagedHtml, "--source", resolve(root, "cv.md")];
+    if (await existsAsFile(resolve(root, "article-digest.md"))) factArgs.push("--source", resolve(root, "article-digest.md"));
+    if (await existsAsFile(resolve(root, "config", "cv-facts.json"))) factArgs.push("--config", resolve(root, "config", "cv-facts.json"));
+    factArgs.push("--json");
+    const factCheck = await command("verify-cv-facts.mjs", factArgs, {}, "cv_fact_check_failed", "stage.fact_verification", "fresh_preparation_provider_run");
+    if (!validFactCheck(factCheck.output)) failure("cv_fact_check_failed", diagnostic);
+
+    let cvProvenance = currentPlan.cv.scope === "pdf_only"
+      ? currentPlan.cv.provenance
+      : { source: "tailored_generated", tailored: true, sourceSha256: null, renderRecovery: null };
+    const warnings = [];
+    const stagedIndex = resolve(effectDirectory, "pdf-index.staged.tsv");
+    const format = currentPlan.cv.scope === "full_cv" ? input.result.cvPayload.page_format : currentPlan.cv.format;
+    if (!["a4", "letter"].includes(format)) failure("invalid_request", { stage: "stage.pdf_format" });
+    let renderError = null;
+    try {
+      await command("generate-pdf.mjs", [stagedHtml, stagedPdf, `--format=${format}`, `--report=${currentPlan.reportNumber}`, "--allow-reorder"], {
+        CAREER_OPS_TRACKER: await existsAsFile(resolve(root, "data/applications.md")) ? resolve(root, "data/applications.md") : resolve(root, "applications.md"),
+        CAREER_OPS_TRACKER_DB: trackerDb,
+        CAREER_OPS_PDF_INDEX: stagedIndex,
+      }, "pdf_generation_failed", "stage.pdf", "repair_runtime_then_retry");
+    } catch (error) { renderError = error; }
+    if (!renderError && !await validatePdf(stagedPdf)) renderError = new PreparationTransactionError("pdf_generation_failed", diagnostic);
+    if (renderError) {
+      const fallback = parseFallbackConfiguration(fallbackConfiguration);
+      if (!fallback) failure("pdf_fallback_not_configured", { ...diagnostic, stage: "stage.pdf_fallback" });
+      let fallbackPath;
+      try { fallbackPath = await realpath(fallback.path); } catch { failure("pdf_fallback_unavailable", diagnostic); }
+      const actualHash = await fileHash(fallbackPath).catch(() => null);
+      if (!actualHash) failure("pdf_fallback_unavailable", diagnostic);
+      if (actualHash !== fallback.sha256) failure("pdf_fallback_changed", diagnostic);
+      if (!await validatePdf(fallbackPath, { expectedHash: fallback.sha256 })) failure("pdf_fallback_invalid", diagnostic);
+      await copyFile(fallbackPath, stagedPdf);
+      const recovery = renderFailureMetadata(renderError);
+      cvProvenance = { source: "user_reviewed_fallback", tailored: false, sourceSha256: fallback.sha256, renderRecovery: recovery };
+      warnings.push({ code: recovery.code, stage: recovery.stage, recoveredBy: "user_reviewed_fallback", detail: recovery.detail });
+      await writePrivate(stagedIndex, `${PDF_INDEX_HEADER}${currentPlan.reportNumber}\t${relativeInside(root, stagedPdf)}\t${relativeInside(root, stagedHtml)}\t${format}\t${input.eventDate}\n`);
+    }
+    const validPdf = await validatePdf(stagedPdf);
+    if (!validPdf) failure("pdf_generation_failed", diagnostic);
+    const sourceCheck = await preparationSources();
+    if (contextHash(options.role, input.job, sourceCheck, input.canonicalEvaluation) !== currentContextHash) failure("context_changed", { ...diagnostic, stage: "stage.context_revalidation" });
+    const reportCheck = await inspectArtifacts({ ...artifactInspectionIdentity, preparationId, contextHash: currentContextHash, company: options.role.company, title: options.role.title });
+    if (reportCheck.report.artifact.sha256 !== currentPlan.report.artifact.sha256) failure("context_changed", { ...diagnostic, stage: "stage.report_revalidation" });
+
+    const finalVersionRoot = resolve(version.tailoredRoot, version.version);
+    const finalHtml = resolve(finalVersionRoot, "cv.html");
+    const finalPdf = resolve(finalVersionRoot, "cv.pdf");
+    const finalChanges = resolve(finalVersionRoot, "changes.md");
+    const finalPayload = resolve(finalVersionRoot, "cv-payload.json");
+    const hashes = {
+      html: await fileHash(stagedHtml), pdf: validPdf.sha256, changes: await fileHash(stagedChanges),
+      payload: await existsAsFile(stagedPayload) ? await fileHash(stagedPayload) : null,
+    };
+    const artifacts = {
+      report: currentPlan.report.artifact,
+      cvHtml: { path: relativeInside(root, finalHtml), sha256: hashes.html },
+      cvPdf: { path: relativeInside(root, finalPdf), sha256: hashes.pdf },
+      cvChanges: { path: relativeInside(root, finalChanges), sha256: hashes.changes },
+    };
+    state.artifacts = artifacts;
+    state.cvProvenance = cvProvenance;
+    state.cvFormat = format;
+    state.pdfIndexEntry = {
+      reportNum: currentPlan.reportNumber,
+      pdfPath: artifacts.cvPdf.path,
+      htmlPath: artifacts.cvHtml.path,
+    };
+    state.warnings = warnings;
+    state.cleanupPaths = [...new Set([
+      ...(Array.isArray(state.cleanupPaths) ? state.cleanupPaths : []),
+      artifacts.cvHtml.path, artifacts.cvPdf.path, artifacts.cvChanges.path,
+    ])];
+    if (hashes.payload) state.cleanupPaths.push(relativeInside(root, finalPayload));
+    const oldIndex = await readFile(canonicalIndex, "utf8").catch((error) => error?.code === "ENOENT" ? null : Promise.reject(error));
+    const newIndex = indexContent(oldIndex, currentPlan.reportNumber, artifacts.cvPdf.path, artifacts.cvHtml.path, format, input.eventDate);
+    publication = {
+      indexPath: canonicalIndex, oldIndex, newIndex, finalVersionRoot,
+      bundleChecks: [
+        [finalHtml, hashes.html], [finalPdf, hashes.pdf], [finalChanges, hashes.changes],
+        ...(hashes.payload ? [[finalPayload, hashes.payload]] : []),
+      ],
+    };
+    state.publication = {
+      oldIndex, newIndex, finalVersionRoot: relativeInside(root, finalVersionRoot),
+      bundleChecks: publication.bundleChecks.map(([path, hash]) => [relativeInside(root, path), hash]),
+    };
+    await saveState(statePath, state, { status: "publishing", stage: "publish.cv_bundle" });
+    await mkdir(version.tailoredRoot, { recursive: true });
+    await rename(candidate, finalVersionRoot).catch((error) => {
+      if (error?.code === "EEXIST" || error?.code === "ENOTEMPTY") failure("publication_conflict", diagnostic);
+      throw error;
+    });
+    const currentIndex = await readFile(canonicalIndex, "utf8").catch((error) => error?.code === "ENOENT" ? null : Promise.reject(error));
+    if (currentIndex !== oldIndex) failure("publication_drift", { ...diagnostic, stage: "publish.pdf_index" });
+    await writeAtomic(canonicalIndex, newIndex);
+    state.publication = null;
+    await saveState(statePath, state, { status: "committed", stage: "complete" });
+    await rm(stagedRoot, { recursive: true, force: true }).catch(() => null);
+    return selectiveStateResult(state);
+  } catch (error) {
+    const original = error instanceof PreparationTransactionError ? error : new PreparationTransactionError("artifact_commit_failed", { ...diagnostic, stage: state?.stage });
+    const rollbackIncomplete = publication ? await rollbackSelective(publication, state) : false;
+    if (state) await saveState(statePath, state, {
+      status: rollbackIncomplete ? "manual_repair_required" : "failed",
+      stage: rollbackIncomplete ? "publish.rollback" : original.stage,
+      lastFailure: { code: original.code, stage: original.stage, retryPolicy: rollbackIncomplete ? "manual_repair_required" : original.retryPolicy, updatedAt: new Date().toISOString() },
+    }).catch(() => null);
+    if (rollbackIncomplete) throw new PreparationTransactionError("rollback_failed", diagnostic);
     throw original;
   } finally {
     await rm(lockPath, { recursive: true, force: true }).catch(() => null);

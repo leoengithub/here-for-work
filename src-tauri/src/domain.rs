@@ -159,6 +159,16 @@ pub struct PreparationWork {
     pub role_id: String,
     pub provider: String,
     pub role: AdapterRoleContext,
+    pub evaluation: PreparationEvaluationIdentity,
+}
+
+#[derive(Debug, Clone)]
+pub struct PreparationEvaluationIdentity {
+    pub tracker_id: i64,
+    pub report_path: String,
+    pub report_sha256: String,
+    pub upstream_revision: String,
+    pub evaluation_compatibility_fingerprint: String,
 }
 
 #[derive(Debug, Clone)]
@@ -640,15 +650,14 @@ impl CareerOpsCapabilityId {
 
     fn expected_interface_class(self) -> CareerOpsInterfaceClass {
         match self {
-            Self::DiscoveryReverseAtsRunV1 | Self::EvaluationResultReadV1 => {
-                CareerOpsInterfaceClass::Conditional
-            }
+            Self::DiscoveryReverseAtsRunV1
+            | Self::EvaluationResultReadV1
+            | Self::ArtifactsInspectV1 => CareerOpsInterfaceClass::Conditional,
             Self::DiscoveryCompanyAtsPreviewV1 | Self::CanonicalAppliedWriteV1 => {
                 CareerOpsInterfaceClass::Contracted
             }
             Self::LivenessRoleReadV1
             | Self::EvaluationFullAgRunV1
-            | Self::ArtifactsInspectV1
             | Self::BrowserReviewFallbackV1 => CareerOpsInterfaceClass::Missing,
         }
     }
@@ -657,13 +666,13 @@ impl CareerOpsCapabilityId {
         match self {
             Self::DiscoveryReverseAtsRunV1
             | Self::DiscoveryCompanyAtsPreviewV1
-            | Self::EvaluationResultReadV1 => matches!(
+            | Self::EvaluationResultReadV1
+            | Self::ArtifactsInspectV1 => matches!(
                 status,
                 CareerOpsCapabilityStatus::Degraded | CareerOpsCapabilityStatus::Unavailable
             ),
             Self::LivenessRoleReadV1
             | Self::EvaluationFullAgRunV1
-            | Self::ArtifactsInspectV1
             | Self::BrowserReviewFallbackV1 => status == CareerOpsCapabilityStatus::Unavailable,
             Self::CanonicalAppliedWriteV1 => matches!(
                 status,
@@ -704,6 +713,7 @@ impl CareerOpsCapabilityId {
             Self::ArtifactsInspectV1 => &[
                 Constraint::RequiresExactUpstreamRevision,
                 Constraint::RequiresStructuredArtifactProvenance,
+                Constraint::RequiresReportTrackerIdentity,
             ],
             Self::BrowserReviewFallbackV1 => &[
                 Constraint::RequiresExactUpstreamRevision,
@@ -890,6 +900,7 @@ impl CareerOpsCapabilityManifest {
             "health.check",
             "history.snapshot",
             "evaluation.result.read.v1",
+            "artifacts.inspect.v1",
             "profile.queue_filters.get",
             "preparation.context.get",
             "preparation.result.recover",
@@ -1080,6 +1091,7 @@ mod capability_manifest_tests {
                 "health.check",
                 "history.snapshot",
                 "evaluation.result.read.v1",
+                "artifacts.inspect.v1",
                 "profile.queue_filters.get",
                 "preparation.context.get",
                 "preparation.result.recover",
@@ -1127,8 +1139,9 @@ mod capability_manifest_tests {
                     "requires_exact_upstream_revision", "requires_safe_shape_probe",
                     "native_score_1_to_5", "requires_report_tracker_identity"
                 ])),
-                capability("artifacts.inspect.v1", "unavailable", "missing", json!([
-                    "requires_exact_upstream_revision", "requires_structured_artifact_provenance"
+                capability("artifacts.inspect.v1", "degraded", "conditional", json!([
+                    "requires_exact_upstream_revision", "requires_structured_artifact_provenance",
+                    "requires_report_tracker_identity"
                 ])),
                 capability("browser.review_fallback.v1", "unavailable", "missing", json!([
                     "requires_exact_upstream_revision", "requires_single_driver_lease_transfer",

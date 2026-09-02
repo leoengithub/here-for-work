@@ -13,6 +13,7 @@ const contracts = [
   ["discovery-dataset.schema.json", "discovery-dataset.d.ts"],
   ["discovery-run.schema.json", "discovery-run.d.ts"],
   ["preparation-result.schema.json", "preparation-result.d.ts"],
+  ["preparation-artifact-plan.schema.json", "preparation-artifact-plan.d.ts"],
   ["provider-probe.schema.json", "provider-probe.d.ts"],
 ];
 

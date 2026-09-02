@@ -33,6 +33,10 @@ The implemented read-only operations are:
   application records from its rebuildable SQLite index.
 - `evaluation.result.read.v1`: reads one known report/tracker result through the
   conditional, fingerprint-bound contract in [`evaluation-result.md`](evaluation-result.md).
+- `artifacts.inspect.v1`: proves the current canonical report and classifies exact
+  HFW-committed CV/PDF reuse or the smallest safe refresh through
+  [`preparation-artifacts.md`](preparation-artifacts.md). Generic career-ops output
+  files are not treated as reusable provenance.
 - `profile.queue_filters.get`: derives editable queue-filter defaults from the
   verified career-ops profile without exposing the profile contents to the renderer.
 
@@ -76,11 +80,11 @@ The audit found public batch `--parallel`, `spend_tier`, and explicit `--model` 
 but no public low-confidence escalation or audit-sample capability. Those two target
 behaviors remain blocked rather than being inferred from the cheaper pre-screen gate.
 
-Prepare becomes an artifact validation and continuation capability: reuse current report
-and CV artifacts, and ask career-ops to generate or refresh only work that is missing,
-failed, or stale. This includes generating a CV/PDF for a below-threshold role the user
-explicitly chooses to prepare. These are capability requirements; operation names and
-wire shapes remain to be designed and versioned separately.
+Prepare now validates and reuses the current canonical report plus an exact
+HFW-committed CV bundle, and generates or refreshes only the smallest artifact set that
+can be proved necessary. A below-threshold role explicitly chosen by the user may receive
+a missing CV/PDF. The conditional wire contract and its current limits are documented in
+[`preparation-artifacts.md`](preparation-artifacts.md).
 
 The adapter must invoke fixed upstream career-ops behavior without patching, forking,
 vendoring, or adding HereForWork-specific entry points to career-ops. career-ops owns
@@ -98,7 +102,9 @@ The extension keeps provider execution separate from canonical writes:
 
 1. `preparation.context.get` validates any public HTTPS role/application URL,
    attempts bounded source-to-form resolution, and returns the resolved URL with a
-   bounded context, output schema, source hashes, and fixed career-ops instructions.
+   bounded context, source hashes, canonical evaluation identity, and an
+   `artifacts.inspect.v1` plan. It returns a CV-only provider prompt only for a full CV
+   refresh; exact reuse and PDF-only repair do not invoke a provider.
    Known ATS providers are optimizations; fetch, login, or parsing failures preserve
    a conservative generic context instead of rejecting the role.
 2. HereForWork invokes the selected Codex or Claude subscription CLI in an
@@ -110,14 +116,11 @@ The extension keeps provider execution separate from canonical writes:
    live legal fields remain user-owned. A confirmed authorization conflict or newly
    detected `Suspicious` result is discarded, while a below-threshold verified match
    returns to Needs decision.
-4. `preparation.result.commit` is the adapter transaction boundary. It rejects a stale
-   context or invalid result, stages the HTML and fact checks privately, renders the PDF
-   against a staged `CAREER_OPS_PDF_INDEX`, and validates HTML, facts, PDF structure,
-   index rows, paths, and hashes before publication. It publishes exclusively and uses
-   compare-and-swap checks while updating the report, artifact bundle, and canonical PDF
-   index. The canonical tracker merge is the commit point and is post-verified by the
-   exact HereForWork effect UUID, source URL, and report link. It does not update
-   application status.
+4. `preparation.result.commit` is the adapter transaction boundary. It revalidates the
+   exact plan and either returns an existing HFW bundle, repairs only its PDF, or stages
+   a full CV refresh. It validates HTML, facts, PDF structure, paths, and hashes before
+   exclusive version publication and a compare-and-swap PDF-index update. The canonical
+   report and tracker row are immutable inputs. It does not update application status.
 5. `answers.context.get` binds a prepared application to the exact hash of a
    live, typed form snapshot. Job and form text remains marked as untrusted data.
 6. HereForWork invokes the selected provider against that bounded context.

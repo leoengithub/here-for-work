@@ -342,6 +342,7 @@ enum PreparationGate {
     Discard(&'static str),
 }
 
+#[cfg(test)]
 fn preparation_gate(result: &serde_json::Value) -> Result<PreparationGate, String> {
     let _score = result
         .get("score")
@@ -355,6 +356,39 @@ fn preparation_gate(result: &serde_json::Value) -> Result<PreparationGate, Strin
         .get("authorizationConfidence")
         .and_then(serde_json::Value::as_str)
         .ok_or("Provider result omitted authorization confidence")?;
+    if authorization == "problem" {
+        return Ok(PreparationGate::Discard(
+            "Preparation stopped because career-ops confirmed an authorization conflict.",
+        ));
+    }
+    if legitimacy == "Suspicious" {
+        return Ok(PreparationGate::Discard(
+            "Preparation stopped because career-ops found a legitimacy blocker.",
+        ));
+    }
+    Ok(PreparationGate::Proceed)
+}
+
+fn preparation_gate_values(
+    score: f64,
+    legitimacy: &str,
+    authorization: &str,
+) -> Result<PreparationGate, String> {
+    if !score.is_finite() || !(1.0..=5.0).contains(&score) {
+        return Err("Canonical evaluation has an invalid native score".to_string());
+    }
+    if !matches!(
+        legitimacy,
+        "High Confidence" | "Proceed with Caution" | "Suspicious"
+    ) {
+        return Err("Canonical evaluation has an invalid legitimacy value".to_string());
+    }
+    if !matches!(
+        authorization,
+        "excellent" | "interesting" | "investigate" | "problem"
+    ) {
+        return Err("Canonical evaluation has an invalid authorization confidence".to_string());
+    }
     if authorization == "problem" {
         return Ok(PreparationGate::Discard(
             "Preparation stopped because career-ops confirmed an authorization conflict.",
@@ -444,12 +478,65 @@ fn process_preparation_work(app: &tauri::AppHandle, work: PreparationWork) -> Re
         .application_url
         .clone()
         .ok_or("The role has no application URL")?;
+    let capabilities = match state.adapter.capabilities() {
+        Ok(capabilities) => capabilities,
+        Err(error) => {
+            let detail = error.to_string();
+            if let Ok(mut store) = state.store.lock() {
+                let _ = store.fail_preparation(
+                    &work.id,
+                    "artifact_inspection_unavailable",
+                    "capabilities.get",
+                    &detail,
+                );
+            }
+            return Err(detail);
+        }
+    };
+    let Some(artifact_capability) = capabilities
+        .capabilities
+        .iter()
+        .find(|capability| capability.id == CareerOpsCapabilityId::ArtifactsInspectV1)
+        .filter(|capability| capability.status == CareerOpsCapabilityStatus::Degraded)
+        .and_then(|capability| capability.compatibility_fingerprint.clone())
+    else {
+        if let Ok(mut store) = state.store.lock() {
+            let _ = store.fail_preparation(
+                &work.id,
+                "artifact_inspection_unavailable",
+                "artifacts.inspect.v1",
+                "Selective career-ops artifact inspection is unavailable.",
+            );
+        }
+        return Err("Selective career-ops artifact inspection is unavailable".to_string());
+    };
+    if capabilities.upstream_revision.as_deref() != Some(work.evaluation.upstream_revision.as_str())
+    {
+        if let Ok(mut store) = state.store.lock() {
+            let _ = store.fail_preparation(
+                &work.id,
+                "context_changed",
+                "artifacts.inspect.v1",
+                "The canonical evaluation revision no longer matches career-ops.",
+            );
+        }
+        return Err("The canonical evaluation revision no longer matches career-ops".to_string());
+    }
     let input = PreparationRoleInput {
         preparation_id: work.id.clone(),
         company: work.role.company.clone(),
         title: work.role.title.clone(),
         location: work.role.location.clone(),
         url,
+        tracker_id: work.evaluation.tracker_id,
+        report_path: work.evaluation.report_path.clone(),
+        report_sha256: work.evaluation.report_sha256.clone(),
+        upstream_revision: work.evaluation.upstream_revision.clone(),
+        evaluation_compatibility_fingerprint: work
+            .evaluation
+            .evaluation_compatibility_fingerprint
+            .clone(),
+        artifact_compatibility_fingerprint: artifact_capability,
     };
     let context = match state.adapter.preparation_context(&input) {
         Ok(context) => context,
@@ -496,104 +583,16 @@ fn process_preparation_work(app: &tauri::AppHandle, work: PreparationWork) -> Re
         }
         return Err("Preparation was cancelled.".to_string());
     }
-    let result = match state
-        .adapter
-        .recover_preparation_result(&work.id, &context.context_hash)
-    {
-        Ok(Some(result)) => result,
-        Ok(None) => {
-            let Some(executable) = executable else {
-                if let Ok(mut store) = state.store.lock() {
-                    let _ = store.fail_preparation(
-                        &work.id,
-                        "provider_not_configured",
-                        "provider.configuration",
-                        &format!("The selected {provider_name} CLI is not configured."),
-                    );
-                }
-                return Err(format!(
-                    "The selected {provider_name} CLI is not configured"
-                ));
-            };
-            match provider::invoke_structured_cancellable(
-                provider,
-                executable,
-                &state.preparation_schema_path,
-                &state.provider_sandbox_path,
-                &context.prompt,
-                std::time::Duration::from_secs(600),
-                Some(&cancellation),
-            ) {
-                Ok(result) => match provider::bind_context_hash(result, &context.context_hash) {
-                    Ok(result) => result,
-                    Err(error) => {
-                        if let Ok(mut store) = state.store.lock() {
-                            let _ = store.fail_preparation(
-                                &work.id,
-                                "invalid_provider_result",
-                                "provider.result.bind",
-                                &error,
-                            );
-                        }
-                        return Err(error);
-                    }
-                },
-                Err(error) => {
-                    if let Ok(mut store) = state.store.lock() {
-                        if cancellation.load(Ordering::Relaxed) {
-                            let _ = store.cancel_preparation(&work.id);
-                        } else {
-                            let _ = store.fail_preparation(
-                                &work.id,
-                                "provider_failed",
-                                "provider.invoke",
-                                &error,
-                            );
-                        }
-                    }
-                    return Err(error);
-                }
-            }
-        }
-        Err(error) => {
-            if let Ok(mut store) = state.store.lock() {
-                let detail = error.to_string();
-                let _ = store.fail_preparation(
-                    &work.id,
-                    classify_preparation_error("recovery_failed", &detail),
-                    "preparation.result.recover",
-                    &detail,
-                );
-            }
-            return Err(error.to_string());
-        }
-    };
-    if cancellation.load(Ordering::Relaxed) {
-        if let Ok(mut store) = state.store.lock() {
-            let _ = store.cancel_preparation(&work.id);
-        }
-        return Err("Preparation was cancelled.".to_string());
-    }
-    if result
-        .get("contextHash")
-        .and_then(serde_json::Value::as_str)
-        != Some(context.context_hash.as_str())
-    {
+    let gate = preparation_gate_values(
+        context.evaluation_gate.score,
+        &context.evaluation_gate.legitimacy,
+        &context.evaluation_gate.authorization_confidence,
+    )
+    .inspect_err(|error| {
         if let Ok(mut store) = state.store.lock() {
             let _ = store.fail_preparation(
                 &work.id,
-                "stale_provider_result",
-                "provider.result.validation",
-                "The provider result does not match the current preparation context.",
-            );
-        }
-        return Err("Provider result does not match the current preparation context".to_string());
-    }
-    let gate = preparation_gate(&result).inspect_err(|error| {
-        if let Ok(mut store) = state.store.lock() {
-            let _ = store.fail_preparation(
-                &work.id,
-                "invalid_provider_result",
+                "invalid_canonical_evaluation",
                 "evaluation.gate",
                 error,
             );
@@ -620,6 +619,118 @@ fn process_preparation_work(app: &tauri::AppHandle, work: PreparationWork) -> Re
                 .show();
             return Ok(());
         }
+    }
+    let result = if context
+        .artifact_plan
+        .get("cv")
+        .and_then(|cv| cv.get("action"))
+        .and_then(serde_json::Value::as_str)
+        == Some("reuse")
+        || context
+            .artifact_plan
+            .get("cv")
+            .and_then(|cv| cv.get("scope"))
+            .and_then(serde_json::Value::as_str)
+            == Some("pdf_only")
+    {
+        serde_json::Value::Null
+    } else {
+        match state
+            .adapter
+            .recover_preparation_result(&work.id, &context.context_hash)
+        {
+            Ok(Some(result)) => result,
+            Ok(None) => {
+                let Some(executable) = executable else {
+                    if let Ok(mut store) = state.store.lock() {
+                        let _ = store.fail_preparation(
+                            &work.id,
+                            "provider_not_configured",
+                            "provider.configuration",
+                            &format!("The selected {provider_name} CLI is not configured."),
+                        );
+                    }
+                    return Err(format!(
+                        "The selected {provider_name} CLI is not configured"
+                    ));
+                };
+                match provider::invoke_structured_cancellable(
+                    provider,
+                    executable,
+                    &state.preparation_schema_path,
+                    &state.provider_sandbox_path,
+                    &context.prompt,
+                    std::time::Duration::from_secs(600),
+                    Some(&cancellation),
+                ) {
+                    Ok(result) => {
+                        match provider::bind_context_hash(result, &context.context_hash) {
+                            Ok(result) => result,
+                            Err(error) => {
+                                if let Ok(mut store) = state.store.lock() {
+                                    let _ = store.fail_preparation(
+                                        &work.id,
+                                        "invalid_provider_result",
+                                        "provider.result.bind",
+                                        &error,
+                                    );
+                                }
+                                return Err(error);
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        if let Ok(mut store) = state.store.lock() {
+                            if cancellation.load(Ordering::Relaxed) {
+                                let _ = store.cancel_preparation(&work.id);
+                            } else {
+                                let _ = store.fail_preparation(
+                                    &work.id,
+                                    "provider_failed",
+                                    "provider.invoke",
+                                    &error,
+                                );
+                            }
+                        }
+                        return Err(error);
+                    }
+                }
+            }
+            Err(error) => {
+                if let Ok(mut store) = state.store.lock() {
+                    let detail = error.to_string();
+                    let _ = store.fail_preparation(
+                        &work.id,
+                        classify_preparation_error("recovery_failed", &detail),
+                        "preparation.result.recover",
+                        &detail,
+                    );
+                }
+                return Err(error.to_string());
+            }
+        }
+    };
+    if cancellation.load(Ordering::Relaxed) {
+        if let Ok(mut store) = state.store.lock() {
+            let _ = store.cancel_preparation(&work.id);
+        }
+        return Err("Preparation was cancelled.".to_string());
+    }
+    if !result.is_null()
+        && result
+            .get("contextHash")
+            .and_then(serde_json::Value::as_str)
+            != Some(context.context_hash.as_str())
+    {
+        if let Ok(mut store) = state.store.lock() {
+            let _ = store.fail_preparation(
+                &work.id,
+                "stale_provider_result",
+                "provider.result.validation",
+                "The provider result does not match the current preparation context.",
+            );
+        }
+        return Err("Provider result does not match the current preparation context".to_string());
     }
     let fallback_configuration = {
         let store = state
@@ -648,6 +759,8 @@ fn process_preparation_work(app: &tauri::AppHandle, work: PreparationWork) -> Re
             context.job,
             result,
             fallback_configuration.as_ref(),
+            context.canonical_evaluation,
+            context.artifact_plan,
         ) {
             Ok(committed) => committed,
             Err(error) => {

@@ -12,9 +12,9 @@ use crate::domain::{
     BrowserAnswerWork, BrowserCommand, BrowserInspection, BrowserSessionSummary, CvFallbackSetting,
     DashboardState, DiscoveryDataset, DiscoveryFinding, EvaluationResultRead, EvaluationSyncRole,
     HistoryRecord, ImportResult, LeasedRun, OutcomeNotification, PreQueueRoleSummary,
-    PreparationCleanupWork, PreparationSummary, PreparationWork, QueueEvaluationSummary,
-    QueueFilters, QueueGroup, ReconcileResult, RestorePreflight, RoleSummary, RunSummary,
-    ScheduledRun, SourceScheduleSummary,
+    PreparationCleanupWork, PreparationEvaluationIdentity, PreparationSummary, PreparationWork,
+    QueueEvaluationSummary, QueueFilters, QueueGroup, ReconcileResult, RestorePreflight,
+    RoleSummary, RunSummary, ScheduledRun, SourceScheduleSummary,
 };
 
 const SCHEMA_VERSION: i64 = 18;
@@ -66,6 +66,38 @@ pub struct PreparationCompletion<'a> {
 }
 
 impl Store {
+    fn current_preparation_evaluation(
+        &self,
+        role_id: &str,
+    ) -> Result<PreparationEvaluationIdentity, StoreError> {
+        self.connection
+            .query_row(
+                "SELECT receipt.tracker_id, receipt.report_path, receipt.report_hash,
+                        receipt.upstream_revision, receipt.compatibility_fingerprint
+                   FROM evaluation_sync evaluation
+                   JOIN evaluation_receipts receipt
+                     ON receipt.receipt_key = evaluation.current_receipt_key
+                  WHERE evaluation.role_id = ?1
+                    AND evaluation.state IN ('ready', 'needs_decision')",
+                [role_id],
+                |row| {
+                    Ok(PreparationEvaluationIdentity {
+                        tracker_id: row.get(0)?,
+                        report_path: row.get(1)?,
+                        report_sha256: row.get(2)?,
+                        upstream_revision: row.get(3)?,
+                        evaluation_compatibility_fingerprint: row.get(4)?,
+                    })
+                },
+            )
+            .optional()?
+            .ok_or_else(|| {
+                StoreError::InvalidPreparation(
+                    "the role is awaiting a current canonical career-ops evaluation".to_string(),
+                )
+            })
+    }
+
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         let path = path.as_ref();
         let should_consider_backup = path
@@ -2498,22 +2530,7 @@ impl Store {
                 "provider must be codex or claude".to_string(),
             ));
         }
-        let evaluation_ready = self.connection.query_row(
-            "SELECT EXISTS(
-               SELECT 1 FROM evaluation_sync evaluation
-              JOIN evaluation_receipts receipt
-                 ON receipt.receipt_key = evaluation.current_receipt_key
-              WHERE evaluation.role_id = ?1
-                AND evaluation.state IN ('ready', 'needs_decision')
-             )",
-            [role_id],
-            |row| row.get::<_, bool>(0),
-        )?;
-        if !evaluation_ready {
-            return Err(StoreError::InvalidPreparation(
-                "the role is awaiting a current canonical career-ops evaluation".to_string(),
-            ));
-        }
+        let evaluation = self.current_preparation_evaluation(role_id)?;
         let role = self.adapter_role_context(role_id)?;
         if role.application_url.is_none() {
             return Err(StoreError::InvalidPreparation(
@@ -2557,6 +2574,7 @@ impl Store {
                 role_id: role_id.to_string(),
                 provider: stored_provider,
                 role,
+                evaluation,
             });
         }
         let already_active: bool = self.connection.query_row(
@@ -2591,6 +2609,7 @@ impl Store {
             role_id: role_id.to_string(),
             provider: provider.to_string(),
             role,
+            evaluation,
         })
     }
 
@@ -2642,11 +2661,13 @@ impl Store {
             params![now, role_id],
         )?;
         transaction.commit()?;
+        let evaluation = self.current_preparation_evaluation(&role_id)?;
         Ok(Some(PreparationWork {
             id,
             role_id,
             provider,
             role,
+            evaluation,
         }))
     }
 

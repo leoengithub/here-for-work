@@ -10,6 +10,7 @@ export type Operation =
   | "health.check"
   | "history.snapshot"
   | "evaluation.result.read.v1"
+  | "artifacts.inspect.v1"
   | "profile.queue_filters.get"
   | "preparation.context.get"
   | "preparation.result.recover"
@@ -58,10 +59,11 @@ export interface HereForWorkCareerOpsCapabilityManifest {
     source: "configured" | "upstream_default" | "unavailable";
   };
   /**
-   * @minItems 15
-   * @maxItems 15
+   * @minItems 16
+   * @maxItems 16
    */
   operations: [
+    Operation,
     Operation,
     Operation,
     Operation,

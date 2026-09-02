@@ -133,6 +133,12 @@ pub struct PreparationRoleInput {
     pub title: String,
     pub location: String,
     pub url: String,
+    pub tracker_id: i64,
+    pub report_path: String,
+    pub report_sha256: String,
+    pub upstream_revision: String,
+    pub evaluation_compatibility_fingerprint: String,
+    pub artifact_compatibility_fingerprint: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -142,6 +148,17 @@ pub struct PreparationContext {
     pub context_hash: String,
     pub prompt: String,
     pub job: Value,
+    pub canonical_evaluation: Value,
+    pub evaluation_gate: PreparationEvaluationGate,
+    pub artifact_plan: Value,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreparationEvaluationGate {
+    pub score: f64,
+    pub legitimacy: String,
+    pub authorization_confidence: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -479,6 +496,7 @@ impl AdapterConfig {
         serde_json::from_value(result).map_err(|error| AdapterError::InvalidData(error.to_string()))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn commit_preparation(
         &self,
         input: &PreparationRoleInput,
@@ -486,6 +504,8 @@ impl AdapterConfig {
         job: Value,
         result: Value,
         fallback_configuration: Option<&Value>,
+        canonical_evaluation: Value,
+        artifact_plan: Value,
     ) -> Result<PreparationCommit, AdapterError> {
         let mut payload = serde_json::to_value(input)
             .expect("preparation role input serializes")
@@ -498,6 +518,8 @@ impl AdapterConfig {
         );
         payload.insert("job".to_string(), job);
         payload.insert("result".to_string(), result);
+        payload.insert("canonicalEvaluation".to_string(), canonical_evaluation);
+        payload.insert("artifactPlan".to_string(), artifact_plan);
         let value = self.request_with_timeout_and_environment(
             "preparation.result.commit",
             Value::Object(payload),

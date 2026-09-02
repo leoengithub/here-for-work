@@ -7,6 +7,7 @@ import { test } from "node:test";
 
 import {
   commitPreparationTransaction,
+  commitSelectivePreparationTransaction,
   PreparationTransactionError,
 } from "./preparation-transaction.mjs";
 
@@ -48,6 +49,97 @@ function resultFor(contextHash) {
       certifications: [],
       skills: [],
     },
+  };
+}
+
+async function selectiveHarness(options = {}) {
+  const fixture = await harness(options);
+  const report = Buffer.from("# Canonical evaluation\n\nExisting report must remain byte-identical.\n");
+  const reportPath = "reports/042-example.md";
+  await writeFile(join(fixture.root, reportPath), report);
+  const canonicalEvaluation = {
+    trackerId: 42,
+    reportPath,
+    reportSha256: digest(report),
+    upstreamRevision: "a".repeat(40),
+    evaluationCompatibilityFingerprint: "b".repeat(64),
+    artifactCompatibilityFingerprint: "d".repeat(64),
+  };
+  const basePlan = {
+    contract: "hereforwork.preparation-artifact-plan",
+    schemaVersion: 1,
+    upstreamRevision: canonicalEvaluation.upstreamRevision,
+    compatibilityFingerprint: canonicalEvaluation.artifactCompatibilityFingerprint,
+    contextHash: fixture.input.result.contextHash,
+    trackerId: 42,
+    reportNumber: 42,
+    report: {
+      action: "reuse",
+      reason: "canonical_evaluation_current",
+      artifact: { path: reportPath, sha256: digest(report) },
+    },
+    cv: { action: "refresh", reason: "no_hfw_bundle", scope: "full_cv", format: null, artifacts: null, provenance: null },
+  };
+  let inspectedPlan = structuredClone(basePlan);
+  fixture.input.canonicalEvaluation = canonicalEvaluation;
+  fixture.input.artifactPlan = structuredClone(basePlan);
+  fixture.input.result = { ...fixture.input.result, contractVersion: 2 };
+  delete fixture.input.result.score;
+  delete fixture.input.result.legitimacy;
+  delete fixture.input.result.authorizationConfidence;
+  delete fixture.input.result.reportBodyMarkdown;
+  const transactionOptions = {
+    input: fixture.input,
+    role: fixture.role,
+    root: fixture.root,
+    trackerDb: join(fixture.root, "data/applications.db"),
+    stagingRoot: fixture.stagingRoot,
+    fallbackConfiguration: options.fallback === true
+      ? JSON.stringify({ path: fixture.fallbackPath, sha256: digest(PDF) })
+      : null,
+    preparationSources: async () => [{ relativePath: "cv.md", sha256: digest(fixture.source.revision) }],
+    contextHash: (_role, _job, _sources, identity) => identity === canonicalEvaluation ? digest(fixture.source.revision) : "bad",
+    assertPreparationResult: (result, expected) => {
+      if (result?.contractVersion !== 2 || result.contextHash !== expected) throw new PreparationTransactionError("context_changed");
+    },
+    runCareerOpsScript: async (script, args, env = {}) => {
+      if (["reserve-report-num.mjs", "merge-tracker.mjs"].includes(script)) {
+        throw new Error(`Selective commit must not call ${script}`);
+      }
+      return harnessRun(script, args, env);
+    },
+    inspectArtifacts: async () => structuredClone(inspectedPlan),
+  };
+  // Reuse the harness command behavior without exposing private closures.
+  const harnessRun = async (script, args, env = {}) => {
+    fixture.calls.push({ script, args, env });
+    if (options.failScript === script) throw Object.assign(new Error("render failed"), { exitCode: 9 });
+    if (script === "build-cv-html.mjs") {
+      await mkdir(dirname(args[1]), { recursive: true });
+      await writeFile(args[1], "<html><body>verified fixture</body></html>");
+      return { output: "", diagnostics: "" };
+    }
+    if (script === "verify-cv-facts.mjs") return { output: JSON.stringify({ verdict: "pass" }), diagnostics: "" };
+    if (script === "generate-pdf.mjs") {
+      await mkdir(dirname(args[1]), { recursive: true });
+      await writeFile(args[1], PDF);
+      const reportNum = args.find((value) => value.startsWith("--report="))?.slice(9);
+      const format = args.find((value) => value.startsWith("--format="))?.slice(9);
+      const canonicalRoot = await realpath(fixture.root);
+      const rel = (path) => relative(canonicalRoot, path).split("\\").join("/");
+      await writeFile(env.CAREER_OPS_PDF_INDEX, `# report\tpdf\thtml\tformat\tdate — written by generate-pdf.mjs, do not edit\n${reportNum}\t${rel(args[1])}\t${rel(args[0])}\t${format}\t2026-09-01\n`);
+      return { output: "", diagnostics: "" };
+    }
+    throw new Error(`Unexpected script ${script}`);
+  };
+  return {
+    ...fixture,
+    report,
+    reportPath,
+    canonicalEvaluation,
+    basePlan,
+    setPlan(value) { inspectedPlan = structuredClone(value); fixture.input.artifactPlan = structuredClone(value); },
+    commit: () => commitSelectivePreparationTransaction(transactionOptions),
   };
 }
 
@@ -360,4 +452,88 @@ test("provider result and transaction state remain private and subprocess failur
   const state = JSON.parse(await readFile(join(effect, "commit-state.json"), "utf8"));
   assert.equal(JSON.stringify(state).includes("user@example.test"), false);
   assert.equal(JSON.stringify(state).length < 20_000, true);
+});
+
+test("selective commit reuses the canonical report and publishes only a CV bundle", async () => {
+  const fixture = await selectiveHarness();
+  const before = await readFile(join(fixture.root, fixture.reportPath));
+  const committed = await fixture.commit();
+  assert.deepEqual(await readFile(join(fixture.root, fixture.reportPath)), before);
+  assert.equal(committed.artifacts.report.path, fixture.reportPath);
+  assert.equal(committed.trackerId, 42);
+  assert.match(committed.artifacts.cvPdf.path, /output\/042-example-co-frontend-engineer\/cv\/tailored\/v001\/cv\.pdf/);
+  assert.equal(fixture.calls.some(({ script }) => script === "reserve-report-num.mjs" || script === "merge-tracker.mjs"), false);
+  const state = JSON.parse(await readFile(join(fixture.stagingRoot, fixture.input.preparationId, "commit-state.json"), "utf8"));
+  assert.equal(state.schemaVersion, 3);
+  assert.equal(state.reportOwned, false);
+  assert.equal(state.canonicalEvaluation.reportSha256, fixture.canonicalEvaluation.reportSha256);
+  assert.equal(state.artifacts.report.sha256, fixture.canonicalEvaluation.reportSha256);
+});
+
+test("selective commit reuses an exact completed HFW bundle without provider or writer work", async () => {
+  const fixture = await selectiveHarness();
+  const committed = await fixture.commit();
+  fixture.calls.length = 0;
+  fixture.input.result = null;
+  fixture.setPlan({
+    ...fixture.basePlan,
+    cv: {
+      action: "reuse",
+      reason: "hfw_manifest_current",
+      scope: "none",
+      format: "a4",
+      artifacts: {
+        html: committed.artifacts.cvHtml,
+        pdf: committed.artifacts.cvPdf,
+        changes: committed.artifacts.cvChanges,
+      },
+      provenance: committed.cvProvenance,
+    },
+  });
+  const replay = await fixture.commit();
+  assert.deepEqual(replay.artifacts, committed.artifacts);
+  assert.equal(fixture.calls.length, 0);
+});
+
+test("selective commit repairs only a stale HFW PDF into a new version", async () => {
+  const fixture = await selectiveHarness();
+  const committed = await fixture.commit();
+  const oldHtml = await readFile(join(fixture.root, committed.artifacts.cvHtml.path));
+  await writeFile(join(fixture.root, committed.artifacts.cvPdf.path), "stale external bytes");
+  fixture.calls.length = 0;
+  fixture.input.result = null;
+  fixture.setPlan({
+    ...fixture.basePlan,
+    cv: {
+      action: "refresh",
+      reason: "hfw_pdf_missing_or_changed",
+      scope: "pdf_only",
+      format: "a4",
+      artifacts: { html: committed.artifacts.cvHtml, changes: committed.artifacts.cvChanges },
+      provenance: committed.cvProvenance,
+    },
+  });
+  const repaired = await fixture.commit();
+  assert.match(repaired.artifacts.cvPdf.path, /\/v002\/cv\.pdf$/);
+  assert.deepEqual(await readFile(join(fixture.root, repaired.artifacts.cvHtml.path)), oldHtml);
+  assert.equal(fixture.calls.some(({ script }) => script === "build-cv-html.mjs"), false);
+  assert.equal(fixture.calls.filter(({ script }) => script === "generate-pdf.mjs").length, 1);
+});
+
+test("selective PDF fallback remains hash-bound and never changes its source", async () => {
+  const fixture = await selectiveHarness({ failScript: "generate-pdf.mjs", fallback: true });
+  const fallbackBefore = await readFile(fixture.fallbackPath);
+  const committed = await fixture.commit();
+  assert.equal(committed.cvProvenance.source, "user_reviewed_fallback");
+  assert.equal(committed.cvProvenance.sourceSha256, digest(fallbackBefore));
+  assert.deepEqual(await readFile(fixture.fallbackPath), fallbackBefore);
+  assert.deepEqual(await readFile(join(fixture.root, fixture.reportPath)), fixture.report);
+});
+
+test("selective commit rejects canonical identity and context drift before publication", async () => {
+  const fixture = await selectiveHarness();
+  fixture.source.revision = "changed";
+  await expectFailure(fixture.commit, "context_changed", "fresh_preparation_provider_run");
+  assert.deepEqual(await readFile(join(fixture.root, fixture.reportPath)), fixture.report);
+  assert.equal(fixture.calls.length, 0);
 });

@@ -45,8 +45,8 @@
       "type": "array",
       "items": { "$ref": "#/$defs/operation" },
       "uniqueItems": true,
-      "minItems": 15,
-      "maxItems": 15
+      "minItems": 16,
+      "maxItems": 16
     },
     "sourceOfTruth": {
       "type": "object",
@@ -103,6 +103,7 @@
         "health.check",
         "history.snapshot",
         "evaluation.result.read.v1",
+        "artifacts.inspect.v1",
         "profile.queue_filters.get",
         "preparation.context.get",
         "preparation.result.recover",
