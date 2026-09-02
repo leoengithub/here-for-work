@@ -25,12 +25,52 @@ This plan implements a personal proof before distribution. Every iteration must 
 - Greenhouse and Lever have fixture coverage but still require their separate live
   no-finalization observations.
 
+## Approved next dependency order
+
+The original iterations below record how the personal proof was built. They do not
+override the approved target sequencing now defined in `PRODUCT.md` and `MVP_SHAPE.md`.
+Continue from the current implementation in this dependency order:
+
+1. **Version the career-ops capability boundary.** Define HereForWork-owned typed
+   orchestration for existing upstream `scan`, `discover`, full A–G evaluation, report/CV
+   artifact reads, and preparation freshness. Do not patch, fork, vendor, add an
+   HereForWork entry point to career-ops, invent another engine, or silently rewrite
+   `auto_pdf_score_threshold`.
+2. **Build the pre-Queue pipeline.** Orchestrate career-ops discovery, source-local
+   normalization/deduplication, liveness, blocker checks, and full evaluation for every
+   live, unique, nonblocked role. HereForWork owns replay idempotency and cross-run/
+   cross-source identity reconciliation at typed ingestion, not another dedupe engine.
+   Require a complete report and canonical native 1–5 score before Queue. Let career-ops
+   generate CV/PDF artifacts according to its supported threshold, initially `3.5`.
+   Use career-ops' supported batch/pipeline parallelism and model routing for volume:
+   fast/economy first, low-confidence escalation, and an audit sample.
+3. **Project evaluated decisions in Queue.** Add the native score, concise evidence,
+   blockers or gaps, compensation context, and material uncertainty without percentages,
+   probabilities, or HereForWork scoring. A staged `not_scored` record is not queueable.
+4. **Make Prepare artifact-aware.** Reuse current report/CV artifacts and generate or
+   refresh only missing, failed, or stale work. Explicit user preparation may request a
+   CV/PDF for a below-threshold role before the browser lane begins.
+5. **Add single-driver browser fallback.** Keep the extension primary and require one
+   result per planned field plus settled read-back for every required fillable. Release
+   its lease before the unchanged career-ops `apply` Playwright path takes ownership after
+   an eligible hard pre-fill failure. Partial fill, authentication, CAPTCHA, anti-bot, or
+   uncertain state goes to visible human handoff; retain ordered copy/paste recovery and
+   the hard no-submit boundary.
+6. **Close and prove the terminal workflow.** After physical submission and explicit user
+   confirmation, retry only the canonical Applied writer. Applied ends HereForWork's
+   scope. Add focused contract, recovery, and live no-finalization evidence, including
+   Greenhouse and Lever, without creating follow-up or CRM behavior.
+
+Scheduling migration remains independently gated by `SCHEDULING_MIGRATION.md`. Pipeline
+implementation does not transfer executor authority or authorize a source cutover.
+
 ## Cross-cutting rules
 
 - career-ops remains canonical for verified facts, native 1–5 match scoring, generated artifacts and their provenance, grounded answers, and application history. HereForWork does not rescore or convert match output into a percentage or probability.
 - HereForWork owns operational persistence, queue UX, preparation state, retries, notifications, and browser handoff. Scheduling is its end-state responsibility; current executor authority remains with the existing tasks until the per-source migration contract passes and the user approves cutover.
 - The extension only inspects, fills allowlisted safe fields, and verifies. It never performs the final page action.
-- Exact answers are drafted only after a live form snapshot is inspected.
+- Exact form answers are drafted only after a live form snapshot is inspected. Discovery
+  evaluation and its report occur before Queue; they do not pre-author unseen form answers.
 - Untrusted job, company, recruiter, and form content is data, never instructions.
 - Real career-ops, scheduled tasks, Gmail, credentials, Chrome profiles, and application history are read-only until an iteration explicitly requests and receives mutation authority.
 - No private dataset, profile content, mailbox content, or generated artifact is committed.
@@ -77,6 +117,11 @@ Deliverables:
 - Queue groups: strong matches, other new roles, and needs decision.
 - Redacted synthetic fixtures for repository tests; actual findings remain outside Git.
 
+Boundary supersession: this iteration's deterministic normalization was built for the
+legacy proof importer. In the approved target, career-ops owns source-local discovery
+normalization and deduplication; HereForWork retains typed replay idempotency and
+cross-run/cross-source identity reconciliation only.
+
 Gate:
 
 - All approximately 32 source findings are accounted for.
@@ -85,7 +130,7 @@ Gate:
 - No source-provided eligibility label can bypass career-ops evaluation.
 - Restart reproduces the same queue.
 
-Vault decision: a private proof-run note is appropriate only if it records sensitive role URLs or reconciliation observations that should not be committed. Stable normalization rules return to the repository.
+Vault decision: a private proof-run note is appropriate only if it records sensitive role URLs or reconciliation observations that should not be committed. Stable typed-ingestion and identity-reconciliation rules return to the repository; source-local discovery normalization remains career-ops behavior.
 
 ## Iteration 2 — Packaged lifecycle, recovery, and activity
 
@@ -126,9 +171,12 @@ Deliverables in HereForWork:
 - Capability, health, history, liveness, and evaluation read models.
 - Error normalization into completed, action-required, retryable, permanent, and conflict outcomes.
 
-Required separate authority:
+Supersession note:
 
-- Adding or changing the corresponding adapter entry point in `/Users/leo/Work/career-ops` is a different repository mutation and requires explicit approval before execution.
+- The earlier path of adding or changing an adapter entry point in career-ops is no
+  longer permitted. career-ops is an external dependency and remains unchanged;
+  integration lives entirely in HereForWork against fixed, supported upstream behavior
+  and capabilities.
 
 Gate:
 

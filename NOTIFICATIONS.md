@@ -10,8 +10,11 @@ is denied or the operating system cannot display a notification.
 - `preparation_failed` is created only for a real report/CV, answer-persistence, or
   browser-preparation failure. Needs-decision and cancelled preparations do not create
   failure outcomes.
-- `application_ready` is created only after the extension completes
-  `release_for_review`. Completing the report or CV is not sufficient.
+- `application_ready` is created only after the active browser driver has completed its
+  verified release for human review. For the extension, that is
+  `release_for_review`; the separately versioned career-ops `apply` fallback must expose
+  an equivalent bounded outcome before it can create the same event. Completing the
+  report, CV, or answer plan alone is not sufficient.
 - Failure records retain a bounded, sanitized error code, exact stage, detail, and safe
   retry policy. URLs, local paths, email addresses, and long context identifiers are
   removed before persistence or display.

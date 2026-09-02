@@ -49,8 +49,10 @@ of the legacy dataset's version 1.
 - `findingId` is stable for the same source occurrence across runs. The consumer identity
   is `(sourceId, findingId)`.
 - `sourceRoleId` is the source-provided requisition identifier. `normalizedKey` is the
-  producer's cross-source deduplication candidate. Neither may be silently replaced by a
-  title/company guess during replay.
+  producer's cross-source identity candidate derived from career-ops' source-local
+  normalization and deduplication. Neither may be silently replaced by a title/company
+  guess during replay. HereForWork uses these typed identities for replay idempotency and
+  cross-run/cross-source reconciliation; it does not run a second deduplication engine.
 
 Replaying the same `(sourceId, runId)` and digest is a no-op. Reusing that attempt identity
 with a different digest is a conflict that must be quarantined and surfaced; the newer
@@ -76,7 +78,7 @@ Producers should not put credentials, candidate profile facts, email bodies, or 
 personal career data in the envelope. A private source may use an opaque reference while
 keeping the sensitive record in its authoritative system.
 
-## Native career-ops score
+## Native career-ops score in version 1
 
 Every discovery-run finding carries exactly one `matchScore` state:
 
@@ -102,10 +104,25 @@ The current career-ops paths imply two materially different effort levels:
   permits 0, and is not the canonical 1–5 match average; it must not populate
   `matchScore`.
 
-Therefore a discovery exporter should reuse a canonical score only when that bounded
-career-ops evaluation already exists. A newly discovered role remains `not_scored` when
-generating the canonical score would require the full evaluation. No report, tailored CV,
-second scoring engine, or score-only approximation is introduced by this contract.
+Therefore a version-1 discovery exporter reuses a canonical score only when that bounded
+career-ops evaluation already exists. The schema's `not_scored` state preserves the
+legacy/current exporter limitation and diagnostic evidence; it does not satisfy the
+approved pre-Queue product contract. A `not_scored` finding may be ingested into staging,
+but it is not eligible for Queue until career-ops has completed the full evaluation,
+written its report, and supplied the canonical native score. HereForWork must never fill
+that gap with a second scoring engine or score-only approximation.
+
+The approved target pipeline evaluates every live, unique, nonblocked role before Queue.
+That evaluation uses career-ops' full A–G behavior and writes a report for every valid
+evaluation. career-ops may also produce CV/PDF artifacts under its supported
+`auto_pdf_score_threshold`, initially `3.5`. This target requires a separately versioned
+producer/adapter capability; it does not silently change this version-1 schema or grant
+HereForWork authority to rewrite career-ops configuration.
+
+For volume, the producer may use career-ops' supported batch/pipeline parallelism and
+model routing with fast/economy processing, low-confidence escalation, and an audit
+sample. Regardless of route, only the canonical career-ops result may populate
+`matchScore`; no preliminary or HereForWork-produced score may cross this contract.
 
 ## Run completion
 
@@ -161,7 +178,8 @@ attempt.
 
 1. Keep the existing schema-v1 selected-file importer as the compatibility path.
 2. Add discovery-run parsing to the user-triggered manual Refresh path. This is ingestion
-   only; the scheduled tasks still execute and emit results.
+   only; the scheduled tasks still execute and emit results. Preserve `not_scored` only as
+   a staged diagnostic state; do not publish that finding to Queue.
 3. Consume the same artifacts in read-only shadow mode, comparing every window and
    preserving partial, failed, replay, conflict, and zero-result evidence.
 4. Consider optional automatic file consumption only after the shadow evidence is

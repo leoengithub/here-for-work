@@ -3,6 +3,33 @@
 Date: 2026-08-31
 Stage: generic public-HTTPS path live-proven; Greenhouse and Lever live observations remain
 
+## Approved target not yet implemented
+
+The current evidence below describes the packaged personal proof. The approved product
+direction now requires these additional changes before the implementation matches the
+stable contract:
+
+- Orchestrate career-ops `scan` and company-to-ATS `discover`, then run the full career-ops
+  A–G evaluation for every live, unique, nonblocked role before Queue. The current proof
+  imports/classifies roles and evaluates during Prepare instead.
+- Require every Queue role to have a complete report and canonical native 1–5 score, and
+  show concise evidence, blockers or gaps, compensation context, and material uncertainty.
+  The current Queue intentionally hides scores and therefore does not yet match this target.
+- Let career-ops generate CV/PDF artifacts under its supported
+  `auto_pdf_score_threshold`, initially `3.5`, during evaluation. Prepare must then reuse
+  current artifacts and selectively generate or refresh only missing, failed, or stale
+  work, including a below-threshold CV/PDF when the user explicitly prepares that role.
+- Treat extension success as complete per-field results plus settled read-back, and add
+  single-driver handoff to the unchanged career-ops `apply` Playwright fallback for
+  eligible hard pre-fill failures. The current generic path can release zero-compatible-
+  field forms for manual review and has no such fallback ownership transfer.
+- Keep canonical Applied as the terminal HereForWork state and retry only tracking after
+  confirmed physical submission. No follow-up, outreach, reply-watch, interview workflow,
+  or post-Applied CRM is planned; interview preparation remains report content only.
+
+These are approved implementation gaps, not claims of completed functionality. They do
+not authorize career-ops source changes, scheduled-task cutover, or submission.
+
 ## Verified implementation evidence
 
 - Apple Silicon `.app` launches without a local HTTP server.

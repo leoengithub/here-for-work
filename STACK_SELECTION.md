@@ -17,7 +17,7 @@ Use this application stack:
 - **Schema and process contracts:** versioned JSON Schema Draft 2020-12 documents; generated TypeScript types; Rust validation and `serde` DTOs.
 - **Background lifecycle:** one single-instance Tauri core process that can run without an open webview window. The UI is disposable; closing it does not terminate enabled background work.
 - **External execution:** Rust starts argument arrays directly without a shell. career-ops, Codex, and Claude remain separately installed dependencies with explicitly resolved executable paths.
-- **Browser assistance:** a separate TypeScript Manifest V3 Chrome extension plus a small Rust native-messaging-host binary built in the same Cargo workspace.
+- **Browser assistance:** a separate TypeScript Manifest V3 Chrome extension plus a small Rust native-messaging-host binary built in the same Cargo workspace. The extension is the primary driver; a fixed invocation of the separately installed career-ops `apply` Playwright behavior is the bounded fallback after explicit single-driver lease transfer.
 - **Initial platform target:** Apple Silicon macOS 13 or newer. Universal packaging is deferred until trusted-user distribution requires it.
 
 No final visual component library is selected. Detailed visual design remains deferred, and the first interface should use a small semantic token layer rather than committing the product to a large component dependency.
@@ -40,7 +40,7 @@ HereForWork.app
     └── Chrome service worker ↔ content scripts
 ```
 
-There is no application HTTP server, browser-accessible localhost port, menu-bar item, or embedded browser automation runtime.
+There is no application HTTP server, browser-accessible localhost port, menu-bar item, or embedded browser automation runtime. The approved fallback remains external career-ops behavior; it does not add arbitrary browser control to the renderer, native protocol, or extension.
 
 ## Why Tauri 2
 
@@ -144,7 +144,7 @@ Onboarding offers:
 
 Persist a stable profile identifier/path only after the user confirms it; the display name is mutable. Validate the chosen profile by a native-messaging handshake with both Chrome's extension ID and a profile-local installation UUID, not by its visible name. The user may select any existing profile or create and name one in ordinary Chrome before pairing it.
 
-Production Chrome is launched normally, without WebDriver, CDP, remote debugging, or automation flags. A separate test profile is mandatory for Playwright or other automated browser tests. If an application page reports automation markers or rejects assisted interaction, stop and require manual completion; never disguise or bypass detection.
+The extension path launches the selected production Chrome profile normally, without WebDriver, CDP, remote debugging, or automation flags. A separate test profile remains mandatory for HereForWork's automated browser tests. The bounded career-ops `apply` Playwright fallback may begin only after the extension has released ownership following an eligible hard pre-fill failure; authentication, CAPTCHA, anti-bot, partial-fill, or uncertain state instead requires visible human handoff. If any application page reports automation markers or rejects assisted interaction, stop and require manual completion; never disguise or bypass detection.
 
 ## Provider and executable resolution
 

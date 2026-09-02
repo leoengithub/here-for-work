@@ -44,6 +44,39 @@ source, evidence, integrity, completion, and native career-ops score provenance 
 gradual Refresh/shadow migration. Defining that file contract does not add an adapter
 operation, exporter, scheduler authority, or automatic ingestion path.
 
+## Approved target capability direction
+
+The terminal product flow is Discover → Evaluate → Queue → Prepare → Fill/Review →
+canonical Applied. The current operation list below is an implemented personal-proof
+boundary, not the final sequencing contract.
+
+HereForWork will orchestrate career-ops' existing discovery behaviors: `scan` finds roles
+through configured portals/APIs and broad agentic search, while `discover` expands a
+company into ATS portal sources. For every live, unique, nonblocked role, career-ops must
+then perform its full A–G evaluation before Queue and return the native 1–5 score, report,
+evidence, blockers or gaps, compensation context, and material uncertainty. Every valid
+evaluation writes its full report. career-ops may also generate CV/PDF artifacts under
+its supported `auto_pdf_score_threshold`, initially `3.5`. HereForWork may read and
+validate that setting but never silently rewrites it.
+
+At volume, orchestration reuses career-ops' supported batch/pipeline parallelism and model
+routing: fast/economy processing first, escalation for low-confidence results, and an
+audit sample. The adapter must preserve the authoritative evaluation and provenance; this
+strategy never permits HereForWork to generate an interim, fallback, or audit score.
+
+Prepare becomes an artifact validation and continuation capability: reuse current report
+and CV artifacts, and ask career-ops to generate or refresh only work that is missing,
+failed, or stale. This includes generating a CV/PDF for a below-threshold role the user
+explicitly chooses to prepare. These are capability requirements; operation names and
+wire shapes remain to be designed and versioned separately.
+
+The adapter must invoke fixed upstream career-ops behavior without patching, forking,
+vendoring, or adding HereForWork-specific entry points to career-ops. career-ops owns
+source-local discovery normalization and deduplication. HereForWork owns typed
+orchestration, schedules, retries, ingestion replay idempotency, cross-run/cross-source
+identity reconciliation, and run visibility, but never a second discovery,
+deduplication, evaluation, scoring, report, or CV engine.
+
 ## Writable personal-proof operations
 
 Writable operations use only fixed, existing career-ops CLIs. HereForWork does not add
@@ -91,6 +124,19 @@ The extension keeps provider execution separate from canonical writes:
 9. HereForWork queues `release_for_review` only after that canonical answer
    write succeeds. A failure leaves the browser session recoverable and retries
    only the answer writer, not inspection or filling.
+
+This implemented extension-only sequence is not yet the complete approved browser-driver
+contract. The extension remains primary, but success requires exactly one result for every
+planned field and correct settled read-back for every required fillable. Expired transport
+or handshake, wrong or missing tab, zero compatible fields, missing results, read-back
+mismatch, and unsupported multi-page, modal, or iframe behavior are fallback-eligible.
+
+Only one driver may own a preparation. The extension must release its lease before the
+unchanged career-ops `apply` Playwright behavior takes over. Automatic fallback is limited
+to a hard pre-fill failure without authentication, CAPTCHA, anti-bot, partial-fill, or
+uncertain state; those conditions require a visible human handoff. The fallback returns a
+grounded ordered answer plan and, if autofill cannot proceed, copy/paste recovery. No
+fallback may add a submit or finalization operation.
 
 `preparation.artifacts.delete` is a narrowly scoped cleanup operation used by Undo
 preparation. It accepts only the committed preparation UUID plus the exact report and
@@ -147,6 +193,10 @@ Canonical decision operations are:
 - `application.applied.confirm`: after the user's separate outcome confirmation,
   record Applied through the canonical writer. Retrying this operation cannot
   reopen a browser session or repeat any page action.
+
+Canonical Applied is terminal for HereForWork. Follow-up, outreach, reply monitoring,
+interviews, and post-application CRM remain outside this protocol. Interview preparation
+may be report content, but it does not create post-Applied workflow state.
 
 Canonical decisions carry a UUID idempotency key. HereForWork retains that key across
 retries, and the adapter verifies the canonical row plus the effect marker before

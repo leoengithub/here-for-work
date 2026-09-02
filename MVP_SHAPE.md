@@ -6,7 +6,7 @@ This document is the stable interaction and workflow contract for the first Here
 
 ## Outcome
 
-HereForWork replaces two disconnected scheduled job-discovery workflows with one desktop-first macOS companion. It preserves every viable role in a direct review queue, prepares applications only after user intent, fills supported live forms, and leaves the final submission physically and unambiguously with the user.
+HereForWork replaces two disconnected scheduled job-discovery workflows with one desktop-first macOS companion. It preserves every viable role in a direct review queue after full career-ops evaluation, prepares selected applications by reusing or refreshing artifacts, fills supported live forms, and leaves the final submission physically and unambiguously with the user. Its responsibility ends when career-ops has canonically recorded the user's confirmed Applied outcome.
 
 The first proof of concept uses findings from both existing scheduled searches beginning 2026-08-29 at 08:00 Europe/Madrid. The data must be reconciled against liveness, duplicates, confirmed blockers, and canonical application history before appearing in the queue.
 
@@ -17,10 +17,13 @@ The MVP includes:
 - Background orchestration of the two current discovery sources while the Mac is available.
 - Catch-up behavior after sleep, shutdown, or temporary source failure.
 - Existing Gmail alert-processing and inbox-hygiene behavior through career-ops.
-- Normalization, liveness checks, deduplication, and lightweight classification.
-- A direct queue containing every viable role, including roles with explained uncertainty.
+- career-ops `scan` discovery through configured portals/APIs and broad agentic search, plus `discover` company-to-ATS source expansion, orchestrated through typed runs without duplicating either engine in HereForWork.
+- career-ops source-local normalization and deduplication, liveness and blocker checks, and full A–G evaluation of every live, unique, nonblocked role before Queue.
+- HereForWork-owned typed-ingestion replay idempotency and cross-run/cross-source identity reconciliation without a second discovery, deduplication, or evaluation engine.
+- A complete career-ops report for every valid evaluation and score-gated career-ops CV/PDF generation through the supported `auto_pdf_score_threshold`, initially `3.5`.
+- A direct queue containing every viable role with career-ops' native score and enough evidence, blockers or gaps, compensation context, and uncertainty to decide without rereading the listing.
 - macOS notifications for new viable roles, actionable discovery failures, and forms ready for review.
-- User-triggered career-ops report and tailored CV generation.
+- User-triggered validation and reuse of current report/CV artifacts, with selective generation or refresh of missing, failed, or stale work.
 - Automatic continuation into the user-selected ordinary Chrome profile after preparation.
 - Live-form inspection before grounded application answers are drafted.
 - Safe-field filling and verification while sensitive, unknown, unsupported, and unverifiable fields are skipped.
@@ -43,6 +46,7 @@ The MVP excludes:
 - Mass preparation, arbitrary daily caps, streaks, or application-volume optimization.
 - Detailed visual-system, theme, typography, and branding decisions.
 - Hosted or multi-user operation.
+- Follow-up, outreach, reply monitoring, interview workflow, and any post-Applied CRM. Interview preparation may exist only inside the career-ops evaluation report.
 
 ## Primary Information Architecture
 
@@ -56,7 +60,7 @@ Roles are grouped in this order:
 2. Other new roles.
 3. Needs decision.
 
-Every listed role has already passed the inclusion gates. Each group is a semantic list of compact, bounded cards. The linked role title owns the first line. A single secondary metadata line beneath it contains company, location or remote arrangement, optional source-backed relative listing age, and concise uncertainty when it changes the decision; it wraps rather than hides information. The right side contains only the quiet Dismiss action followed by the primary Prepare action. The card does not expand and is not itself clickable. ATS, source-occurrence count, preparation state, score, and discovery time do not appear.
+Every listed role has already passed the inclusion gates and full career-ops evaluation. Each group is a semantic list of compact, bounded cards. The linked role title owns the first line. Secondary decision information beneath it contains company, location or remote arrangement, optional source-backed relative listing age, the native career-ops 1–5 score, concise supporting evidence, blockers or gaps, compensation context, and material uncertainty. It remains compact and may wrap rather than hide decision-critical information. The right side contains only the quiet Dismiss action followed by the primary Prepare action. The card does not expand and is not itself clickable. ATS, source-occurrence count, preparation state, and discovery time do not appear. The score is never converted into a percentage or probability and HereForWork never computes a substitute.
 
 Listing age is shown without a prefix, as `Today`, `1 day ago`, or `N days ago`, using Europe/Madrid calendar days. It is absent when the source publication date is missing, invalid, in the future, or conflicts across merged source occurrences. `discoveredAt` and first-seen time are never substitutes for a source publication date.
 
@@ -82,27 +86,27 @@ Shows the career-ops report, tailored CV, full evidence and uncertainty, prepara
 
 ## Core Loop
 
-1. HereForWork runs both discovery sources while the Mac is available.
-2. career-ops normalizes, deduplicates, checks liveness, and classifies the findings, excluding suspicious roles before presentation.
-3. HereForWork adds every viable, non-suspicious role to the ordered queue.
+1. HereForWork orchestrates both discovery sources while the Mac is available. It invokes career-ops `scan` for configured portals/APIs and broad agentic search and `discover` for company-to-ATS source expansion; HereForWork owns typed orchestration, retries, run visibility, ingestion replay idempotency, and cross-run/cross-source identity reconciliation, not another discovery or deduplication engine.
+2. career-ops performs source-local normalization and deduplication, checks liveness and blockers, then runs its full A–G evaluation for every live, unique, nonblocked finding. That evaluation covers archetype, geography and authorization, role and culture, CV match, level, compensation, personalization, interview preparation in the report, legitimacy, risks, evidence, and the native 1–5 score. For volume, HereForWork uses career-ops' supported batch/pipeline parallelism and model routing: fast/economy work first, low-confidence escalation, and an audit sample. It does not introduce its own scoring or evaluation shortcut.
+3. Every valid evaluation writes a complete career-ops report. career-ops generates its CV/PDF when its supported `auto_pdf_score_threshold` allows it, initially at `3.5`; HereForWork may read and validate the setting but never silently changes it. HereForWork then adds every viable, non-suspicious evaluated role to the ordered queue.
 4. A macOS notification announces new viable roles and opens the queue filtered to that run.
 5. The user selects **Prepare** for a role.
-6. career-ops evaluates the live role before artifacts are committed. A viable match continues when authorization remains unresolved or legitimacy is `Proceed with Caution`, preserving the concrete warning for review. A confirmed authorization conflict or newly detected suspicious result is recorded Discarded; a below-threshold verified match returns to Needs decision.
-7. For a viable match, career-ops generates the full report and fact-checked tailored CV.
+6. HereForWork checks liveness and artifact freshness, reuses the current career-ops report/CV, and asks career-ops to generate or refresh only missing, failed, or stale work. A below-threshold role selected by the user may receive its missing CV/PDF at this point. A newly suspicious or blocked live result stops safely while unresolved authorization remains explicit.
    If PDF rendering alone fails after HTML and fact checks, an explicitly configured,
    hash-bound user-reviewed CV may recover the preparation and is shown as not tailored.
-8. HereForWork automatically opens the application in a new tab of the user-selected ordinary Chrome profile.
-9. The extension inspects the live form and returns typed field descriptions.
-10. career-ops drafts answers grounded in verified profile sources and the inspected questions.
-11. The extension fills and verifies supported safe fields and attaches the exact
+7. HereForWork automatically opens the application in a new tab of the user-selected ordinary Chrome profile.
+8. The extension inspects the live form and returns typed field descriptions.
+9. career-ops drafts answers grounded in verified profile sources and the inspected questions.
+10. The extension fills and verifies supported safe fields and attaches the exact
     manifest-matched preparation PDF—either the fact-checked tailored output or the
     visibly identified user-reviewed fallback—to one unambiguous CV/resume control. An
     existing user-selected file is preserved. Other file controls, ambiguous CV
     controls, unsupported types, and unverifiable fields are skipped.
+11. Success requires exactly one result for every planned field and correct settled read-back for every required fillable. If the extension fails before any fill because of eligible transport, tab, compatibility, result, read-back, or unsupported-flow conditions, it releases its single-driver lease before the unchanged career-ops `apply` Playwright fallback begins. Partial fill, authentication, CAPTCHA, anti-bot, or uncertain page state instead becomes a visible human handoff. When neither driver can autofill safely, ordered grounded answers remain available for copy/paste recovery.
 12. HereForWork notifies the user that the live form is ready for review.
 13. The user reviews the live page, completes missing fields, and physically clicks Submit.
 14. The user confirms the outcome in HereForWork.
-15. The adapter records Applied through a canonical career-ops writer.
+15. The adapter records Applied through a canonical career-ops writer. A failure retries only this tracking write and never reopens or repeats the form. Applied is terminal for HereForWork.
 
 Selecting Prepare durably queues the role and immediately moves it from Queue to Applications. Queue remains interactive, so the user can select additional roles without waiting. At most two report/CV preparation jobs run concurrently; later jobs remain queued in first-in, first-out order.
 
@@ -137,7 +141,7 @@ Not started
 
 Prepared is an internal transition, not another user decision.
 
-Recovery branches preserve completed work and retry only the failed step. If canonical tracking fails after confirmed submission, show Submitted, tracking update pending and retry the write. Never reopen or resubmit the form as recovery.
+Recovery branches preserve completed work and retry only the failed step. If canonical tracking fails after confirmed submission, show Submitted, tracking update pending and retry the write. Never reopen or resubmit the form as recovery. No HereForWork states follow Applied.
 
 ## Uncertainty and Partial Filling
 
@@ -195,7 +199,11 @@ The future adapter enhancement should carry source and output hashes, persisted 
 
 ## Extension Boundary
 
-The extension has the user-approved permanent all-sites Chrome permission so it can operate on employer and ATS domains that are not known in advance. Its content script is inert until a typed HereForWork command targets an expected public HTTPS application URL. It may inspect visible fields, return structured field definitions, fill an explicit prepared payload, verify values, and report skipped or failed fields.
+The extension has the user-approved permanent all-sites Chrome permission so it can operate on employer and ATS domains that are not known in advance. Its content script is inert until a typed HereForWork command targets an expected public HTTPS application URL. It is the primary form driver and may inspect visible fields, return structured field definitions, fill an explicit prepared payload, verify values, and report skipped or failed fields.
+
+Extension success means exactly one result exists for every planned field and every required fillable has the expected value after the page has settled. Expired transport or handshake, a wrong or missing tab, zero compatible fields, missing per-field results, settled read-back mismatch, and unsupported multi-page, modal, or iframe behavior are fallback-eligible driver failures. Sensitive unknowns and CAPTCHA are human work, not proof that the driver itself failed.
+
+Only one driver may own a preparation. The extension releases its lease before career-ops' existing `apply` Playwright path may take ownership. Automatic fallback is allowed only after a hard pre-fill failure without authentication, CAPTCHA, anti-bot, partial-fill, or uncertain state; those conditions require visible human handoff. The fallback inspects the live form and returns a grounded ordered answer plan. If safe autofill still cannot complete, that plan remains available for copy/paste. Neither driver has a submission operation.
 
 It may not generate answers independently, infer sensitive facts, update canonical tracking, click Submit, call `form.submit()`, or simulate submission. Page content cannot create privileged commands. Broad host access does not grant arbitrary navigation or page-driven control.
 
@@ -231,16 +239,19 @@ Every public HTTPS application URL enters the generic path. Greenhouse, Lever, a
 | TODAY'S QUEUE                                                   12 READY     |
 |                                                                              |
 | STRONG MATCHES                                                               |
-| [L] Senior Frontend Engineer   Linear - Remote Spain       ASHBY   [Prepare]|
-| [R] Product Engineer           Ramp - Remote Europe   GREENHOUSE   [Prepare]|
-| [N] Frontend Platform Engineer Notion - Madrid             LEVER   [Prepare]|
+| [L] Senior Frontend Engineer   Linear - Remote Spain · 4.6/5        [Prepare]|
+|     Strong React/platform evidence · compensation aligned                    |
+| [R] Product Engineer           Ramp - Remote Europe · 4.2/5         [Prepare]|
+|     Product scope matches · authorization route remains open                 |
+| [N] Frontend Platform Engineer Notion - Madrid · 4.0/5        [Prepare]|
+|     Platform evidence · compensation not stated                              |
 |                                                                              |
 | NEW                                                                          |
-| [C] Senior UI Engineer         Company - Barcelona         ASHBY   [Prepare]|
+| [C] Senior UI Engineer         Company - Barcelona · 3.8/5          [Prepare]|
 |                                                                              |
 | NEEDS DECISION                                                               |
-| [?] Frontend Engineer          Company - Remote EU                 [Prepare]|
-|     Authorization route unclear                                             |
+| [?] Frontend Engineer          Company - Remote EU · 3.5/5          [Prepare]|
+|     Authorization route unclear · compensation below target unconfirmed      |
 +------------------------------------------------------------------------------+
 | 12 viable roles - Background discovery healthy                 [Run details]|
 +------------------------------------------------------------------------------+
