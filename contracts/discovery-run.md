@@ -115,9 +115,12 @@ that gap with a second scoring engine or score-only approximation.
 The approved target pipeline evaluates every live, unique, nonblocked role before Queue.
 That evaluation uses career-ops' full A–G behavior and writes a report for every valid
 evaluation. career-ops may also produce CV/PDF artifacts under its supported
-`auto_pdf_score_threshold`, initially `3.5`. This target requires a separately versioned
-producer/adapter capability; it does not silently change this version-1 schema or grant
-HereForWork authority to rewrite career-ops configuration.
+`auto_pdf_score_threshold`. HereForWork reads the effective configured value instead of
+substituting one; the approved target is `3.5`, while the latest audit still found the
+upstream fallback `3.0` active because no explicit threshold key was configured. This
+target requires a separately versioned producer/adapter capability; it does not silently
+change this version-1 schema or grant HereForWork authority to rewrite career-ops
+configuration.
 
 For volume, the producer may use career-ops' supported batch/pipeline parallelism and
 model routing with fast/economy processing, low-confidence escalation, and an audit

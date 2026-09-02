@@ -68,8 +68,10 @@ company into ATS portal sources. For every live, unique, nonblocked role, career
 then perform its full A–G evaluation before Queue and return the native 1–5 score, report,
 evidence, blockers or gaps, compensation context, and material uncertainty. Every valid
 evaluation writes its full report. career-ops may also generate CV/PDF artifacts under
-its supported `auto_pdf_score_threshold`, initially `3.5`. HereForWork may read and
-validate that setting but never silently rewrites it.
+its supported `auto_pdf_score_threshold`. HereForWork may read and validate that setting
+but never silently rewrites it. The approved product target is `3.5`, while the latest
+audit found the effective upstream fallback still at `3.0` because no explicit threshold
+key was configured.
 
 At volume, orchestration reuses career-ops' supported batch/pipeline parallelism and model
 routing: fast/economy processing first, escalation for low-confidence results, and an
