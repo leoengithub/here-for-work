@@ -12,8 +12,8 @@ is denied or the operating system cannot display a notification.
   failure outcomes.
 - `application_ready` is created only after the active browser driver has completed its
   verified release for human review. For the extension, that is
-  `release_for_review`; the separately versioned career-ops `apply` fallback must expose
-  an equivalent bounded outcome before it can create the same event. Completing the
+  `release_for_review`; a future review-only fallback driver would need to expose an
+  equivalent bounded outcome before it could create the same event. Completing the
   report, CV, or answer plan alone is not sufficient.
 - Failure records retain a bounded, sanitized error code, exact stage, detail, and safe
   retry policy. URLs, local paths, email addresses, and long context identifiers are
@@ -23,11 +23,11 @@ is denied or the operating system cannot display a notification.
 
 ## Delivery behavior
 
-When the window is visible, HereForWork shows its existing in-app toast. A failure toast
-persists and **View details** opens Applications and the matching preparation details.
-A ready toast remains for 30 seconds and **Review form** focuses the already-released
-Chrome tab. That command only activates the existing tab and window; it does not inspect,
-fill, finalize, or submit the form.
+When the window is visible, HereForWork shows an in-app toast. Outcome toasts are
+dismissible. Failure and ready toasts last 5 seconds by default, and **View details**
+opens Applications and the matching preparation details while **Review form** focuses the
+already-released Chrome tab. That command only activates the existing tab and window; it
+does not inspect, fill, finalize, or submit the form.
 
 When the window is hidden, HereForWork attempts an informational macOS notification.
 Native notifications intentionally have no action button or click-routing contract. A
