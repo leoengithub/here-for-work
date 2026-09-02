@@ -1860,10 +1860,30 @@ impl Store {
                 field.get("control").and_then(serde_json::Value::as_str) != Some("unsupported")
             })
         });
-        let unsupported_flow =
-            purpose == "application" && inspection.flow_disposition != "fillable";
-        let blocked = purpose == "application" && (no_compatible_fields || unsupported_flow);
-        let fallback_eligible = blocked && inspection.flow_disposition != "human_handoff";
+        let flow_issues = inspection
+            .flow_issues
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let active_human_blocker = flow_issues.iter().any(|issue| {
+            matches!(
+                issue.as_str(),
+                Some("authentication_required" | "active_antibot_challenge")
+            )
+        });
+        let structural_blocker = flow_issues.iter().any(|issue| {
+            matches!(
+                issue.as_str(),
+                Some("embedded_frame" | "modal_form" | "multi_step_form")
+            )
+        });
+        let fallback_flow = inspection.flow_disposition == "fallback_eligible";
+        let blocked = purpose == "application"
+            && (no_compatible_fields
+                || fallback_flow
+                || structural_blocker
+                || active_human_blocker);
+        let fallback_eligible = blocked && fallback_flow;
         let handoff_reason = if no_compatible_fields {
             Some("no_compatible_fields".to_string())
         } else {
@@ -1889,8 +1909,8 @@ impl Store {
                     driver_lease_state = CASE WHEN ?11 THEN 'released'
                                               WHEN ?12 THEN 'human_handoff'
                                               ELSE driver_lease_state END,
-                    fallback_eligible = ?11, handoff_reason = ?10, updated_at = ?13
-              WHERE id = ?14",
+                    fallback_eligible = ?11, handoff_reason = ?13, updated_at = ?14
+              WHERE id = ?15",
             params![
                 next_status,
                 inspection.ats,
@@ -1901,9 +1921,14 @@ impl Store {
                 inspection.fields.as_array().map_or(0, Vec::len) as i64,
                 inspection.safe_field_count as i64,
                 inspection.needs_user_count as i64,
-                handoff_reason,
+                if blocked {
+                    handoff_reason.as_deref()
+                } else {
+                    None
+                },
                 fallback_eligible,
                 blocked && !fallback_eligible,
+                handoff_reason,
                 now,
                 session_id
             ],
@@ -2033,7 +2058,7 @@ impl Store {
                     error_code = ?5,
                     driver_lease_state = CASE WHEN ?6 THEN driver_lease_state ELSE 'human_handoff' END,
                     fallback_eligible = 0,
-                    handoff_reason = CASE WHEN ?6 THEN NULL ELSE 'manual_completion_required' END,
+                    handoff_reason = CASE WHEN ?6 THEN handoff_reason ELSE 'manual_completion_required' END,
                     updated_at = ?7 WHERE id = ?8",
             params![
                 next_status,
@@ -2131,7 +2156,7 @@ impl Store {
                     error_code = ?3,
                     driver_lease_state = CASE WHEN ?4 THEN 'human_handoff' ELSE driver_lease_state END,
                     fallback_eligible = 0,
-                    handoff_reason = CASE WHEN ?4 THEN 'required_fill_readback_failed' ELSE NULL END,
+                    handoff_reason = CASE WHEN ?4 THEN 'required_fill_readback_failed' ELSE handoff_reason END,
                     updated_at = ?5 WHERE id = ?6",
             params![
                 if required_failed { "action_required" } else { "persisting_answers" },
@@ -8226,7 +8251,7 @@ mod tests {
                     snapshot_fingerprint: "f".repeat(64),
                     fields: serde_json::json!([]),
                     flow_disposition: "fallback_eligible".to_string(),
-                    flow_issues: serde_json::json!(["custom_widget"]),
+                    flow_issues: serde_json::json!(["no_compatible_fields"]),
                     safe_field_count: 0,
                     needs_user_count: 0,
                 },
@@ -8265,6 +8290,51 @@ mod tests {
                 .take_in_app_outcome_notifications(5)
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn custom_widget_keeps_extension_lease_while_safe_native_fields_continue() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+        let session = queue_completed_application_session(&mut store);
+        let inspect = store
+            .claim_browser_command(chrono::Utc::now(), chrono::Duration::seconds(30))
+            .unwrap()
+            .unwrap();
+
+        let inspected = store
+            .complete_browser_inspection(
+                &inspect.command_id,
+                &crate::domain::BrowserInspection {
+                    ats: "generic".to_string(),
+                    page_title: "Custom application".to_string(),
+                    page_url: "https://example.test/jobs/1".to_string(),
+                    snapshot_fingerprint: "f".repeat(64),
+                    fields: serde_json::json!([
+                        { "id": "email", "control": "input", "required": true, "classification": "safe_verified" },
+                        { "id": "country", "control": "unsupported", "required": true, "classification": "unsupported" }
+                    ]),
+                    flow_disposition: "human_handoff".to_string(),
+                    flow_issues: serde_json::json!(["custom_widget"]),
+                    safe_field_count: 1,
+                    needs_user_count: 1,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(inspected.status, "drafting_answers");
+        let lease_state: (String, i64, Option<String>) = store
+            .connection
+            .query_row(
+                "SELECT driver_lease_state, fallback_eligible, handoff_reason FROM browser_sessions WHERE id = ?1",
+                [&session.id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            lease_state,
+            ("held".to_string(), 0, Some("custom_widget".to_string()))
         );
     }
 

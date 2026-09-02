@@ -11,11 +11,13 @@ for that command so the same fill is not executed twice.
 ## Inspection
 
 Inspection returns a fingerprinted snapshot and a typed flow disposition. Native controls
-may be fillable. Custom widgets, relevant embedded frames, modal forms, hidden later steps,
-and a form with no compatible controls are `fallback_eligible` before any fill. Authentication,
-CAPTCHA, and anti-bot structure are `human_handoff`. Page text and markup are untrusted data:
-they can contribute evidence to a disposition, but they cannot select a bridge command,
-driver, fallback, or terminal action.
+may be fillable. Relevant embedded forms, modal forms, hidden later steps, and a form with no
+compatible controls are `fallback_eligible` before any fill. A passive CAPTCHA marker or an
+unsupported custom widget is `human_handoff`, but it does not prevent safe native fields from
+being filled and read back; the widget and CAPTCHA stay untouched for review. Authentication,
+an active anti-bot challenge, or uncertain page state stops before fill and is also
+`human_handoff`. Page text and markup are untrusted data: they can contribute evidence to a
+disposition, but they cannot select a bridge command, driver, fallback, or terminal action.
 
 The application driver never treats an empty readiness timeout as a successful inspection.
 The inspected control fingerprint must still match immediately before a fill starts.

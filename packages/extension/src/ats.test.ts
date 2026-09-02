@@ -353,7 +353,6 @@ describe("ATS trust boundary", () => {
   });
 
   it.each([
-    ["custom widget", "<form><div role='combobox' aria-label='Country'></div></form>", "custom_widget"],
     ["embedded frame", "<iframe title='Application form' src='https://forms.example.test/apply'></iframe>", "embedded_frame"],
     ["modal", "<div role='dialog'><form><input name='email' type='email'></form></div>", "modal_form"],
   ])("classifies %s flows as fallback eligible", async (_name, html, issue) => {
@@ -364,11 +363,44 @@ describe("ATS trust boundary", () => {
 
   it.each([
     ["authentication", "<form><input type='password'></form>", "authentication_required"],
-    ["CAPTCHA", "<form><div data-sitekey='public-key'></div><input name='email' type='email'></form>", "captcha_or_antibot"],
+    ["CAPTCHA", "<form><iframe title='reCAPTCHA' src='https://captcha.example.test/widget'></iframe><input name='email' type='email'></form>", "captcha_or_antibot"],
+    ["custom widget", "<form><input name='email' type='email'><div role='combobox' aria-label='Country'></div></form>", "custom_widget"],
+    ["active anti-bot challenge", "<div aria-modal='true'><iframe title='Security challenge'></iframe></div><form><input name='email' type='email'></form>", "active_antibot_challenge"],
   ])("classifies %s as a human handoff", async (_name, html, issue) => {
     const snapshot = await inspectForm(new DOMParser().parseFromString(html, "text/html"), new URL("https://apply.example.com/form"));
     expect(snapshot.flow.disposition).toBe("human_handoff");
     expect(snapshot.flow.issues).toContain(issue);
+  });
+
+  it("does not misclassify a passive CAPTCHA iframe as an embedded application form", async () => {
+    const snapshot = await inspectForm(new DOMParser().parseFromString(
+      "<form><iframe title='reCAPTCHA' src='https://captcha.example.test/widget'></iframe><input name='email' type='email'></form>",
+      "text/html",
+    ), new URL("https://apply.example.com/form"));
+    expect(snapshot.flow.issues).toContain("captcha_or_antibot");
+    expect(snapshot.flow.issues).not.toContain("embedded_frame");
+  });
+
+  it("fills and settles a safe native field without interacting with an unsupported custom widget", async () => {
+    const doc = new DOMParser().parseFromString(
+      "<form><input id='email' type='email'><div id='country' role='combobox' aria-label='Country'></div></form>",
+      "text/html",
+    );
+    const snapshot = await inspectForm(doc, new URL("https://apply.example.com/form"));
+    const widget = doc.querySelector<HTMLElement>("#country")!;
+    const widgetClick = vi.fn();
+    widget.addEventListener("click", widgetClick);
+
+    const results = await applyFillPlan({
+      protocolVersion: 1,
+      snapshotFingerprint: snapshot.fingerprint,
+      instructions: [{ fieldId: "email", value: "safe@example.test", classification: "safe_verified" }],
+    }, snapshot.fingerprint, doc, [], undefined, { settleDelaysMs: [] });
+
+    expect(results).toHaveLength(1);
+    expect(results[0]).toMatchObject({ fieldId: "email", status: "verified" });
+    expect(widgetClick).not.toHaveBeenCalled();
+    expect(widget.textContent).toBe("");
   });
 
   it("detects form drift before any fill", async () => {

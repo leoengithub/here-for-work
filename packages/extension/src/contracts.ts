@@ -29,6 +29,7 @@ export interface FormField {
 
 export type FormFlowIssue =
   | "authentication_required"
+  | "active_antibot_challenge"
   | "captcha_or_antibot"
   | "custom_widget"
   | "embedded_frame"

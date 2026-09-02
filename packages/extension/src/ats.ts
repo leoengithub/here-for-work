@@ -84,7 +84,7 @@ export function isControlVisible(element: Element): boolean {
 }
 
 function flowIssuePriority(issue: FormFlowIssue): number {
-  return ["authentication_required", "captcha_or_antibot"].includes(issue) ? 2 : 1;
+  return ["authentication_required", "active_antibot_challenge", "captcha_or_antibot", "custom_widget"].includes(issue) ? 2 : 1;
 }
 
 function flowIssues(doc: Document, nativeControls: Array<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>, customControls: HTMLElement[]): FormFlowIssue[] {
@@ -97,10 +97,14 @@ function flowIssues(doc: Document, nativeControls: Array<HTMLInputElement | HTML
     "[data-sitekey], [class*='captcha' i], [id*='captcha' i], iframe[src*='captcha' i], iframe[title*='challenge' i]",
   )).some((element) => isControlVisible(element));
   if (captcha) issues.add("captcha_or_antibot");
+  const activeAntibot = Array.from(doc.querySelectorAll<HTMLElement | HTMLIFrameElement>(
+    "[aria-modal='true'] iframe[title*='challenge' i], dialog[open] iframe[title*='challenge' i], [data-hfw-active-antibot='true']",
+  )).some((element) => isControlVisible(element));
+  if (activeAntibot) issues.add("active_antibot_challenge");
   const relevantFrame = Array.from(doc.querySelectorAll<HTMLIFrameElement>("iframe")).some((frame) => {
     if (!isControlVisible(frame)) return false;
     const identity = `${frame.src} ${frame.title} ${frame.name}`.toLowerCase();
-    return /apply|application|job|form|captcha|challenge/.test(identity);
+    return /apply|application|job|form/.test(identity) && !/captcha|challenge/.test(identity);
   });
   if (relevantFrame) issues.add("embedded_frame");
   if (customControls.some((control) => isControlVisible(control))) issues.add("custom_widget");

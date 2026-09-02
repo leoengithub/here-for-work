@@ -468,6 +468,7 @@ fn validate_form_snapshot(value: Value) -> Result<FormSnapshot, &'static str> {
             !matches!(
                 issue.as_str(),
                 "authentication_required"
+                    | "active_antibot_challenge"
                     | "captcha_or_antibot"
                     | "custom_widget"
                     | "embedded_frame"
@@ -483,7 +484,10 @@ fn validate_form_snapshot(value: Value) -> Result<FormSnapshot, &'static str> {
             && !snapshot.flow.issues.iter().any(|issue| {
                 matches!(
                     issue.as_str(),
-                    "authentication_required" | "captcha_or_antibot"
+                    "authentication_required"
+                        | "active_antibot_challenge"
+                        | "captcha_or_antibot"
+                        | "custom_widget"
                 )
             }))
         || snapshot.fingerprint.len() != 64
