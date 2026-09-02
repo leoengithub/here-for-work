@@ -487,15 +487,11 @@ impl CareerOpsCapabilityId {
 
     fn permits_status(self, status: CareerOpsCapabilityStatus) -> bool {
         match self {
-            Self::DiscoveryReverseAtsRunV1 | Self::DiscoveryCompanyAtsPreviewV1 => matches!(
+            Self::DiscoveryReverseAtsRunV1
+            | Self::DiscoveryCompanyAtsPreviewV1
+            | Self::EvaluationResultReadV1 => matches!(
                 status,
                 CareerOpsCapabilityStatus::Degraded | CareerOpsCapabilityStatus::Unavailable
-            ),
-            Self::EvaluationResultReadV1 => matches!(
-                status,
-                CareerOpsCapabilityStatus::Supported
-                    | CareerOpsCapabilityStatus::Degraded
-                    | CareerOpsCapabilityStatus::Unavailable
             ),
             Self::LivenessRoleReadV1
             | Self::EvaluationFullAgRunV1
@@ -724,7 +720,6 @@ impl CareerOpsCapabilityManifest {
             "capabilities.get",
             "health.check",
             "history.snapshot",
-            "evaluation.result.read",
             "profile.queue_filters.get",
             "preparation.context.get",
             "preparation.result.recover",
@@ -891,7 +886,6 @@ mod capability_manifest_tests {
                 "capabilities.get",
                 "health.check",
                 "history.snapshot",
-                "evaluation.result.read",
                 "profile.queue_filters.get",
                 "preparation.context.get",
                 "preparation.result.recover",
@@ -935,7 +929,7 @@ mod capability_manifest_tests {
                     "requires_exact_upstream_revision", "requires_atomic_evaluation_receipt",
                     "native_score_1_to_5"
                 ])),
-                capability("evaluation.result.read.v1", "supported", "conditional", json!([
+                capability("evaluation.result.read.v1", "degraded", "conditional", json!([
                     "requires_exact_upstream_revision", "requires_safe_shape_probe",
                     "native_score_1_to_5", "requires_report_tracker_identity"
                 ])),

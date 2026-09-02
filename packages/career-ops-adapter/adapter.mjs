@@ -37,7 +37,6 @@ const operations = Object.freeze([
   "capabilities.get",
   "health.check",
   "history.snapshot",
-  "evaluation.result.read",
   "profile.queue_filters.get",
   "preparation.context.get",
   "preparation.result.recover",
@@ -299,6 +298,12 @@ async function capabilityManifest() {
     "Wait for an upstream-neutral typed execution and receipt interface.",
   );
   addDiagnostic(
+    "safe_shape_probe_required",
+    "evaluation.result.read.v1",
+    "Report and tracker data exist, but no strict complete-result reconciliation probe is installed.",
+    "Add a revision-pinned strict parser that validates report sections, native score, and tracker identity.",
+  );
+  addDiagnostic(
     "structured_provenance_unavailable",
     "artifacts.inspect.v1",
     "career-ops does not expose structured artifact identity, provenance, and freshness.",
@@ -348,7 +353,7 @@ async function capabilityManifest() {
       "requires_atomic_evaluation_receipt",
       "native_score_1_to_5",
     ]),
-    capability("evaluation.result.read.v1", "supported", "conditional", revision, [
+    capability("evaluation.result.read.v1", "degraded", "conditional", revision, [
       "requires_exact_upstream_revision",
       "requires_safe_shape_probe",
       "native_score_1_to_5",
@@ -464,204 +469,6 @@ async function runCareerOpsScript(scriptName, args, extraEnv = {}) {
 
 function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
-}
-
-function safeText(value, label, maxLength = 500) {
-  if (typeof value !== "string") throw new Error(`${label} must be a string.`);
-  const trimmed = value.trim();
-  if (!trimmed || trimmed.length > maxLength) throw new Error(`${label} is outside its size bounds.`);
-  return trimmed;
-}
-
-function normalizeComparable(value) {
-  return value
-    .normalize("NFKD")
-    .replace(/[^\p{L}\p{N}]+/gu, " ")
-    .trim()
-    .toLowerCase();
-}
-
-function parseTrackerNativeScore(value) {
-  if (typeof value !== "string") throw new Error("tracker score must be a string.");
-  const match = value.trim().match(/^([1-5](?:\.\d+)?)\/5$/);
-  if (!match) throw new Error("tracker score must use the native 1-5 grammar.");
-  const score = Number(match[1]);
-  if (!Number.isFinite(score) || score < 1 || score > 5) throw new Error("tracker score is outside the native 1-5 range.");
-  return score;
-}
-
-function reportSectionNames(markdown) {
-  return [...markdown.matchAll(/^##\s+([^\n]+)$/gm)].map((match) => match[1].trim());
-}
-
-function requireReportHeadings(markdown) {
-  for (const heading of ["## Machine Summary", "## A)", "## B)", "## C)", "## D)", "## E)", "## F)", "## G)", "## Risk Summary"]) {
-    if (!markdown.includes(heading)) throw new Error(`report omitted required heading ${heading}.`);
-  }
-  if (!markdown.includes("## Extracted Keywords") && !markdown.includes("## Keywords extracted")) {
-    throw new Error("report omitted the required extracted-keywords heading.");
-  }
-}
-
-function extractHeaderValue(markdown, label) {
-  const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const match = markdown.match(new RegExp(`^\\*\\*${escaped}:\\*\\*\\s*(.+)$`, "m"));
-  return match ? match[1].trim() : null;
-}
-
-function extractMachineSummaryYaml(markdown) {
-  const match = markdown.match(/## Machine Summary\s*\n\s*```yaml\s*\n([\s\S]*?)\n```\s*/);
-  if (!match) throw new Error("report omitted the fenced Machine Summary YAML block.");
-  let document;
-  try {
-    document = parseDocument(match[1], {
-      schema: "core",
-      merge: false,
-      uniqueKeys: true,
-      maxAliasCount: 0,
-    });
-  } catch {
-    throw new Error("report Machine Summary YAML is invalid.");
-  }
-  if (document.errors.length > 0) throw new Error("report Machine Summary YAML is invalid.");
-  const value = document.toJS({ maxAliasCount: 0 });
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error("report Machine Summary must decode to an object.");
-  }
-  const allowedKeys = new Set([
-    "company",
-    "role",
-    "score",
-    "legitimacy_tier",
-    "archetype",
-    "final_decision",
-    "hard_stops",
-    "soft_gaps",
-    "top_strengths",
-    "risk_level",
-    "confidence",
-    "next_action",
-    "authorization_confidence",
-    "authorization_evidence",
-    "authorization_scope",
-    "engagement_mechanism",
-    "authorization_question",
-    "work_auth",
-    "discard_reasons",
-    "via",
-    "company_confidential",
-    "advertised_comp",
-    "reports_to",
-    "risk_summary",
-  ]);
-  if (Object.keys(value).some((key) => !allowedKeys.has(key))) {
-    throw new Error("report Machine Summary contains an unknown field.");
-  }
-  return value;
-}
-
-function requireStringArray(value, key, { minItems = 0, maxItems = 12 } = {}) {
-  if (!Array.isArray(value)) throw new Error(`Machine Summary ${key} must be an array.`);
-  const cleaned = value.map((entry) => safeText(entry, `Machine Summary ${key} entry`, 500));
-  if (cleaned.length < minItems || cleaned.length > maxItems) {
-    throw new Error(`Machine Summary ${key} has the wrong item count.`);
-  }
-  return cleaned;
-}
-
-function parseEvaluationResult(markdown, tracker) {
-  requireReportHeadings(markdown);
-  const headerMatch = markdown.match(/^# Evaluation:\s+(.+?)\s+—\s+(.+)$/m);
-  if (!headerMatch) throw new Error("report heading is invalid.");
-  const headerCompany = safeText(headerMatch[1], "report company");
-  const headerTitle = safeText(headerMatch[2], "report title");
-  const machineSummary = extractMachineSummaryYaml(markdown);
-  const company = safeText(machineSummary.company, "Machine Summary company");
-  const title = safeText(machineSummary.role, "Machine Summary role");
-  if (normalizeComparable(company) !== normalizeComparable(tracker.company)
-      || normalizeComparable(company) !== normalizeComparable(headerCompany)) {
-    throw new Error("report company does not match the canonical tracker row.");
-  }
-  if (normalizeComparable(title) !== normalizeComparable(tracker.title)
-      || normalizeComparable(title) !== normalizeComparable(headerTitle)) {
-    throw new Error("report role does not match the canonical tracker row.");
-  }
-  const nativeScore = parseTrackerNativeScore(tracker.score);
-  if (typeof machineSummary.score !== "number" || !Number.isFinite(machineSummary.score)) {
-    throw new Error("Machine Summary score is invalid.");
-  }
-  if (Math.abs(machineSummary.score - nativeScore) > 0.001) {
-    throw new Error("Machine Summary score does not match the canonical tracker row.");
-  }
-  const legitimacyTier = safeText(machineSummary.legitimacy_tier, "Machine Summary legitimacy_tier", 64);
-  if (!["High Confidence", "Proceed with Caution", "Suspicious"].includes(legitimacyTier)) {
-    throw new Error("Machine Summary legitimacy_tier is invalid.");
-  }
-  const finalDecision = safeText(machineSummary.final_decision, "Machine Summary final_decision", 64);
-  if (!["Apply", "Consider", "Research first", "Skip"].includes(finalDecision)) {
-    throw new Error("Machine Summary final_decision is invalid.");
-  }
-  const authorizationConfidence = safeText(machineSummary.authorization_confidence, "Machine Summary authorization_confidence", 32);
-  if (!["excellent", "interesting", "investigate", "problem"].includes(authorizationConfidence)) {
-    throw new Error("Machine Summary authorization_confidence is invalid.");
-  }
-  const workAuth = safeText(machineSummary.work_auth, "Machine Summary work_auth", 32);
-  if (!["sponsors", "not_needed", "unstated", "no_sponsorship"].includes(workAuth)) {
-    throw new Error("Machine Summary work_auth is invalid.");
-  }
-  const riskSummary = machineSummary.risk_summary;
-  if (!riskSummary || typeof riskSummary !== "object" || Array.isArray(riskSummary)) {
-    throw new Error("Machine Summary risk_summary is invalid.");
-  }
-  const risk = {
-    legitimacy: safeText(riskSummary.legitimacy, "Machine Summary risk_summary.legitimacy", 32),
-    classification: safeText(riskSummary.classification, "Machine Summary risk_summary.classification", 32),
-    culture: safeText(riskSummary.culture, "Machine Summary risk_summary.culture", 32),
-    interviewRedflags: safeText(riskSummary.interview_redflags, "Machine Summary risk_summary.interview_redflags", 32),
-    aiInfra: safeText(riskSummary.ai_infra, "Machine Summary risk_summary.ai_infra", 32),
-    aiScreeningDisclosure: safeText(riskSummary.ai_screening_disclosure, "Machine Summary risk_summary.ai_screening_disclosure", 32),
-  };
-  if (!["high_confidence", "proceed_with_caution", "suspicious"].includes(risk.legitimacy)
-      || !["clear", "flagged", "not_evaluated"].includes(risk.classification)
-      || !["pass", "caution", "fail", "not_evaluated"].includes(risk.culture)
-      || !["none", "caution", "warning", "not_evaluated"].includes(risk.interviewRedflags)
-      || !["consistent", "mismatch", "not_evaluated"].includes(risk.aiInfra)
-      || !["disclosed", "corroborating_only", "no_match", "not_evaluated"].includes(risk.aiScreeningDisclosure)) {
-    throw new Error("Machine Summary risk_summary contains an invalid value.");
-  }
-  const url = extractHeaderValue(markdown, "URL");
-  if (url && !/^https:\/\//.test(url)) throw new Error("report URL must use public HTTPS.");
-  const headerScore = extractHeaderValue(markdown, "Score");
-  if (headerScore && parseTrackerNativeScore(headerScore) !== nativeScore) {
-    throw new Error("report header score does not match the canonical tracker row.");
-  }
-  const headerLegitimacy = extractHeaderValue(markdown, "Legitimacy");
-  if (headerLegitimacy && headerLegitimacy !== legitimacyTier) {
-    throw new Error("report header legitimacy does not match Machine Summary.");
-  }
-  return {
-    contract: "hereforwork.evaluation-result",
-    schemaVersion: 1,
-    trackerId: tracker.trackerId,
-    reportPath: tracker.reportPath,
-    reportSha256: sha256(markdown),
-    company,
-    title,
-    url: url ?? null,
-    nativeScore1To5: nativeScore,
-    legitimacyTier,
-    finalDecision,
-    authorizationConfidence,
-    workAuth,
-    hardStops: requireStringArray(machineSummary.hard_stops, "hard_stops"),
-    softGaps: requireStringArray(machineSummary.soft_gaps, "soft_gaps"),
-    topStrengths: requireStringArray(machineSummary.top_strengths, "top_strengths", { minItems: 1 }),
-    advertisedComp: machineSummary.advertised_comp == null ? null : safeText(machineSummary.advertised_comp, "Machine Summary advertised_comp", 200),
-    nextAction: safeText(machineSummary.next_action, "Machine Summary next_action"),
-    authorizationQuestion: machineSummary.authorization_question == null ? null : safeText(machineSummary.authorization_question, "Machine Summary authorization_question"),
-    reportSections: reportSectionNames(markdown),
-    riskSummary: risk,
-  };
 }
 
 function canonicalJson(value) {
@@ -1725,28 +1532,6 @@ async function execute(request) {
       const records = JSON.parse(output);
       if (!Array.isArray(records)) throw new Error("career-ops returned an invalid history snapshot.");
       return { records, diagnostics: diagnostics || null };
-    }
-    case "evaluation.result.read": {
-      assertInputKeys(request.input, ["trackerId", "reportPath", "company", "title", "score", "status"], request.operation);
-      if (!root) throw new Error("Adapter paths are not configured.");
-      const trackerId = request.input?.trackerId;
-      if (!Number.isInteger(trackerId) || trackerId < 1) throw new Error("trackerId must be a positive integer.");
-      const reportPath = requiredText(request.input, "reportPath", 500);
-      if (!/^reports\/[A-Za-z0-9._-]+\.md$/.test(reportPath)) {
-        throw new Error("reportPath must stay within reports/ and end in .md.");
-      }
-      const tracker = {
-        trackerId,
-        reportPath,
-        company: requiredText(request.input, "company", 500),
-        title: requiredText(request.input, "title", 500),
-        score: requiredText(request.input, "score", 16),
-        status: requiredText(request.input, "status", 32),
-      };
-      if (!["Evaluated", "Applied", "Discarded"].includes(tracker.status)) {
-        throw new Error("status is not supported for evaluation.result.read.");
-      }
-      return parseEvaluationResult(await readFile(resolve(root, reportPath), "utf8"), tracker);
     }
     case "profile.queue_filters.get": {
       assertInputKeys(request.input, [], request.operation);

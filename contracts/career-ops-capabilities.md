@@ -1,6 +1,6 @@
 # career-ops capability boundary
 
-Status: version 1 manifest implemented; strict evaluation-result read implemented; discovery execution, artifact inspection, and browser fallback remain blocked
+Status: version 1 manifest implemented; discovery/evaluation/browser operations are not implemented
 Audit date: 2026-09-02
 
 This document records which existing career-ops interfaces HereForWork may safely wrap,
@@ -126,14 +126,11 @@ missing revisions from enabling a capability, and exposes the accepted manifest 
 the existing integration-health result. It does not persist the manifest or enable a new
 executor.
 
-The current probe revision keeps company-to-ATS preview degraded until a side-effect-free
-shape probe exists. Reverse-ATS remains degraded when its script is present because
-checkout-local cache writes are not isolated. Typed liveness, full A-G execution/receipt,
-artifact freshness, and browser review fallback remain unavailable. Evaluation-result read
-is supported only through a strict revision-pinned parser over an existing canonical
-tracker row plus report path: it requires the exact `## Machine Summary` fenced YAML,
-A-G plus Risk Summary and extracted-keyword headings, native tracker `X.X/5`, and
-report/company/title identity agreement. The canonical Applied writer reports degraded—not supported—when the
+The current probe revision intentionally keeps company-to-ATS preview and evaluation
+result reading degraded until safe strict result-shape probes exist. Reverse-ATS remains
+degraded when its script is present because checkout-local cache writes are not isolated.
+Typed liveness, full A-G execution/receipt, artifact freshness, and browser review fallback
+remain unavailable. The canonical Applied writer reports degraded—not supported—when the
 exact revision and all fixed writer scripts are readable: existing writes remain
 post-verified, but filename presence is not a side-effect-free semantic compatibility
 probe. Missing scripts or revision make it unavailable without removing the existing
