@@ -7156,7 +7156,7 @@ mod tests {
     }
 
     #[test]
-    fn stale_preparation_completion_preserves_applied_identity() {
+    fn stale_preparation_completion_is_rejected_after_applied() {
         let directory = tempfile::tempdir().unwrap();
         let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
         import_evaluated(&mut store, DATASET);
@@ -7197,8 +7197,7 @@ mod tests {
             .connection
             .query_row(
                 "SELECT r.canonical_tracker_id, r.canonical_status, r.preparation_state, p.status
-                   FROM roles r JOIN evaluation_sync e ON e.role_id = r.id
-                   JOIN preparation_jobs p ON p.role_id = r.id
+                   FROM roles r JOIN preparation_jobs p ON p.role_id = r.id
                   WHERE r.id = ?1",
                 [&role_id],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
