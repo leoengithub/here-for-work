@@ -30,9 +30,11 @@ The adapter computes a SHA-256 compatibility fingerprint over the exact contents
 
 The probe also requires the documented authorization markers and the tracker’s exact
 JSON projection. A caller must pass the fingerprint returned by `capabilities.get` to
-`evaluation.result.read.v1`; the adapter recomputes it before and after the read. Any
-missing source, changed source, missing Git revision, or changed fingerprint fails
-closed.
+`evaluation.result.read.v1`; the adapter recomputes it before and after the read. The
+read is usable only while the manifest has an exact 40-character upstream Git revision,
+matching capability source revision, and `degraded` status for this conditional
+capability. Any missing source, changed source, missing Git revision, unavailable
+status, or changed fingerprint fails closed.
 
 ## Operation
 

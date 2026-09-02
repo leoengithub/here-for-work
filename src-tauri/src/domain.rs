@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -493,11 +493,29 @@ pub struct EvaluationCompensation {
 #[allow(dead_code)]
 pub struct EvaluationAuthorization {
     pub confidence: String,
+    #[serde(deserialize_with = "deserialize_non_empty_evidence")]
     pub evidence: Vec<String>,
     pub scope: String,
     pub engagement_mechanism: String,
     pub question: String,
     pub legacy_work_auth: String,
+}
+
+#[allow(dead_code)]
+fn deserialize_non_empty_evidence<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let evidence = Vec::<String>::deserialize(deserializer)?;
+    if evidence.is_empty()
+        || evidence.len() > 8
+        || evidence.iter().any(|item| item.trim().is_empty() || item.len() > 2_000)
+    {
+        return Err(serde::de::Error::custom(
+            "authorization evidence must contain one to eight non-empty items",
+        ));
+    }
+    Ok(evidence)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -871,6 +889,14 @@ impl CareerOpsCapabilityManifest {
                     "capability manifest has an invalid compatibility fingerprint".to_string(),
                 );
             }
+            if capability.status == CareerOpsCapabilityStatus::Unavailable
+                && capability.compatibility_fingerprint.is_some()
+            {
+                return Err(
+                    "capability manifest exposed a fingerprint for an unavailable capability"
+                        .to_string(),
+                );
+            }
             if capability.source_revision != self.upstream_revision {
                 return Err("capability manifest mixes upstream revisions".to_string());
             }
@@ -977,7 +1003,7 @@ pub struct IntegrationHealth {
 mod capability_manifest_tests {
     use serde_json::{Value, json};
 
-    use super::CareerOpsCapabilityManifest;
+    use super::{CareerOpsCapabilityManifest, EvaluationAuthorization};
 
     fn manifest_value() -> Value {
         let revision = "a".repeat(40);
@@ -1114,5 +1140,30 @@ mod capability_manifest_tests {
         let manifest: CareerOpsCapabilityManifest =
             serde_json::from_value(value).expect("manifest deserializes");
         assert!(manifest.validate().is_err());
+    }
+
+    #[test]
+    fn capability_manifest_rejects_a_fingerprint_for_an_unavailable_capability() {
+        let mut value = manifest_value();
+        value["capabilities"][4]["status"] = json!("unavailable");
+        value["capabilities"][4]["compatibilityFingerprint"] = json!("a".repeat(64));
+        let manifest: CareerOpsCapabilityManifest =
+            serde_json::from_value(value).expect("manifest deserializes");
+
+        assert!(manifest.validate().is_err());
+    }
+
+    #[test]
+    fn evaluation_authorization_rejects_empty_evidence() {
+        let authorization = json!({
+            "confidence": "investigate",
+            "evidence": [],
+            "scope": "job-specific",
+            "engagementMechanism": "unknown",
+            "question": "Confirm the authorization path.",
+            "legacyWorkAuth": "unstated"
+        });
+
+        assert!(serde_json::from_value::<EvaluationAuthorization>(authorization).is_err());
     }
 }

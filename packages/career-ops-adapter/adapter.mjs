@@ -243,7 +243,7 @@ function capability(id, status, interfaceClass, sourceRevision, constraints, com
     interfaceClass,
     sourceRevision,
     probeRevision: CAPABILITY_PROBE_REVISION,
-    compatibilityFingerprint,
+    compatibilityFingerprint: sourceRevision && status !== "unavailable" ? compatibilityFingerprint : null,
     constraints,
   };
 }
@@ -1564,6 +1564,7 @@ function validateEvaluationReport(report, tracker) {
   strictEnum(riskSummary.ai_screening_disclosure, "risk_summary.ai_screening_disclosure", ["disclosed", "corroborating_only", "no_match", "not_evaluated"]);
   const authorizationConfidence = strictEnum(summary.authorization_confidence, "authorization_confidence", ["excellent", "interesting", "investigate", "problem"]);
   const authorizationEvidence = strictTextList(summary.authorization_evidence, "authorization_evidence", 8);
+  if (authorizationEvidence.length < 1) throw new Error("authorization_evidence must contain at least one item.");
   if (authorizationEvidence.some((item) => !/https:\/\/[^\s)]+/i.test(item))) throw new Error("authorization_evidence must include HTTPS source URLs.");
   const authorizationQuestion = strictText(summary.authorization_question, "authorization_question", 2_000);
   strictEnum(summary.authorization_scope, "authorization_scope", ["job-specific", "company-wide", "mixed", "none"]);
@@ -1636,7 +1637,11 @@ async function readEvaluationResult(input) {
   if (!/^[a-f0-9]{64}$/.test(expectedFingerprint)) throw new Error("compatibilityFingerprint must be a SHA-256 hash.");
   const before = await capabilityManifest();
   const capabilityEntry = before.capabilities.find(({ id }) => id === "evaluation.result.read.v1");
-  if (!capabilityEntry?.compatibilityFingerprint || capabilityEntry.compatibilityFingerprint !== expectedFingerprint) {
+  if (!GIT_SHA_RE.test(before.upstreamRevision ?? "")
+      || capabilityEntry?.sourceRevision !== before.upstreamRevision
+      || capabilityEntry?.status !== "degraded"
+      || !capabilityEntry.compatibilityFingerprint
+      || capabilityEntry.compatibilityFingerprint !== expectedFingerprint) {
     throw new Error("The career-ops evaluation result format is unavailable or has drifted.");
   }
   const report = await reportFile(input.reportPath);
@@ -1651,7 +1656,12 @@ async function readEvaluationResult(input) {
   const evaluation = validateEvaluationReport(bytes.toString("utf8"), tracker);
   if (tracker.company.trim() !== evaluation.company || tracker.role.trim() !== evaluation.role) throw new Error("Report and canonical tracker role identity do not match.");
   const after = await capabilityManifest();
-  if (after.upstreamRevision !== before.upstreamRevision || after.capabilities.find(({ id }) => id === "evaluation.result.read.v1")?.compatibilityFingerprint !== expectedFingerprint) {
+  const afterCapabilityEntry = after.capabilities.find(({ id }) => id === "evaluation.result.read.v1");
+  if (!GIT_SHA_RE.test(after.upstreamRevision ?? "")
+      || after.upstreamRevision !== before.upstreamRevision
+      || afterCapabilityEntry?.sourceRevision !== before.upstreamRevision
+      || afterCapabilityEntry?.status !== "degraded"
+      || afterCapabilityEntry?.compatibilityFingerprint !== expectedFingerprint) {
     throw new Error("career-ops evaluation result format changed during the read.");
   }
   const notEvaluatedRiskSignals = Object.entries(evaluation.riskSummary)

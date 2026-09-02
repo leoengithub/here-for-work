@@ -114,7 +114,7 @@ Fixture.
 Fixture.
 `;
 
-async function evaluationFixture({ report = evaluationReport, tracker = {} } = {}) {
+async function evaluationFixture({ report = evaluationReport, tracker = {}, initializeGit = true } = {}) {
   const fixtureRoot = await mkdtemp(join(tmpdir(), "hfw-evaluation-result-"));
   await mkdir(join(fixtureRoot, "batch"), { recursive: true });
   await mkdir(join(fixtureRoot, "modes"), { recursive: true });
@@ -137,17 +137,19 @@ if (process.argv.includes("--json")) process.stdout.write(JSON.stringify([row]))
   const reportPath = join(fixtureRoot, "reports/007-example.md");
   await mkdir(join(fixtureRoot, "reports"), { recursive: true });
   await writeFile(reportPath, report);
-  for (const [command, args] of [
-    ["git", ["init", "--quiet"]],
-    ["git", ["add", "."]],
-    ["git", ["-c", "user.name=HereForWork Test", "-c", "user.email=test@hereforwork.local", "commit", "--quiet", "-m", "fixture"]],
-  ]) {
-    const result = await runCommand(command, args, fixtureRoot);
-    assert.equal(result.status, 0, result.stderr);
+  if (initializeGit) {
+    for (const [command, args] of [
+      ["git", ["init", "--quiet"]],
+      ["git", ["add", "."]],
+      ["git", ["-c", "user.name=HereForWork Test", "-c", "user.email=test@hereforwork.local", "commit", "--quiet", "-m", "fixture"]],
+    ]) {
+      const result = await runCommand(command, args, fixtureRoot);
+      assert.equal(result.status, 0, result.stderr);
+    }
   }
   const capabilities = await request({ id: "evaluation-capabilities", protocolVersion: 1, operation: "capabilities.get", input: {} }, { HFW_CAREER_OPS_ROOT: fixtureRoot });
   const compatibilityFingerprint = capabilities.result.capabilities.find(({ id }) => id === "evaluation.result.read.v1").compatibilityFingerprint;
-  assert.match(compatibilityFingerprint, /^[a-f0-9]{64}$/);
+  if (initializeGit) assert.match(compatibilityFingerprint, /^[a-f0-9]{64}$/);
   const reportBytes = Buffer.from(report);
   return {
     root: fixtureRoot,
@@ -316,6 +318,19 @@ test("evaluation result read returns a typed, native-score projection", async ()
   assert.equal(response.result.evaluation.authorization.evidence.length, 1);
 });
 
+test("evaluation result read fails closed without an exact upstream revision", async () => {
+  const fixture = await evaluationFixture({ initializeGit: false });
+  const capabilities = await request({ id: "evaluation-capabilities", protocolVersion: 1, operation: "capabilities.get", input: {} }, fixture.env);
+  const readCapability = capabilities.result.capabilities.find(({ id }) => id === "evaluation.result.read.v1");
+  assert.equal(capabilities.result.upstreamRevision, null);
+  assert.equal(readCapability.status, "unavailable");
+  assert.equal(readCapability.compatibilityFingerprint, null);
+  assert.equal((await readEvaluation(fixture, {
+    ...fixture.input,
+    compatibilityFingerprint: "a".repeat(64),
+  })).ok, false);
+});
+
 test("evaluation result read rejects the fail-closed fixture matrix", async () => {
   const cases = [
     ["missing A-G section", evaluationReport.replace("## D) Compensation and Demand", "## D-omitted Compensation and Demand")],
@@ -323,6 +338,7 @@ test("evaluation result read rejects the fail-closed fixture matrix", async () =
     ["out-of-range score", evaluationReport.replace("score: 4.2", "score: 6")],
     ["advisory rank cannot become canonical score", evaluationReport.replace("score: 4.2", "rank: 0.99\nscore: 4.2")],
     ["malformed YAML", evaluationReport.replace("authorization_confidence: investigate", "authorization_confidence: [investigate")],
+    ["empty authorization evidence", evaluationReport.replace("authorization_evidence:\n  - Authorization details are not stated; verify with the employer at https://jobs.example.test/roles/7.", "authorization_evidence: []")],
   ];
   for (const [label, report] of cases) {
     const fixture = await evaluationFixture({ report });
