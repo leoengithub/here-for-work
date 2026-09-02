@@ -2649,11 +2649,12 @@ impl Store {
         let transaction = self.connection.transaction()?;
         let cleared = transaction.execute(
             "UPDATE roles SET canonical_tracker_id = NULL, canonical_status = NULL, canonical_date = NULL
-             WHERE canonical_tracker_id IS NOT NULL",
+             WHERE canonical_tracker_id IS NOT NULL
+               AND COALESCE(canonical_status, '') != 'Applied'",
             [],
         )?;
-        let mut role_statement =
-            transaction.prepare("SELECT id, company, title, application_url FROM roles")?;
+        let mut role_statement = transaction
+            .prepare("SELECT id, company, title, application_url, canonical_status FROM roles")?;
         let roles = role_statement
             .query_map([], |row| {
                 Ok((
@@ -2661,16 +2662,23 @@ impl Store {
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
                     row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
         drop(role_statement);
 
         let mut matched = 0;
-        for (role_id, company, title, application_url) in roles {
+        for (role_id, company, title, application_url, current_status) in roles {
             if let Some(record) =
                 deterministic_history_match(records, &company, &title, application_url.as_deref())
             {
+                // Applied is a monotonic terminal outcome. History reads are intentionally
+                // bounded, so an omitted row or an older/non-terminal record cannot demote it.
+                if current_status.as_deref() == Some("Applied") && record.status != "Applied" {
+                    matched += 1;
+                    continue;
+                }
                 transaction.execute(
                     "UPDATE roles SET canonical_tracker_id = ?1, canonical_status = ?2, canonical_date = ?3,
                        canonical_visibility_override = CASE
@@ -2709,7 +2717,9 @@ impl Store {
             }
         }
         transaction.execute(
-            "UPDATE roles SET canonical_visibility_override = 0 WHERE canonical_tracker_id IS NULL",
+            "UPDATE roles SET canonical_visibility_override = 0
+              WHERE canonical_tracker_id IS NULL
+                AND COALESCE(canonical_status, '') != 'Applied'",
             [],
         )?;
         transaction.execute(
@@ -2718,8 +2728,20 @@ impl Store {
                     current_receipt_key = NULL, input_hash = NULL,
                     lease_expires_at = NULL, updated_at = ?1
               WHERE role_id IN (
-                SELECT id FROM roles WHERE canonical_tracker_id IS NULL
+                SELECT id FROM roles
+                 WHERE canonical_tracker_id IS NULL
+                   AND COALESCE(canonical_status, '') != 'Applied'
               )",
+            [Utc::now().to_rfc3339()],
+        )?;
+        transaction.execute(
+            "UPDATE evaluation_sync
+                SET state = 'terminal', reason = 'canonical_terminal',
+                    current_receipt_key = NULL, input_hash = NULL,
+                    lease_expires_at = NULL, updated_at = ?1
+              WHERE role_id IN (
+                SELECT id FROM roles WHERE canonical_status = 'Applied'
+              ) AND state != 'terminal'",
             [Utc::now().to_rfc3339()],
         )?;
         transaction.execute(
@@ -2757,15 +2779,22 @@ impl Store {
         &mut self,
         session_id: &str,
     ) -> Result<(String, AdapterEffectContext), StoreError> {
-        let (role_id, tracker_id) = self
+        let (role_id, tracker_id, session_status, canonical_status) = self
             .connection
             .query_row(
-                "SELECT b.role_id, r.canonical_tracker_id
+                "SELECT b.role_id, r.canonical_tracker_id, b.status, r.canonical_status
                FROM browser_sessions b JOIN roles r ON r.id = b.role_id
               WHERE b.id = ?1 AND b.purpose = 'application'
-                AND b.status IN ('review_required', 'submitted_tracking_pending')",
+                AND b.status IN ('review_required', 'submitted_tracking_pending', 'applied_recorded')",
                 [session_id],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?)),
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<i64>>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                    ))
+                },
             )
             .optional()?
             .ok_or_else(|| {
@@ -2776,6 +2805,46 @@ impl Store {
         let tracker_id = tracker_id.ok_or_else(|| {
             StoreError::InvalidAdapterEffect("canonical tracker row is missing".to_string())
         })?;
+        if session_status == "applied_recorded" {
+            if canonical_status.as_deref() != Some("Applied") {
+                return Err(StoreError::InvalidAdapterEffect(
+                    "recorded application is missing its canonical Applied outcome".to_string(),
+                ));
+            }
+            let completed = self
+                .connection
+                .query_row(
+                    "SELECT idempotency_key, parent_effect_key, tracker_id
+                       FROM adapter_effects
+                      WHERE role_id = ?1 AND operation = 'application.applied.confirm'
+                        AND status = 'completed' AND tracker_id = ?2
+                      ORDER BY updated_at DESC LIMIT 1",
+                    params![role_id, tracker_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, Option<String>>(1)?,
+                            row.get::<_, Option<i64>>(2)?,
+                        ))
+                    },
+                )
+                .optional()?
+                .ok_or_else(|| {
+                    StoreError::InvalidAdapterEffect(
+                        "recorded application is missing its completed canonical effect"
+                            .to_string(),
+                    )
+                })?;
+            return Ok((
+                role_id.clone(),
+                AdapterEffectContext {
+                    idempotency_key: completed.0,
+                    role: self.adapter_role_context(&role_id)?,
+                    parent_effect_key: completed.1,
+                    tracker_id: completed.2,
+                },
+            ));
+        }
         let discard_in_progress = self.connection.query_row(
             "SELECT COUNT(*) FROM adapter_effects
               WHERE role_id = ?1 AND operation = 'role.discard' AND status = 'pending'",
@@ -3614,6 +3683,22 @@ impl Store {
             ],
         )?;
         if changed != 1 {
+            let already_completed = transaction.query_row(
+                "SELECT COUNT(*)
+                   FROM adapter_effects e
+                   JOIN roles r ON r.id = e.role_id
+                   JOIN browser_sessions b ON b.role_id = r.id
+                  WHERE e.idempotency_key = ?1 AND e.role_id = ?2
+                    AND e.operation = 'application.applied.confirm'
+                    AND e.status = 'completed' AND e.tracker_id = ?3
+                    AND r.canonical_status = 'Applied'
+                    AND b.id = ?4 AND b.status = 'applied_recorded'",
+                params![idempotency_key, role_id, tracker_id, session_id],
+                |row| row.get::<_, i64>(0),
+            )? == 1;
+            if already_completed {
+                return Ok(());
+            }
             return Err(StoreError::InvalidAdapterEffect(
                 "applied effect is missing or no longer pending".to_string(),
             ));
@@ -3622,6 +3707,14 @@ impl Store {
             "UPDATE roles SET canonical_tracker_id = ?1, canonical_status = 'Applied',
                     canonical_visibility_override = 0, updated_at = ?2 WHERE id = ?3",
             params![tracker_id, Utc::now().to_rfc3339(), role_id],
+        )?;
+        transaction.execute(
+            "UPDATE evaluation_sync
+                SET state = 'terminal', reason = 'canonical_terminal',
+                    current_receipt_key = NULL, input_hash = NULL,
+                    lease_expires_at = NULL, updated_at = ?1
+              WHERE role_id = ?2",
+            params![Utc::now().to_rfc3339(), role_id],
         )?;
         transaction.execute(
             "UPDATE browser_sessions SET status = 'applied_recorded', error_code = NULL,
@@ -6682,6 +6775,221 @@ mod tests {
             .unwrap();
         let (_, applied) = store.begin_applied_effect_for_session(&session.id).unwrap();
         assert_eq!(applied.tracker_id, Some(42));
+    }
+
+    #[test]
+    fn applied_outcome_survives_bounded_and_stale_history_reconciliation() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+        let session = queue_completed_application_session(&mut store);
+        store
+            .connection
+            .execute(
+                "UPDATE browser_sessions SET status = 'review_required' WHERE id = ?1",
+                [&session.id],
+            )
+            .unwrap();
+        let (role_id, effect) = store.begin_applied_effect_for_session(&session.id).unwrap();
+        store
+            .complete_applied_effect(
+                &session.id,
+                &role_id,
+                &effect.idempotency_key,
+                42,
+                "Applied",
+            )
+            .unwrap();
+        // Simulate an Applied row written by an older HereForWork build before
+        // completion also normalized the evaluation lifecycle to terminal.
+        store
+            .connection
+            .execute(
+                "UPDATE evaluation_sync SET state = 'ready', reason = 'evaluation_current'
+                  WHERE role_id = ?1",
+                [&role_id],
+            )
+            .unwrap();
+
+        let bounded_snapshot = (0..2_000)
+            .map(|index| HistoryRecord {
+                id: 1_000 + index,
+                date: "2026-09-03".to_string(),
+                company: format!("Unrelated company {index}"),
+                role: format!("Unrelated role {index}"),
+                score: "N/A".to_string(),
+                status: "Evaluated".to_string(),
+                pdf: "—".to_string(),
+                report: "—".to_string(),
+                notes: String::new(),
+            })
+            .collect::<Vec<_>>();
+        let first = store.reconcile_history(&bounded_snapshot).unwrap();
+        assert_eq!(first.cleared, 0);
+        assert_eq!(first.matched, 0);
+
+        let stale_matching_record = HistoryRecord {
+            id: 42,
+            date: "2026-08-30".to_string(),
+            company: "Northstar Tools".to_string(),
+            role: "Frontend Engineer".to_string(),
+            score: "4.2/5".to_string(),
+            status: "Evaluated".to_string(),
+            pdf: "✅".to_string(),
+            report: "reports/042-example.md".to_string(),
+            notes: String::new(),
+        };
+        let second = store.reconcile_history(&[stale_matching_record]).unwrap();
+        assert_eq!(second.cleared, 0);
+        assert_eq!(second.matched, 1);
+        store.reconcile_history(&[]).unwrap();
+
+        let canonical = store
+            .connection
+            .query_row(
+                "SELECT canonical_tracker_id, canonical_status FROM roles WHERE id = ?1",
+                [&role_id],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<i64>>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(canonical, (Some(42), Some("Applied".to_string())));
+        let evaluation_state: (String, String) = store
+            .connection
+            .query_row(
+                "SELECT state, reason FROM evaluation_sync WHERE role_id = ?1",
+                [&role_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            evaluation_state,
+            ("terminal".to_string(), "canonical_terminal".to_string())
+        );
+        assert!(store.dashboard().unwrap().roles.is_empty());
+    }
+
+    #[test]
+    fn missing_nonterminal_history_still_requires_fresh_canonical_evaluation() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+        import_evaluated(&mut store, DATASET);
+        let role_id = store.dashboard().unwrap().roles[0].id.clone();
+        let evaluated = HistoryRecord {
+            id: 42,
+            date: "2026-08-30".to_string(),
+            company: "Northstar Tools".to_string(),
+            role: "Frontend Engineer".to_string(),
+            score: "4.2/5".to_string(),
+            status: "Evaluated".to_string(),
+            pdf: "✅".to_string(),
+            report: "reports/042-example.md".to_string(),
+            notes: String::new(),
+        };
+        store.reconcile_history(&[evaluated]).unwrap();
+
+        let result = store.reconcile_history(&[]).unwrap();
+
+        assert_eq!(result.cleared, 1);
+        let state: (Option<String>, String, String) = store
+            .connection
+            .query_row(
+                "SELECT r.canonical_status, e.state, e.reason
+                   FROM roles r JOIN evaluation_sync e ON e.role_id = r.id
+                  WHERE r.id = ?1",
+                [&role_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            state,
+            (
+                None,
+                "awaiting_evaluation".to_string(),
+                "canonical_evaluation_missing".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn applied_confirmation_is_effectively_idempotent_and_tracking_retry_never_queues_browser_work()
+    {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+        let session = queue_completed_application_session(&mut store);
+        store
+            .connection
+            .execute(
+                "UPDATE browser_sessions SET status = 'review_required' WHERE id = ?1",
+                [&session.id],
+            )
+            .unwrap();
+        let browser_commands_before: i64 = store
+            .connection
+            .query_row("SELECT COUNT(*) FROM browser_commands", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+
+        let (role_id, first) = store.begin_applied_effect_for_session(&session.id).unwrap();
+        store
+            .fail_adapter_effect(&first.idempotency_key, "canonical_write_failed")
+            .unwrap();
+        store.mark_submitted_tracking_pending(&session.id).unwrap();
+        let (retry_role_id, retry) = store.begin_applied_effect_for_session(&session.id).unwrap();
+        assert_eq!(retry_role_id, role_id);
+        assert_eq!(retry.idempotency_key, first.idempotency_key);
+        store
+            .complete_applied_effect(&session.id, &role_id, &retry.idempotency_key, 42, "Applied")
+            .unwrap();
+
+        let browser_commands_after: i64 = store
+            .connection
+            .query_row("SELECT COUNT(*) FROM browser_commands", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(browser_commands_after, browser_commands_before);
+        assert_eq!(
+            store.browser_session(&session.id).unwrap().status,
+            "applied_recorded"
+        );
+        let (duplicate_role_id, duplicate) =
+            store.begin_applied_effect_for_session(&session.id).unwrap();
+        assert_eq!(duplicate_role_id, role_id);
+        assert_eq!(duplicate.idempotency_key, retry.idempotency_key);
+        store
+            .complete_applied_effect(
+                &session.id,
+                &role_id,
+                &duplicate.idempotency_key,
+                42,
+                "Applied",
+            )
+            .unwrap();
+        let completed_effects: i64 = store
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM adapter_effects
+                  WHERE role_id = ?1 AND operation = 'application.applied.confirm'
+                    AND status = 'completed'",
+                [&role_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(completed_effects, 1);
+        let canonical_status: String = store
+            .connection
+            .query_row(
+                "SELECT canonical_status FROM roles WHERE id = ?1",
+                [&role_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(canonical_status, "Applied");
     }
 
     #[test]
