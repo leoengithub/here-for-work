@@ -2768,6 +2768,8 @@ impl Store {
                 }
                 let record_status = if is_applied_status(&record.status) {
                     "Applied"
+                } else if is_discarded_status(&record.status) {
+                    "Discarded"
                 } else {
                     record.status.as_str()
                 };
@@ -2997,8 +2999,21 @@ impl Store {
                 "the role has no application URL".to_string(),
             ));
         }
-        let existing = self
-            .connection
+        let now = Utc::now().to_rfc3339();
+        let transaction = self.connection.transaction()?;
+        let role_is_terminal = transaction.query_row(
+            "SELECT LOWER(TRIM(COALESCE(canonical_status, '')))
+                    IN ('applied', 'discarded')
+               FROM roles WHERE id = ?1",
+            [role_id],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if role_is_terminal {
+            return Err(StoreError::InvalidPreparation(
+                "the role already has a terminal canonical outcome".to_string(),
+            ));
+        }
+        let existing = transaction
             .query_row(
                 "SELECT id, provider FROM preparation_jobs
                   WHERE role_id = ?1 AND status = 'action_required'
@@ -3007,14 +3022,12 @@ impl Store {
                 |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
             )
             .optional()?;
-        let now = Utc::now().to_rfc3339();
         if let Some((id, stored_provider)) = existing {
             if stored_provider != provider {
                 return Err(StoreError::InvalidPreparation(format!(
                     "retry must use the original {stored_provider} provider"
                 )));
             }
-            let transaction = self.connection.transaction()?;
             transaction.execute(
                 "UPDATE preparation_jobs
                     SET status = 'queued', step = 'queued',
@@ -3037,7 +3050,7 @@ impl Store {
                 evaluation,
             });
         }
-        let already_active: bool = self.connection.query_row(
+        let already_active: bool = transaction.query_row(
             "SELECT EXISTS(
                SELECT 1 FROM preparation_jobs
                 WHERE role_id = ?1 AND status IN ('queued', 'preparing', 'completed')
@@ -3051,7 +3064,6 @@ impl Store {
             ));
         }
         let id = Uuid::new_v4().to_string();
-        let transaction = self.connection.transaction()?;
         transaction.execute(
             "INSERT INTO preparation_jobs(
                id, role_id, provider, status, step, attempt, created_at, updated_at
@@ -5613,8 +5625,12 @@ fn is_applied_status(status: &str) -> bool {
     status.trim().eq_ignore_ascii_case("Applied")
 }
 
+fn is_discarded_status(status: &str) -> bool {
+    status.trim().eq_ignore_ascii_case("Discarded")
+}
+
 fn is_terminal_canonical_status(status: &str) -> bool {
-    is_applied_status(status) || status.trim().eq_ignore_ascii_case("Discarded")
+    is_applied_status(status) || is_discarded_status(status)
 }
 
 fn title_matches(discovered: &str, canonical: &str) -> bool {
@@ -7106,6 +7122,100 @@ mod tests {
     }
 
     #[test]
+    fn preparation_start_and_retry_refuse_a_terminal_role() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+        import_evaluated(&mut store, DATASET);
+        let role_id = store.dashboard().unwrap().roles[0].id.clone();
+        store
+            .connection
+            .execute(
+                "UPDATE roles SET canonical_status = ' Applied ' WHERE id = ?1",
+                [&role_id],
+            )
+            .unwrap();
+
+        let error = store.begin_preparation(&role_id, "codex").unwrap_err();
+        assert!(error.to_string().contains("terminal canonical outcome"));
+        let job_count: i64 = store
+            .connection
+            .query_row("SELECT COUNT(*) FROM preparation_jobs", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(job_count, 0);
+
+        store
+            .connection
+            .execute(
+                "UPDATE roles SET canonical_status = 'Evaluated' WHERE id = ?1",
+                [&role_id],
+            )
+            .unwrap();
+        let preparation = queue_and_claim(&mut store, &role_id, "codex");
+        store
+            .fail_preparation(
+                &preparation.id,
+                "provider_failed",
+                "preparing_report",
+                "test failure",
+            )
+            .unwrap();
+        store
+            .connection
+            .execute(
+                "UPDATE roles SET canonical_status = 'Discarded' WHERE id = ?1",
+                [&role_id],
+            )
+            .unwrap();
+
+        let error = store.begin_preparation(&role_id, "codex").unwrap_err();
+        assert!(error.to_string().contains("terminal canonical outcome"));
+        let status: String = store
+            .connection
+            .query_row(
+                "SELECT status FROM preparation_jobs WHERE id = ?1",
+                [&preparation.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "action_required");
+    }
+
+    #[test]
+    fn discarded_history_variants_are_normalized_and_terminal() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+        import_evaluated(&mut store, DATASET);
+        let role_id = store.dashboard().unwrap().roles[0].id.clone();
+        let discarded = HistoryRecord {
+            id: 42,
+            date: "2026-09-03".to_string(),
+            company: "Northstar Tools".to_string(),
+            role: "Frontend Engineer".to_string(),
+            score: "4.2/5".to_string(),
+            status: " dIsCaRdEd ".to_string(),
+            pdf: "—".to_string(),
+            report: "reports/042-example.md".to_string(),
+            notes: String::new(),
+        };
+
+        store.reconcile_history(&[discarded]).unwrap();
+
+        let state: (String, String) = store
+            .connection
+            .query_row(
+                "SELECT r.canonical_status, e.state
+                   FROM roles r JOIN evaluation_sync e ON e.role_id = r.id
+                  WHERE r.id = ?1",
+                [&role_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(state, ("Discarded".to_string(), "terminal".to_string()));
+    }
+
+    #[test]
     fn stale_evaluation_completion_cannot_overwrite_applied() {
         let directory = tempfile::tempdir().unwrap();
         let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
@@ -7383,7 +7493,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_19_normalizes_legacy_applied_status_and_lifecycle() {
+    fn schema_20_normalizes_legacy_applied_status_and_lifecycle() {
         let directory = tempfile::tempdir().unwrap();
         let database = directory.path().join("test.sqlite3");
         let mut store = Store::open(&database).unwrap();
@@ -7407,7 +7517,7 @@ mod tests {
             .unwrap();
         store
             .connection
-            .execute("UPDATE schema_meta SET version = 18", [])
+            .execute("UPDATE schema_meta SET version = 19", [])
             .unwrap();
         drop(store);
 
@@ -7428,7 +7538,7 @@ mod tests {
                 "Applied".to_string(),
                 "terminal".to_string(),
                 "canonical_terminal".to_string(),
-                19
+                20
             )
         );
     }
