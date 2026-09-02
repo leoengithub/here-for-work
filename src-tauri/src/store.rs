@@ -20,6 +20,7 @@ use crate::domain::{
 const SCHEMA_VERSION: i64 = 17;
 const MAX_RUN_ATTEMPTS: i64 = 3;
 const MAX_BROWSER_COMMAND_ATTEMPTS: i64 = 3;
+const MAX_EVALUATION_SYNC_ATTEMPTS: i64 = 3;
 const MAX_ACTIVE_PREPARATIONS: i64 = 2;
 const EVALUATION_LEASE_SECONDS: i64 = 120;
 const RUN_STEPS: [&str; 3] = ["discover", "reconcile", "notify"];
@@ -655,7 +656,7 @@ impl Store {
             .execute(
                 "UPDATE evaluation_sync
                     SET state = 'awaiting_evaluation', reason = 'evaluation_sync_lease_expired',
-                        current_receipt_key = NULL, lease_expires_at = NULL, updated_at = ?1
+                        lease_expires_at = NULL, updated_at = ?1
                   WHERE state = 'syncing' AND lease_expires_at < ?1",
                 [&now],
             )
@@ -667,6 +668,11 @@ impl Store {
         upstream_revision: Option<&str>,
         compatibility_fingerprint: Option<&str>,
     ) -> Result<usize, StoreError> {
+        let (Some(upstream_revision), Some(compatibility_fingerprint)) =
+            (upstream_revision, compatibility_fingerprint)
+        else {
+            return Ok(0);
+        };
         let now = Utc::now().to_rfc3339();
         self.connection
             .execute(
@@ -686,6 +692,22 @@ impl Store {
             .map_err(StoreError::from)
     }
 
+    pub fn mark_evaluation_sync_unavailable(
+        &mut self,
+        role_id: &str,
+        reason: &str,
+    ) -> Result<(), StoreError> {
+        let reason = sanitize_evaluation_reason(reason);
+        self.connection.execute(
+            "UPDATE evaluation_sync
+                SET state = 'needs_attention', reason = ?1,
+                    attempt = 0, lease_expires_at = NULL, updated_at = ?2
+              WHERE role_id = ?3 AND state <> 'terminal'",
+            params![reason, Utc::now().to_rfc3339(), role_id],
+        )?;
+        Ok(())
+    }
+
     pub fn claim_evaluation_sync(
         &mut self,
         role_id: &str,
@@ -695,27 +717,30 @@ impl Store {
         let now = Utc::now();
         let current = transaction
             .query_row(
-                "SELECT state, input_hash, lease_expires_at FROM evaluation_sync WHERE role_id = ?1",
+                "SELECT state, input_hash, lease_expires_at, attempt
+                   FROM evaluation_sync WHERE role_id = ?1",
                 [role_id],
                 |row| {
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, Option<String>>(1)?,
                         row.get::<_, Option<String>>(2)?,
+                        row.get::<_, i64>(3)?,
                     ))
                 },
             )
             .optional()?;
-        let Some((state, stored_hash, lease)) = current else {
+        let Some((state, stored_hash, lease, attempt)) = current else {
             return Err(StoreError::InvalidPreparation(
                 "role has no evaluation lifecycle".to_string(),
             ));
         };
         if state == "terminal"
-            || matches!(
-                state.as_str(),
-                "ready" | "needs_decision" | "hidden" | "needs_attention"
-            ) && stored_hash.as_deref() == Some(input_hash)
+            || matches!(state.as_str(), "ready" | "needs_decision" | "hidden")
+                && stored_hash.as_deref() == Some(input_hash)
+            || state == "needs_attention"
+                && stored_hash.as_deref() == Some(input_hash)
+                && attempt >= MAX_EVALUATION_SYNC_ATTEMPTS
         {
             return Ok(false);
         }
@@ -730,7 +755,8 @@ impl Store {
         transaction.execute(
             "UPDATE evaluation_sync
                 SET state = 'syncing', reason = 'evaluation_result_read_pending',
-                    attempt = attempt + 1, input_hash = ?1, current_receipt_key = NULL,
+                    attempt = CASE WHEN input_hash = ?1 THEN attempt + 1 ELSE 1 END,
+                    input_hash = ?1,
                     lease_expires_at = ?2, updated_at = ?3
               WHERE role_id = ?4",
             params![
@@ -2457,7 +2483,7 @@ impl Store {
               JOIN evaluation_receipts receipt
                  ON receipt.receipt_key = evaluation.current_receipt_key
               WHERE evaluation.role_id = ?1
-                AND evaluation.state = 'ready'
+                AND evaluation.state IN ('ready', 'needs_decision')
              )",
             [role_id],
             |row| row.get::<_, bool>(0),
@@ -2838,46 +2864,6 @@ impl Store {
                 },
                 now
             ],
-        )?;
-        transaction.commit()?;
-        Ok(())
-    }
-
-    pub fn hold_preparation_for_decision(
-        &mut self,
-        preparation_id: &str,
-        reason: &str,
-    ) -> Result<(), StoreError> {
-        let now = Utc::now().to_rfc3339();
-        let transaction = self.connection.transaction()?;
-        let role_id = transaction
-            .query_row(
-                "SELECT role_id FROM preparation_jobs WHERE id = ?1 AND status = 'preparing'",
-                [preparation_id],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()?
-            .ok_or_else(|| {
-                StoreError::InvalidPreparation(
-                    "preparation is missing or no longer active".to_string(),
-                )
-            })?;
-        transaction.execute(
-            "UPDATE preparation_jobs SET status = 'cancelled', step = 'needs_decision',
-                    error_class = ?1, error_stage = NULL, error_detail = NULL,
-                    retry_policy = NULL,
-                    updated_at = ?2 WHERE id = ?3",
-            params![reason, now, preparation_id],
-        )?;
-        transaction.execute(
-            "UPDATE roles SET preparation_state = 'not_started', queue_group = 'needs_decision',
-                    updated_at = ?1 WHERE id = ?2",
-            params![now, role_id],
-        )?;
-        transaction.execute(
-            "INSERT INTO activity(id, kind, message, occurred_at)
-             VALUES (?1, 'preparation', 'Preparation stopped before artifact generation because the role needs a decision.', ?2)",
-            params![Uuid::new_v4().to_string(), now],
         )?;
         transaction.commit()?;
         Ok(())
@@ -5006,7 +4992,7 @@ fn missed_nominal_times(
 
 #[cfg(test)]
 mod tests {
-    use super::{PreparationCompletion, QueueFilters, Store};
+    use super::{MAX_EVALUATION_SYNC_ATTEMPTS, PreparationCompletion, QueueFilters, Store};
     use crate::domain::{
         BrowserSessionSummary, EvaluationResultRead, HistoryRecord, ImportResult, PreparationWork,
         QueueGroup,
@@ -5266,10 +5252,129 @@ mod tests {
             assert_eq!(dashboard.handled_count, expected_handled);
             if decision == "Research first" {
                 assert_eq!(dashboard.roles[0].queue_group, QueueGroup::NeedsDecision);
-                let error = store.begin_preparation(&role.role_id, "codex").unwrap_err();
-                assert!(error.to_string().contains("awaiting a current canonical"));
+                assert!(store.begin_preparation(&role.role_id, "codex").is_ok());
             }
         }
+    }
+
+    #[test]
+    fn transient_probe_unavailability_preserves_and_recovers_the_current_receipt() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+        store.import_dataset(DATASET).unwrap();
+        let role = store.evaluation_sync_roles().unwrap().remove(0);
+        let input_hash = format!("probe:{}", role.source_identity_hash);
+        assert!(
+            store
+                .claim_evaluation_sync(&role.role_id, &input_hash)
+                .unwrap()
+        );
+        let evaluation = test_evaluation(&role, "Apply", "High Confidence", "High");
+        store
+            .complete_evaluation_sync(&role, &input_hash, &evaluation)
+            .unwrap();
+        let receipt_before = store
+            .connection
+            .query_row(
+                "SELECT current_receipt_key FROM evaluation_sync WHERE role_id = ?1",
+                [&role.role_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .unwrap();
+        assert!(receipt_before.is_some());
+
+        assert_eq!(
+            store
+                .invalidate_evaluation_compatibility(None, None)
+                .unwrap(),
+            0
+        );
+        store
+            .mark_evaluation_sync_unavailable(
+                &role.role_id,
+                "evaluation_result_capability_unavailable",
+            )
+            .unwrap();
+        let receipt_during_outage = store
+            .connection
+            .query_row(
+                "SELECT current_receipt_key FROM evaluation_sync WHERE role_id = ?1",
+                [&role.role_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .unwrap();
+        assert_eq!(receipt_during_outage, receipt_before);
+        assert!(store.dashboard().unwrap().roles.is_empty());
+
+        assert!(
+            store
+                .claim_evaluation_sync(&role.role_id, &input_hash)
+                .unwrap()
+        );
+        store
+            .complete_evaluation_sync(&role, &input_hash, &evaluation)
+            .unwrap();
+        assert_eq!(store.dashboard().unwrap().roles.len(), 1);
+        assert_eq!(
+            store
+                .connection
+                .query_row("SELECT COUNT(*) FROM evaluation_receipts", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn transient_read_failures_retry_the_same_input_with_a_bounded_attempt_budget() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+        store.import_dataset(DATASET).unwrap();
+        let role = store.evaluation_sync_roles().unwrap().remove(0);
+        let input_hash = format!("retry:{}", role.source_identity_hash);
+
+        for expected_attempt in 1..=MAX_EVALUATION_SYNC_ATTEMPTS {
+            assert!(
+                store
+                    .claim_evaluation_sync(&role.role_id, &input_hash)
+                    .unwrap()
+            );
+            store
+                .hold_evaluation(
+                    &role.role_id,
+                    "needs_attention",
+                    "evaluation_result_invalid_or_stale",
+                )
+                .unwrap();
+            let attempt = store
+                .connection
+                .query_row(
+                    "SELECT attempt FROM evaluation_sync WHERE role_id = ?1",
+                    [&role.role_id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap();
+            assert_eq!(attempt, expected_attempt);
+        }
+        assert!(
+            !store
+                .claim_evaluation_sync(&role.role_id, &input_hash)
+                .unwrap()
+        );
+        assert!(
+            store
+                .claim_evaluation_sync(&role.role_id, "changed-input")
+                .unwrap()
+        );
+        let reset_attempt = store
+            .connection
+            .query_row(
+                "SELECT attempt FROM evaluation_sync WHERE role_id = ?1",
+                [&role.role_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
+        assert_eq!(reset_attempt, 1);
     }
 
     #[test]
@@ -6507,15 +6612,13 @@ mod tests {
     }
 
     #[test]
-    fn cancelled_and_needs_decision_preparations_do_not_queue_failure_outcomes() {
+    fn cancelled_preparations_do_not_queue_failure_outcomes() {
         let directory = tempfile::tempdir().unwrap();
         let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
         import_evaluated(&mut store, DATASET);
         let role_id = store.dashboard().unwrap().roles[0].id.clone();
         let first = queue_and_claim(&mut store, &role_id, "codex");
-        store
-            .hold_preparation_for_decision(&first.id, "preparation_gate_needs_decision")
-            .unwrap();
+        store.cancel_preparation(&first.id).unwrap();
         let second = queue_and_claim(&mut store, &role_id, "claude");
         store.cancel_preparation(&second.id).unwrap();
         let outcome_count: i64 = store.connection.query_row(

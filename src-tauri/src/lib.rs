@@ -339,12 +339,11 @@ async fn run_provider_probe(
 
 enum PreparationGate {
     Proceed,
-    NeedsDecision(&'static str),
     Discard(&'static str),
 }
 
 fn preparation_gate(result: &serde_json::Value) -> Result<PreparationGate, String> {
-    let score = result
+    let _score = result
         .get("score")
         .and_then(serde_json::Value::as_f64)
         .ok_or("Provider result omitted its match score")?;
@@ -364,11 +363,6 @@ fn preparation_gate(result: &serde_json::Value) -> Result<PreparationGate, Strin
     if legitimacy == "Suspicious" {
         return Ok(PreparationGate::Discard(
             "Preparation stopped because career-ops found a legitimacy blocker.",
-        ));
-    }
-    if score < 4.0 {
-        return Ok(PreparationGate::NeedsDecision(
-            "Preparation stopped before creating files because the verified match score is below 4.0.",
         ));
     }
     Ok(PreparationGate::Proceed)
@@ -607,23 +601,6 @@ fn process_preparation_work(app: &tauri::AppHandle, work: PreparationWork) -> Re
     })?;
     match gate {
         PreparationGate::Proceed => {}
-        PreparationGate::NeedsDecision(message) => {
-            let mut store = state
-                .store
-                .lock()
-                .map_err(|_| "Operational store lock was poisoned".to_string())?;
-            store
-                .hold_preparation_for_decision(&work.id, "preparation_gate_needs_decision")
-                .map_err(|error| error.to_string())?;
-            drop(store);
-            let _ = app
-                .notification()
-                .builder()
-                .title("Role needs your decision")
-                .body(message)
-                .show();
-            return Ok(());
-        }
         PreparationGate::Discard(message) => {
             {
                 let mut store = state
@@ -1716,9 +1693,8 @@ fn sync_evaluations_internal(state: &AppState) -> Result<EvaluationSyncResult, S
                     result.terminal += 1;
                 } else {
                     store
-                        .hold_evaluation(
+                        .mark_evaluation_sync_unavailable(
                             &role.role_id,
-                            "awaiting_evaluation",
                             "canonical_history_unavailable",
                         )
                         .map_err(|error| error.to_string())?;
@@ -1800,9 +1776,8 @@ fn sync_evaluations_with_records(
                 result.terminal += 1;
             } else {
                 store
-                    .hold_evaluation(
+                    .mark_evaluation_sync_unavailable(
                         &role.role_id,
-                        "needs_attention",
                         "evaluation_result_capability_unavailable",
                     )
                     .map_err(|error| error.to_string())?;
@@ -2524,7 +2499,7 @@ mod tests {
     }
 
     #[test]
-    fn preparation_gate_holds_low_match_scores_before_artifacts() {
+    fn preparation_gate_allows_an_explicitly_requested_low_match_score() {
         let result = serde_json::json!({
             "score": 3.9,
             "legitimacy": "High Confidence",
@@ -2532,7 +2507,7 @@ mod tests {
         });
         assert!(matches!(
             super::preparation_gate(&result).unwrap(),
-            PreparationGate::NeedsDecision(_)
+            PreparationGate::Proceed
         ));
     }
 
