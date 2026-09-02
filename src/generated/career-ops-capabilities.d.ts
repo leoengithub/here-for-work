@@ -9,6 +9,7 @@ export type Operation =
   | "capabilities.get"
   | "health.check"
   | "history.snapshot"
+  | "evaluation.result.read"
   | "profile.queue_filters.get"
   | "preparation.context.get"
   | "preparation.result.recover"
@@ -57,10 +58,11 @@ export interface HereForWorkCareerOpsCapabilityManifest {
     source: "configured" | "upstream_default" | "unavailable";
   };
   /**
-   * @minItems 14
-   * @maxItems 14
+   * @minItems 15
+   * @maxItems 15
    */
   operations: [
+    Operation,
     Operation,
     Operation,
     Operation,

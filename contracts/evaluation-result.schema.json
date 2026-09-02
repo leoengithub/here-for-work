@@ -1,0 +1,105 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hereforwork.local/contracts/evaluation-result.v1.schema.json",
+  "title": "HereForWork evaluation result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract",
+    "schemaVersion",
+    "trackerId",
+    "reportPath",
+    "reportSha256",
+    "company",
+    "title",
+    "url",
+    "nativeScore1To5",
+    "legitimacyTier",
+    "finalDecision",
+    "authorizationConfidence",
+    "workAuth",
+    "hardStops",
+    "softGaps",
+    "topStrengths",
+    "advertisedComp",
+    "nextAction",
+    "authorizationQuestion",
+    "reportSections",
+    "riskSummary"
+  ],
+  "properties": {
+    "contract": { "const": "hereforwork.evaluation-result" },
+    "schemaVersion": { "const": 1 },
+    "trackerId": { "type": "integer", "minimum": 1 },
+    "reportPath": { "type": "string", "pattern": "^reports\\/[A-Za-z0-9._-]+\\.md$" },
+    "reportSha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "company": { "type": "string", "minLength": 1, "maxLength": 500 },
+    "title": { "type": "string", "minLength": 1, "maxLength": 500 },
+    "url": {
+      "oneOf": [
+        { "type": "string", "format": "uri", "pattern": "^https://" },
+        { "type": "null" }
+      ]
+    },
+    "nativeScore1To5": { "type": "number", "minimum": 1, "maximum": 5 },
+    "legitimacyTier": { "enum": ["High Confidence", "Proceed with Caution", "Suspicious"] },
+    "finalDecision": { "enum": ["Apply", "Consider", "Research first", "Skip"] },
+    "authorizationConfidence": { "enum": ["excellent", "interesting", "investigate", "problem"] },
+    "workAuth": { "enum": ["sponsors", "not_needed", "unstated", "no_sponsorship"] },
+    "hardStops": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1, "maxLength": 500 },
+      "maxItems": 12
+    },
+    "softGaps": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1, "maxLength": 500 },
+      "maxItems": 12
+    },
+    "topStrengths": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1, "maxLength": 500 },
+      "minItems": 1,
+      "maxItems": 12
+    },
+    "advertisedComp": {
+      "oneOf": [
+        { "type": "string", "minLength": 1, "maxLength": 200 },
+        { "type": "null" }
+      ]
+    },
+    "nextAction": { "type": "string", "minLength": 1, "maxLength": 500 },
+    "authorizationQuestion": {
+      "oneOf": [
+        { "type": "string", "minLength": 1, "maxLength": 500 },
+        { "type": "null" }
+      ]
+    },
+    "reportSections": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1, "maxLength": 80 },
+      "minItems": 10,
+      "maxItems": 11
+    },
+    "riskSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "legitimacy",
+        "classification",
+        "culture",
+        "interviewRedflags",
+        "aiInfra",
+        "aiScreeningDisclosure"
+      ],
+      "properties": {
+        "legitimacy": { "enum": ["high_confidence", "proceed_with_caution", "suspicious"] },
+        "classification": { "enum": ["clear", "flagged", "not_evaluated"] },
+        "culture": { "enum": ["pass", "caution", "fail", "not_evaluated"] },
+        "interviewRedflags": { "enum": ["none", "caution", "warning", "not_evaluated"] },
+        "aiInfra": { "enum": ["consistent", "mismatch", "not_evaluated"] },
+        "aiScreeningDisclosure": { "enum": ["disclosed", "corroborating_only", "no_match", "not_evaluated"] }
+      }
+    }
+  }
+}

@@ -49,7 +49,12 @@ implementation work:
   initial `3.5`.
 
 Pre-Queue publication, artifact-aware reuse, and Playwright fallback therefore remain
-disabled until the required capabilities pass the fail-closed manifest and probes.
+disabled until the required capabilities pass the fail-closed manifest and probes. The
+strict read side for already-written evaluations is now in place: `evaluation.result.read`
+accepts only a pinned tracker row identity plus a `reports/*.md` path, validates the
+exact `## Machine Summary` fenced YAML block, requires A-G plus Risk Summary and extracted
+keywords headings, matches the tracker native `X.X/5` score, and rejects report/company/
+title drift fail-closed.
 
 The version-1 capability manifest is now implemented as JSON Schema plus generated
 TypeScript and closed Rust DTOs. `capabilities.get` reports the exact Git revision
@@ -57,8 +62,9 @@ separately from declared version, the effective PDF threshold and whether it is 
 or the upstream default, the fixed eight-capability status set, constraints, and bounded
 actionable diagnostics without renderer-facing filesystem paths. Startup and the existing
 integration health check both validate this manifest before treating future capabilities as
-available. This is compatibility gating only: it does not enable discovery, evaluation,
-artifact inspection, or a browser fallback.
+available. It now also exposes the versioned adapter operation `evaluation.result.read`,
+which is supported only through the strict parser above and does not authorize discovery,
+execution of full evaluation, artifact inspection, or a browser fallback.
 
 Health compares the exact career-ops revision before and after its compatibility checks.
 Future gated operations must still revalidate immediately before execution because this

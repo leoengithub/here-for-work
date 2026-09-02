@@ -60,6 +60,7 @@ test("capabilities expose the fixed safety boundary", async () => {
     "capabilities.get",
     "health.check",
     "history.snapshot",
+    "evaluation.result.read",
     "profile.queue_filters.get",
     "preparation.context.get",
     "preparation.result.recover",
@@ -153,6 +154,7 @@ test("capability probes pin exact revision, declared version, threshold, and fai
   assert.equal(response.result.capabilities.find(({ id }) => id === "discovery.reverse_ats.run.v1").status, "degraded");
   assert.equal(response.result.capabilities.find(({ id }) => id === "discovery.company_ats.preview.v1").status, "degraded");
   assert.equal(response.result.capabilities.find(({ id }) => id === "liveness.role.read.v1").status, "unavailable");
+  assert.equal(response.result.capabilities.find(({ id }) => id === "evaluation.result.read.v1").status, "supported");
   assert.equal(response.result.capabilities.find(({ id }) => id === "browser.review_fallback.v1").status, "unavailable");
   assert.ok(response.result.capabilities.every(({ sourceRevision }) => sourceRevision === response.result.upstreamRevision));
   assert.ok(response.result.diagnostics.some(({ code }) => code === "isolated_execution_required"));
@@ -256,6 +258,140 @@ test("generic discovery preserves the requested application URL when a page cann
   assert.equal(job.url, "https://careers.example.test/private-role");
   assert.equal(job.descriptionAvailable, false);
   assert.match(job.description, /could not retrieve a complete job description/);
+});
+
+test("evaluation result read validates tracker identity and strict machine summary", async () => {
+  const root = await mkdtemp(join(tmpdir(), "hfw-evaluation-read-"));
+  await mkdir(join(root, "reports"), { recursive: true });
+  const reportPath = "reports/103-symbiotic-2026-09-02.md";
+  const report = `# Evaluation: Symbiotic — Senior Front-End Engineer (React)
+
+**Date:** 2026-09-02
+**Archetype:** React / Frontend Platform Engineer
+**Score:** 4.2/5
+**Legitimacy:** High Confidence
+**Authorization confidence:** 🟡 Investigate
+**Work Auth:** ⚠️ Unstated
+**URL:** https://jobs.ashbyhq.com/symbiotic/1ca5307d/application
+**PDF:** output/cv-candidate-symbiotic-2026-09-02.pdf
+**Batch ID:** batch-123
+
+---
+
+## Machine Summary
+
+\`\`\`yaml
+company: "Symbiotic"
+role: "Senior Front-End Engineer (React)"
+score: 4.2
+legitimacy_tier: "High Confidence"
+archetype: "React / Frontend Platform Engineer"
+final_decision: "Apply"
+hard_stops: []
+soft_gaps:
+  - "Confirm the employing entity and immigration authorization path."
+top_strengths:
+  - "Strong React, TypeScript, accessibility, and product delivery overlap."
+risk_level: "Medium"
+confidence: "High"
+next_action: "Prepare grounded draft answers for the live form."
+authorization_confidence: "investigate"
+authorization_evidence:
+  - "The posting does not state sponsorship; confirm with the employer."
+authorization_scope: "job-specific"
+engagement_mechanism: "employee_payroll"
+authorization_question: "Does Symbiotic hire from Spain for this role?"
+work_auth: "unstated"
+discard_reasons: []
+via: null
+company_confidential: false
+advertised_comp: "EUR 50k-55k"
+reports_to: null
+risk_summary:
+  legitimacy: "high_confidence"
+  classification: "clear"
+  culture: "pass"
+  interview_redflags: "not_evaluated"
+  ai_infra: "consistent"
+  ai_screening_disclosure: "no_match"
+\`\`\`
+
+## A) Role Summary
+Role summary.
+
+## B) CV Match
+CV match.
+
+## C) Level and Strategy
+Level.
+
+## D) Compensation and Demand
+Comp.
+
+## E) Personalization Plan
+Plan.
+
+## F) Interview Plan
+Interview.
+
+## G) Posting Legitimacy
+Legitimacy.
+
+## Risk Summary
+Risk.
+
+## Extracted Keywords
+- React
+- TypeScript
+`;
+  await writeFile(join(root, reportPath), report);
+
+  const response = await request({
+    id: "evaluation-read",
+    protocolVersion: 1,
+    operation: "evaluation.result.read",
+    input: {
+      trackerId: 103,
+      reportPath,
+      company: "Symbiotic",
+      title: "Senior Front-End Engineer (React)",
+      score: "4.2/5",
+      status: "Evaluated",
+    },
+  }, { HFW_CAREER_OPS_ROOT: root, HFW_CAREER_OPS_INDEX: join(root, "tracker.db") });
+
+  assert.equal(response.ok, true, JSON.stringify(response));
+  assert.equal(response.result.contract, "hereforwork.evaluation-result");
+  assert.equal(response.result.schemaVersion, 1);
+  assert.equal(response.result.trackerId, 103);
+  assert.equal(response.result.reportPath, reportPath);
+  assert.equal(response.result.company, "Symbiotic");
+  assert.equal(response.result.title, "Senior Front-End Engineer (React)");
+  assert.equal(response.result.nativeScore1To5, 4.2);
+  assert.equal(response.result.legitimacyTier, "High Confidence");
+  assert.equal(response.result.authorizationConfidence, "investigate");
+  assert.deepEqual(response.result.topStrengths, [
+    "Strong React, TypeScript, accessibility, and product delivery overlap.",
+  ]);
+  assert.equal(response.result.url, "https://jobs.ashbyhq.com/symbiotic/1ca5307d/application");
+  assert.ok(response.result.reportSections.includes("Machine Summary"));
+  assert.ok(response.result.reportSections.includes("Extracted Keywords"));
+
+  const mismatch = await request({
+    id: "evaluation-read-mismatch",
+    protocolVersion: 1,
+    operation: "evaluation.result.read",
+    input: {
+      trackerId: 103,
+      reportPath,
+      company: "Symbiotic",
+      title: "Different role",
+      score: "4.2/5",
+      status: "Evaluated",
+    },
+  }, { HFW_CAREER_OPS_ROOT: root, HFW_CAREER_OPS_INDEX: join(root, "tracker.db") });
+  assert.equal(mismatch.ok, false);
+  assert.match(mismatch.error.message, /does not match the canonical tracker row/);
 });
 
 test("generic discovery does not follow redirects to a local target", async (context) => {
