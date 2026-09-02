@@ -8,7 +8,7 @@
  * paths from callers. External job data is returned as data only.
  */
 
-import { access, constants, mkdir, readFile, rename, rm, realpath, writeFile } from "node:fs/promises";
+import { access, constants, lstat, mkdir, readFile, rename, rm, realpath, stat, writeFile } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
@@ -1621,10 +1621,46 @@ function strictTrackerRecord(record) {
   return record;
 }
 
-function trackerReportPath(value) {
+async function canonicalTrackerFile() {
+  if (!root) throw new Error("career-ops root is not configured.");
+  const rootReal = await realpath(root).catch(() => { throw new Error("career-ops root is unavailable."); });
+  for (const relativePath of ["data/applications.md", "applications.md"]) {
+    const candidate = resolve(rootReal, relativePath);
+    let candidateStat;
+    try {
+      candidateStat = await lstat(candidate);
+    } catch (error) {
+      if (error?.code === "ENOENT") continue;
+      throw new Error("The canonical tracker is unavailable.");
+    }
+    if (!candidateStat.isFile() && !candidateStat.isSymbolicLink()) continue;
+    const candidateReal = await realpath(candidate).catch(() => { throw new Error("The canonical tracker is unavailable."); });
+    const relativeCandidate = relative(rootReal, candidateReal);
+    if (!relativeCandidate || relativeCandidate.startsWith("..") || relativeCandidate.startsWith("/")) {
+      throw new Error("The canonical tracker must stay inside the career-ops root.");
+    }
+    const resolvedStat = await stat(candidateReal).catch(() => null);
+    if (!resolvedStat?.isFile()) throw new Error("The canonical tracker is unavailable.");
+    return { rootReal, path: candidateReal };
+  }
+  throw new Error("The canonical tracker is unavailable.");
+}
+
+async function trackerReportPath(value) {
   const match = typeof value === "string" && value.match(/\]\(([^)]+)\)/);
   if (!match) throw new Error("Canonical tracker report link is not a verifiable path.");
-  return normalizedReportPath(match[1]);
+  const tracker = await canonicalTrackerFile();
+  const link = strictText(match[1], "Canonical tracker report link", 2_000).replaceAll("\\", "/");
+  if (link.startsWith("/")) throw new Error("Canonical tracker report link must be relative.");
+  const candidate = resolve(dirname(tracker.path), link);
+  const candidateReal = await realpath(candidate).catch(() => { throw new Error("The canonical tracker report is unavailable."); });
+  const relativeCandidate = relative(tracker.rootReal, candidateReal);
+  if (!relativeCandidate || relativeCandidate.startsWith("..") || relativeCandidate.startsWith("/")) {
+    throw new Error("Canonical tracker report link must stay inside the career-ops root.");
+  }
+  const candidateStat = await stat(candidateReal).catch(() => null);
+  if (!candidateStat?.isFile()) throw new Error("The canonical tracker report is unavailable.");
+  return relativeCandidate.replaceAll("\\", "/");
 }
 
 async function readEvaluationResult(input) {
@@ -1652,7 +1688,7 @@ async function readEvaluationResult(input) {
   try { records = JSON.parse(output); } catch { throw new Error("career-ops returned malformed tracker JSON."); }
   if (!Array.isArray(records) || records.length !== 1) throw new Error("The canonical tracker result is missing or ambiguous.");
   const tracker = strictTrackerRecord(records[0]);
-  if (tracker.id !== trackerId || trackerReportPath(tracker.report) !== report.normalized) throw new Error("Report and canonical tracker identity do not match.");
+  if (tracker.id !== trackerId || await trackerReportPath(tracker.report) !== report.normalized) throw new Error("Report and canonical tracker identity do not match.");
   const evaluation = validateEvaluationReport(bytes.toString("utf8"), tracker);
   if (tracker.company.trim() !== evaluation.company || tracker.role.trim() !== evaluation.role) throw new Error("Report and canonical tracker role identity do not match.");
   const after = await capabilityManifest();

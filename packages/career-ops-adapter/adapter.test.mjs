@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtemp, mkdir, readFile, stat, unlink, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, stat, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -114,11 +114,17 @@ Fixture.
 Fixture.
 `;
 
-async function evaluationFixture({ report = evaluationReport, tracker = {}, initializeGit = true } = {}) {
+async function evaluationFixture({ report = evaluationReport, tracker = {}, initializeGit = true, canonicalTracker = "root" } = {}) {
   const fixtureRoot = await mkdtemp(join(tmpdir(), "hfw-evaluation-result-"));
   await mkdir(join(fixtureRoot, "batch"), { recursive: true });
   await mkdir(join(fixtureRoot, "modes"), { recursive: true });
   await mkdir(join(fixtureRoot, "templates"), { recursive: true });
+  if (canonicalTracker === "data") {
+    await mkdir(join(fixtureRoot, "data"), { recursive: true });
+    await writeFile(join(fixtureRoot, "data/applications.md"), "# canonical tracker fixture\n");
+  } else {
+    await writeFile(join(fixtureRoot, "applications.md"), "# canonical tracker fixture\n");
+  }
   await writeFile(join(fixtureRoot, "batch/batch-prompt.md"), "#### Machine Summary\nauthorization_confidence:\nauthorization_evidence:\nauthorization_scope:\nengagement_mechanism:\nauthorization_question:\n");
   await writeFile(join(fixtureRoot, "tracker-parse.mjs"), "// documented tracker projection\n");
   await writeFile(join(fixtureRoot, "modes/oferta.md"), "## Machine Summary\n");
@@ -126,7 +132,7 @@ async function evaluationFixture({ report = evaluationReport, tracker = {}, init
   const trackerRecord = {
     id: 7, date: "2026-09-02", company: tracker.company ?? "Example Co", role: tracker.role ?? "Frontend Engineer",
     score: tracker.score ?? "4.2/5", status: tracker.status ?? "Evaluated", pdf: "❌",
-    report: tracker.report ?? "[007](reports/007-example.md)", notes: tracker.notes ?? "synthetic fixture",
+    report: tracker.report ?? (canonicalTracker === "data" ? "[007](../reports/007-example.md)" : "[007](reports/007-example.md)"), notes: tracker.notes ?? "synthetic fixture",
   };
   await writeFile(join(fixtureRoot, "tracker.mjs"), `const row = ${JSON.stringify(trackerRecord)};
 if (process.argv.includes("--json")) process.stdout.write(JSON.stringify([row]));
@@ -329,6 +335,29 @@ test("evaluation result read fails closed without an exact upstream revision", a
     ...fixture.input,
     compatibilityFingerprint: "a".repeat(64),
   })).ok, false);
+});
+
+test("evaluation result read resolves canonical tracker links relative to data applications.md", async () => {
+  const fixture = await evaluationFixture({ canonicalTracker: "data" });
+  const response = await readEvaluation(fixture);
+  assert.equal(response.ok, true, JSON.stringify(response));
+});
+
+test("evaluation result read rejects canonical tracker report escapes and symlink targets", async () => {
+  const escaped = await evaluationFixture({
+    canonicalTracker: "data",
+    tracker: { report: "[007](../../../etc/passwd)" },
+  });
+  assert.equal((await readEvaluation(escaped)).ok, false, "canonical tracker escape");
+
+  const symlinked = await evaluationFixture({
+    canonicalTracker: "data",
+    tracker: { report: "[007](../reports/linked-report.md)" },
+  });
+  const outside = await mkdtemp(join(tmpdir(), "hfw-evaluation-report-outside-"));
+  await writeFile(join(outside, "linked-report.md"), evaluationReport);
+  await symlink(join(outside, "linked-report.md"), join(symlinked.root, "reports/linked-report.md"));
+  assert.equal((await readEvaluation(symlinked)).ok, false, "canonical tracker symlink");
 });
 
 test("evaluation result read rejects the fail-closed fixture matrix", async () => {

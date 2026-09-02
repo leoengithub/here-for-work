@@ -49,9 +49,12 @@ Request input:
 }
 ```
 
-The report path must be relative, resolve inside the career-ops root after symlink
-resolution, and match the tracker’s documented Markdown report link. The report hash
-must match the bytes read. The tracker row must be the unique row for the requested ID,
+The caller’s report path must be root-relative, resolve inside the career-ops root after
+symlink resolution, and match the tracker’s documented Markdown report link. Tracker
+links are resolved relative to the canonical tracker Markdown file (`data/applications.md`
+when present, otherwise `applications.md`), then normalized to a root-relative path;
+outside-root and symlink targets are rejected. The report hash must match the bytes read.
+The tracker row must be the unique row for the requested ID,
 must have the closed nine-field JSON projection, and must carry a native score in the
 form `N/5`.
 
