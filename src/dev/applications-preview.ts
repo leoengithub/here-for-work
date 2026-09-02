@@ -1,4 +1,4 @@
-import type { BrowserSessionSummary, BrowserSetup, DashboardState, PreparationSummary } from "../types";
+import type { BrowserSessionSummary, BrowserSetup, DashboardState, PreparationSummary, QueueEvaluationSummary, RoleSummary } from "../types";
 
 const now = "2026-09-01T12:00:00Z";
 
@@ -67,6 +67,101 @@ export const applicationsPreviewDashboard: DashboardState = {
   recentRuns: [],
 };
 
+function queueRole(
+  id: string,
+  title: string,
+  company: string,
+  queueGroup: RoleSummary["queueGroup"],
+  score: number,
+  overrides: Partial<QueueEvaluationSummary> = {},
+): RoleSummary {
+  return {
+    id,
+    company,
+    title,
+    location: "Remote, Spain",
+    source: "Fixture",
+    sourceCount: 1,
+    queueGroup,
+    eligibilitySummary: "",
+    uncertainty: null,
+    postedAt: "2026-08-30",
+    discoveredAt: now,
+    applicationUrl: `https://example.test/${id}/apply`,
+    preparationState: "not_started",
+    canonicalTrackerId: Number(id.replace(/\D/g, "")) || 1,
+    canonicalStatus: "Evaluated",
+    evaluation: {
+      nativeScore: score,
+      legitimacy: "High Confidence",
+      riskLevel: "Low",
+      strengths: ["React platform work is directly supported by the CV."],
+      blockers: [],
+      gaps: [],
+      compensation: "€52k–€58k gross annually",
+      authorizationConfidence: "interesting",
+      authorizationQuestion: "Confirm the employing entity for Spain.",
+      materialUncertainty: {
+        confidence: "High",
+        authorizationQuestion: "",
+        notEvaluatedRiskSignals: [],
+      },
+      ...overrides,
+    },
+  };
+}
+
+export const queuePreviewDashboard: DashboardState = {
+  ...applicationsPreviewDashboard,
+  roles: [
+    queueRole("queue-1", "Senior Frontend Platform Engineer", "Northstar Tools", "strong_match", 4.6),
+    queueRole("queue-2", "Product Engineer", "Copperline", "other_new", 4.1, {
+      strengths: ["Product-facing frontend ownership matches recent experience."],
+      compensation: null,
+      riskLevel: "Medium",
+      legitimacy: "Proceed with Caution",
+      gaps: ["The role asks for production GraphQL ownership not explicit in the listing."],
+      materialUncertainty: {
+        confidence: "Medium",
+        authorizationQuestion: "Confirm whether the role can employ someone working from Spain.",
+        notEvaluatedRiskSignals: ["culture"],
+      },
+    }),
+    queueRole("queue-3", "Frontend Engineer, Design Systems and Accessibility", "Meridian Labs", "needs_decision", 3.7, {
+      strengths: ["Design-system and accessibility work is supported by recent projects."],
+      blockers: ["The advertised compensation is below the preferred range."],
+      compensation: "€45k–€49k gross annually",
+      riskLevel: "Medium",
+      materialUncertainty: {
+        confidence: "Medium",
+        authorizationQuestion: "Confirm the contract route from Spain.",
+        notEvaluatedRiskSignals: ["aiScreeningDisclosure"],
+      },
+    }),
+  ],
+  preQueueRoles: [
+    {
+      roleId: "pending-1",
+      company: "Example Labs",
+      title: "Frontend Engineer",
+      state: "syncing",
+      reason: "evaluation_result_read_pending",
+      attempt: 1,
+      updatedAt: now,
+    },
+    {
+      roleId: "attention-1",
+      company: "Example Studio",
+      title: "UI Engineer",
+      state: "needs_attention",
+      reason: "evaluation_result_invalid_or_stale",
+      attempt: 2,
+      updatedAt: now,
+    },
+  ],
+  preparations: [],
+};
+
 function browserSession(
   id: string,
   preparationId: string,
@@ -114,4 +209,9 @@ export const applicationsPreviewBrowserSetup: BrowserSetup = {
 export function isApplicationsPreview(): boolean {
   return import.meta.env.DEV
     && new URLSearchParams(window.location.search).get("application-preview") === "states";
+}
+
+export function isQueuePreview(): boolean {
+  return import.meta.env.DEV
+    && new URLSearchParams(window.location.search).get("queue-preview") === "decisions";
 }

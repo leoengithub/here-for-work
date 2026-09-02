@@ -17,7 +17,7 @@ use crate::domain::{
     ScheduledRun, SourceScheduleSummary,
 };
 
-const SCHEMA_VERSION: i64 = 17;
+const SCHEMA_VERSION: i64 = 18;
 const MAX_RUN_ATTEMPTS: i64 = 3;
 const MAX_BROWSER_COMMAND_ATTEMPTS: i64 = 3;
 const MAX_EVALUATION_SYNC_ATTEMPTS: i64 = 3;
@@ -498,6 +498,24 @@ impl Store {
             )?;
             version = 17;
         }
+        if version < 18 {
+            self.connection.execute_batch(
+                "BEGIN IMMEDIATE;
+                 ALTER TABLE evaluation_receipts ADD COLUMN risk_level TEXT;
+                 UPDATE evaluation_sync
+                    SET state = 'needs_attention',
+                        reason = 'canonical_evaluation_requires_refresh',
+                        current_receipt_key = NULL,
+                        lease_expires_at = NULL,
+                        updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                  WHERE current_receipt_key IN (
+                    SELECT receipt_key FROM evaluation_receipts WHERE risk_level IS NULL
+                  );
+                 UPDATE schema_meta SET version = 18;
+                 COMMIT;",
+            )?;
+            version = 18;
+        }
         if version != SCHEMA_VERSION {
             return Err(StoreError::Database(rusqlite::Error::InvalidQuery));
         }
@@ -881,14 +899,16 @@ impl Store {
         );
         let now = Utc::now().to_rfc3339();
         transaction.execute(
-            "INSERT OR IGNORE INTO evaluation_receipts(
+            "INSERT INTO evaluation_receipts(
                receipt_key, role_id, tracker_id, report_path, report_hash,
                upstream_revision, compatibility_fingerprint, source_identity_hash,
-               native_score, final_decision, legitimacy, strengths_json,
+               native_score, final_decision, legitimacy, risk_level, strengths_json,
                blockers_json, gaps_json, compensation, authorization_confidence,
                authorization_question, material_uncertainty_json, created_at
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
-                       ?14, ?15, ?16, ?17, ?18, ?19)",
+                       ?14, ?15, ?16, ?17, ?18, ?19, ?20)
+             ON CONFLICT(receipt_key) DO UPDATE SET risk_level = excluded.risk_level
+               WHERE evaluation_receipts.risk_level IS NULL",
             params![
                 receipt_key,
                 role.role_id,
@@ -901,6 +921,7 @@ impl Store {
                 result.evaluation.score,
                 result.evaluation.final_decision,
                 result.evaluation.legitimacy_tier,
+                result.evaluation.risk_level,
                 serde_json::to_string(&strengths)?,
                 serde_json::to_string(&blockers)?,
                 serde_json::to_string(&gaps)?,
@@ -3936,7 +3957,8 @@ impl Store {
                CASE WHEN COUNT(DISTINCT s.posted_at) = 1 THEN MIN(s.posted_at) ELSE NULL END,
                r.discovered_at, r.application_url, r.preparation_state,
                r.canonical_tracker_id, r.canonical_status,
-               receipt.native_score, receipt.strengths_json, receipt.blockers_json,
+               receipt.native_score, receipt.legitimacy, receipt.risk_level,
+               receipt.strengths_json, receipt.blockers_json,
                receipt.gaps_json, receipt.compensation,
                receipt.authorization_confidence, receipt.authorization_question,
                receipt.material_uncertainty_json
@@ -3986,6 +4008,8 @@ impl Store {
                     row.get::<_, Option<String>>(20)?,
                     row.get::<_, Option<String>>(21)?,
                     row.get::<_, Option<String>>(22)?,
+                    row.get::<_, Option<String>>(23)?,
+                    row.get::<_, Option<String>>(24)?,
                 ))
             })?
             .map(role_summary_from_tuple)
@@ -4000,7 +4024,8 @@ impl Store {
                CASE WHEN COUNT(DISTINCT s.posted_at) = 1 THEN MIN(s.posted_at) ELSE NULL END,
                r.discovered_at, r.application_url, r.preparation_state,
                r.canonical_tracker_id, r.canonical_status,
-               receipt.native_score, receipt.strengths_json, receipt.blockers_json,
+               receipt.native_score, receipt.legitimacy, receipt.risk_level,
+               receipt.strengths_json, receipt.blockers_json,
                receipt.gaps_json, receipt.compensation,
                receipt.authorization_confidence, receipt.authorization_question,
                receipt.material_uncertainty_json
@@ -4040,6 +4065,8 @@ impl Store {
                     row.get::<_, Option<String>>(20)?,
                     row.get::<_, Option<String>>(21)?,
                     row.get::<_, Option<String>>(22)?,
+                    row.get::<_, Option<String>>(23)?,
+                    row.get::<_, Option<String>>(24)?,
                 ))
             })?
             .map(role_summary_from_tuple)
@@ -4616,6 +4643,8 @@ type RoleSummaryTuple = (
     Option<String>,
     Option<String>,
     Option<String>,
+    Option<String>,
+    Option<String>,
 );
 
 fn role_summary_from_tuple(
@@ -4638,6 +4667,8 @@ fn role_summary_from_tuple(
         canonical_tracker_id,
         canonical_status,
         native_score,
+        legitimacy,
+        risk_level,
         strengths_json,
         blockers_json,
         gaps_json,
@@ -4666,6 +4697,8 @@ fn role_summary_from_tuple(
         canonical_status,
         evaluation: match (
             native_score,
+            legitimacy,
+            risk_level,
             strengths_json,
             blockers_json,
             gaps_json,
@@ -4675,6 +4708,8 @@ fn role_summary_from_tuple(
         ) {
             (
                 Some(native_score),
+                Some(legitimacy),
+                Some(risk_level),
                 Some(strengths),
                 Some(blockers),
                 Some(gaps),
@@ -4683,6 +4718,8 @@ fn role_summary_from_tuple(
                 Some(material_uncertainty),
             ) => Some(QueueEvaluationSummary {
                 native_score,
+                legitimacy,
+                risk_level,
                 strengths: serde_json::from_str(&strengths).map_err(StoreError::InvalidDataset)?,
                 blockers: serde_json::from_str(&blockers).map_err(StoreError::InvalidDataset)?,
                 gaps: serde_json::from_str(&gaps).map_err(StoreError::InvalidDataset)?,
@@ -5204,6 +5241,8 @@ mod tests {
         assert_eq!(dashboard.roles.len(), 1);
         let projection = dashboard.roles[0].evaluation.as_ref().unwrap();
         assert_eq!(projection.native_score, 4.2);
+        assert_eq!(projection.legitimacy, "High Confidence");
+        assert_eq!(projection.risk_level, "Low");
         assert_eq!(
             projection.strengths,
             ["Strong source-backed frontend match."]
@@ -5216,6 +5255,46 @@ mod tests {
             })
             .unwrap();
         assert_eq!(receipts, 1);
+
+        store
+            .connection
+            .execute("UPDATE evaluation_receipts SET risk_level = NULL", [])
+            .unwrap();
+        store
+            .connection
+            .execute(
+                "UPDATE evaluation_sync
+                    SET state = 'needs_attention', reason = 'canonical_evaluation_requires_refresh',
+                        current_receipt_key = NULL
+                  WHERE role_id = ?1",
+                [&role.role_id],
+            )
+            .unwrap();
+        assert!(
+            store
+                .claim_evaluation_sync(&role.role_id, &input_hash)
+                .unwrap()
+        );
+        assert!(
+            store
+                .complete_evaluation_sync(&role, &input_hash, &evaluation)
+                .unwrap()
+        );
+        assert_eq!(
+            store.dashboard().unwrap().roles[0]
+                .evaluation
+                .as_ref()
+                .unwrap()
+                .risk_level,
+            "Low"
+        );
+        let receipts_after_refresh: i64 = store
+            .connection
+            .query_row("SELECT COUNT(*) FROM evaluation_receipts", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(receipts_after_refresh, 1);
         drop(store);
 
         let restarted = Store::open(&database).unwrap();
@@ -7172,5 +7251,62 @@ mod tests {
             .unwrap()
             .count();
         assert_eq!(backup_count, 1);
+    }
+
+    #[test]
+    fn version_17_receipts_are_held_until_canonical_risk_is_refreshed() {
+        let directory = tempfile::tempdir().unwrap();
+        let database_path = directory.path().join("test.sqlite3");
+        {
+            let connection = rusqlite::Connection::open(&database_path).unwrap();
+            connection
+                .execute_batch(
+                    "CREATE TABLE schema_meta(version INTEGER NOT NULL);
+                     INSERT INTO schema_meta(version) VALUES (17);
+                     CREATE TABLE evaluation_receipts(
+                       receipt_key TEXT PRIMARY KEY, role_id TEXT NOT NULL,
+                       tracker_id INTEGER NOT NULL, report_path TEXT NOT NULL,
+                       report_hash TEXT NOT NULL, upstream_revision TEXT NOT NULL,
+                       compatibility_fingerprint TEXT NOT NULL,
+                       source_identity_hash TEXT NOT NULL, native_score REAL NOT NULL,
+                       final_decision TEXT NOT NULL, legitimacy TEXT NOT NULL,
+                       strengths_json TEXT NOT NULL, blockers_json TEXT NOT NULL,
+                       gaps_json TEXT NOT NULL, compensation TEXT,
+                       authorization_confidence TEXT NOT NULL,
+                       authorization_question TEXT NOT NULL,
+                       material_uncertainty_json TEXT NOT NULL, created_at TEXT NOT NULL
+                     );
+                     CREATE TABLE evaluation_sync(
+                       role_id TEXT PRIMARY KEY, state TEXT NOT NULL, reason TEXT NOT NULL,
+                       attempt INTEGER NOT NULL DEFAULT 0, input_hash TEXT,
+                       current_receipt_key TEXT, lease_expires_at TEXT,
+                       created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+                     );
+                     INSERT INTO evaluation_receipts VALUES (
+                       'receipt-1', 'role-1', 42, 'reports/42.md', 'hash', 'revision',
+                       'fingerprint', 'source-hash', 4.2, 'Apply', 'High Confidence',
+                       '[]', '[]', '[]', NULL, 'interesting', 'Confirm employing entity',
+                       '{}', '2026-09-01T12:00:00Z'
+                     );
+                     INSERT INTO evaluation_sync VALUES (
+                       'role-1', 'ready', 'canonical_evaluation_verified', 1, 'input-hash',
+                       'receipt-1', NULL, '2026-09-01T12:00:00Z', '2026-09-01T12:00:00Z'
+                     );",
+                )
+                .unwrap();
+        }
+
+        let store = Store::open(&database_path).unwrap();
+        let (state, reason, receipt): (String, String, Option<String>) = store
+            .connection
+            .query_row(
+                "SELECT state, reason, current_receipt_key FROM evaluation_sync WHERE role_id = 'role-1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(state, "needs_attention");
+        assert_eq!(reason, "canonical_evaluation_requires_refresh");
+        assert_eq!(receipt, None);
     }
 }

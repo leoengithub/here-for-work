@@ -108,6 +108,20 @@ const groupCopy: Record<QueueGroup, string> = {
   needs_decision: "Needs a decision",
 };
 
+const unevaluatedRiskCopy: Record<string, string> = {
+  classification: "Classification not evaluated",
+  culture: "Culture not evaluated",
+  interviewRedflags: "Interview risks not evaluated",
+  aiInfra: "AI infrastructure not evaluated",
+  aiScreeningDisclosure: "AI screening disclosure not evaluated",
+};
+
+const formatNativeScore = (score: number): string => `${Number.isInteger(score) ? score : score.toFixed(1)}/5`;
+
+const uniqueText = (values: Array<string | null | undefined>): string[] => (
+  [...new Set(values.map((value) => value?.trim()).filter((value): value is string => Boolean(value)))]
+);
+
 const formatRelative = (iso: string): string => {
   const date = new Date(iso);
   if (Number.isNaN(date.valueOf())) return "Unknown time";
@@ -139,6 +153,17 @@ export function RoleRow({
   const titleId = `queue-role-${role.id}-title`;
   const statusId = `queue-role-${role.id}-status`;
   const publicationAge = formatPublicationAge(role.postedAt);
+  const evaluation = role.evaluation;
+  const decisionChecks = evaluation ? [...evaluation.blockers, ...evaluation.gaps] : [];
+  const uncertainty = evaluation
+    ? uniqueText([
+        role.uncertainty,
+        evaluation.materialUncertainty.authorizationQuestion,
+        ...evaluation.materialUncertainty.notEvaluatedRiskSignals.map(
+          (signal) => unevaluatedRiskCopy[signal] ?? "A risk area was not evaluated",
+        ),
+      ])
+    : uniqueText([role.uncertainty]);
   return (
     <li className="role-list__item">
       <article className="role-card" aria-labelledby={titleId} aria-busy={enqueuing || undefined}>
@@ -161,10 +186,43 @@ export function RoleRow({
               <span className="role-card__age">{publicationAge}</span>
             </>
           ) : null}
-          {role.uncertainty ? (
-            <span className="role-card__uncertainty">{role.uncertainty}</span>
-          ) : null}
         </p>
+        {evaluation ? (
+          <div className="role-card__decision" aria-label="career-ops evaluation">
+            <div className="role-card__evaluation-summary">
+              <span className="role-card__score" aria-label={`career-ops match score ${evaluation.nativeScore} out of 5`}>
+                {formatNativeScore(evaluation.nativeScore)}
+              </span>
+              <span className="role-card__risk">
+                Legitimacy: {evaluation.legitimacy} · Risk: {evaluation.riskLevel}
+              </span>
+            </div>
+            {evaluation.strengths.length > 0 ? (
+              <p className="role-card__decision-line">
+                <span>Evidence:</span>
+                {evaluation.strengths.join(" · ")}
+              </p>
+            ) : null}
+            {decisionChecks.length > 0 ? (
+              <p className="role-card__decision-line role-card__decision-line--attention">
+                <span>Check:</span>
+                {decisionChecks.join(" · ")}
+              </p>
+            ) : null}
+            {evaluation.compensation ? (
+              <p className="role-card__decision-line">
+                <span>Compensation:</span>
+                {evaluation.compensation}
+              </p>
+            ) : null}
+            {uncertainty.length > 0 ? (
+              <p className="role-card__decision-line role-card__decision-line--uncertainty">
+                <span>Uncertain:</span>
+                {uncertainty.join(" · ")}
+              </p>
+            ) : null}
+          </div>
+        ) : null}
         <div className="role-card__actions">
           <Button
             variant="ghost"
@@ -190,6 +248,20 @@ export function RoleRow({
       </article>
     </li>
   );
+}
+
+export function PreQueueStatus({ roles }: { roles: DashboardState["preQueueRoles"] }) {
+  if (roles.length === 0) return null;
+  const attentionCount = roles.filter((role) => role.state === "needs_attention").length;
+  const evaluatingCount = roles.length - attentionCount;
+  const parts = [];
+  if (evaluatingCount > 0) {
+    parts.push(`${evaluatingCount} ${evaluatingCount === 1 ? "role is" : "roles are"} being evaluated`);
+  }
+  if (attentionCount > 0) {
+    parts.push(`${attentionCount} ${attentionCount === 1 ? "needs" : "need"} attention in System`);
+  }
+  return <p className="pre-queue-status" role="status">{parts.join(". ")}.</p>;
 }
 
 function HandledQueue() {
@@ -1548,9 +1620,19 @@ export function App() {
     return <main className="loading-shell" aria-live="polite">Opening your queue…</main>;
   }
 
-  const emptyQueueContent = dashboard.preparations.length > 0 || dashboard.recentlyDismissed.length > 0
-    ? <HandledQueue />
-    : <EmptyQueue onImport={() => fileInputRef.current?.click()} />;
+  const emptyQueueContent = dashboard.preQueueRoles.length > 0
+    ? (
+        <Empty className="empty-state" role="region" aria-labelledby="evaluating-empty-title">
+          <EmptyHeader>
+            <EmptyMedia className="empty-state__mark" aria-hidden="true">H</EmptyMedia>
+            <EmptyTitle><h2 id="evaluating-empty-title">No evaluated roles are ready yet.</h2></EmptyTitle>
+            <EmptyDescription>Roles appear here after career-ops finishes their full evaluation.</EmptyDescription>
+          </EmptyHeader>
+        </Empty>
+      )
+    : dashboard.preparations.length > 0 || dashboard.recentlyDismissed.length > 0
+      ? <HandledQueue />
+      : <EmptyQueue onImport={() => fileInputRef.current?.click()} />;
 
   let mainContent: ReactNode;
   if (view === "system") {
@@ -1894,6 +1976,7 @@ export function App() {
             <div>
               <p className="eyebrow">Today’s queue</p>
               <h2 id="queue-title">Review queue</h2>
+              <PreQueueStatus roles={dashboard.preQueueRoles} />
             </div>
             <div className="queue-heading__actions">
               <Button
@@ -1941,7 +2024,7 @@ export function App() {
                         <RoleRow
                           key={role.id}
                           role={role}
-                          canPrepare={dashboard.adapterStatus === "ready" && role.applicationUrl !== null}
+                          canPrepare={dashboard.adapterStatus === "ready" && role.applicationUrl !== null && role.evaluation != null}
                           canDismiss={dashboard.adapterStatus === "ready"}
                           busy={busy}
                           enqueuing={enqueuingRoleIds.has(role.id)}

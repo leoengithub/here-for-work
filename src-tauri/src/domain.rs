@@ -72,6 +72,8 @@ pub struct RoleSummary {
 #[serde(rename_all = "camelCase")]
 pub struct QueueEvaluationSummary {
     pub native_score: f64,
+    pub legitimacy: String,
+    pub risk_level: String,
     pub strengths: Vec<String>,
     pub blockers: Vec<String>,
     pub gaps: Vec<String>,

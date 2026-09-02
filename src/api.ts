@@ -21,6 +21,8 @@ import {
   applicationsPreviewDashboard,
   applicationsPreviewSessions,
   isApplicationsPreview,
+  isQueuePreview,
+  queuePreviewDashboard,
 } from "./dev/applications-preview";
 
 const isTauri = (): boolean => "__TAURI_INTERNALS__" in window;
@@ -57,6 +59,7 @@ const browserFallback: DashboardState = {
 
 export async function getDashboard(): Promise<DashboardState> {
   if (isApplicationsPreview()) return applicationsPreviewDashboard;
+  if (isQueuePreview()) return queuePreviewDashboard;
   if (!isTauri()) return browserFallback;
   return invoke<DashboardState>("get_dashboard");
 }

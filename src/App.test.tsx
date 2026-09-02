@@ -1,6 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { App, BrowserSessions, RoleRow, deriveApplicationState } from "./App";
+import { App, BrowserSessions, PreQueueStatus, RoleRow, deriveApplicationState } from "./App";
 import type { BrowserSessionSummary, PreparationSummary } from "./types";
 import {
   applicationsPreviewBrowserSetup,
@@ -330,6 +330,27 @@ describe("App", () => {
     expect(screen.getByRole("heading", { name: "Review queue" })).toBeInTheDocument();
   });
 
+  it("renders canonical Queue decision information without translating the score", async () => {
+    window.history.replaceState({}, "", "/?queue-preview=decisions");
+    const { container } = render(<App />);
+
+    await screen.findByRole("heading", { name: "Review queue" });
+    expect(screen.getByRole("heading", { name: "Strong matches" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Other new roles" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Needs a decision" })).toBeInTheDocument();
+    expect(screen.getByText("1 role is being evaluated. 1 needs attention in System.")).toBeInTheDocument();
+    expect(screen.getByLabelText("career-ops match score 4.6 out of 5")).toHaveTextContent("4.6/5");
+    expect(screen.getByText("Legitimacy: Proceed with Caution · Risk: Medium")).toBeInTheDocument();
+    expect(screen.getByText(/The role asks for production GraphQL ownership/)).toBeInTheDocument();
+    expect(screen.getByText("€52k–€58k gross annually")).toBeInTheDocument();
+    expect(screen.getByText(/Culture not evaluated/)).toBeInTheDocument();
+    expect(screen.queryByText(/%/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Ashby|Greenhouse|Lever|Web form/)).not.toBeInTheDocument();
+    expect(container.querySelectorAll(".role-card")).toHaveLength(3);
+    expect(screen.getAllByRole("button", { name: "Dismiss" })).toHaveLength(3);
+    expect(screen.getAllByRole("button", { name: "Prepare" })).toHaveLength(3);
+  });
+
   it("keeps other roles actionable while one preparation is being queued", () => {
     const role = {
       id: "role-1",
@@ -347,6 +368,22 @@ describe("App", () => {
       preparationState: "not_started" as const,
       canonicalTrackerId: null,
       canonicalStatus: null,
+      evaluation: {
+        nativeScore: 4.2,
+        legitimacy: "Proceed with Caution" as const,
+        riskLevel: "Medium" as const,
+        strengths: ["React ownership is supported by recent work."],
+        blockers: [],
+        gaps: ["GraphQL ownership is not confirmed."],
+        compensation: "€50k–€55k gross annually",
+        authorizationConfidence: "investigate",
+        authorizationQuestion: "Confirm the employing entity.",
+        materialUncertainty: {
+          confidence: "Medium" as const,
+          authorizationQuestion: "Confirm whether employment from Spain is available.",
+          notEvaluatedRiskSignals: ["culture"],
+        },
+      },
     };
     render(
       <ul>
@@ -382,8 +419,49 @@ describe("App", () => {
     expect(screen.getAllByRole("listitem")).toHaveLength(2);
     expect(screen.getAllByRole("article")).toHaveLength(2);
     expect(screen.getByText("Frontend Engineer is being queued for preparation.")).toBeInTheDocument();
+    expect(screen.getAllByLabelText("career-ops evaluation")).toHaveLength(2);
+    expect(screen.getAllByLabelText("career-ops match score 4.2 out of 5")).toHaveLength(2);
+    expect(screen.getAllByText("4.2/5")).toHaveLength(2);
+    expect(screen.getAllByText(/Legitimacy: Proceed with Caution · Risk: Medium/)).toHaveLength(2);
+    expect(screen.getAllByText(/React ownership is supported by recent work/)).toHaveLength(2);
+    expect(screen.getAllByText(/GraphQL ownership is not confirmed/)).toHaveLength(2);
+    expect(screen.getAllByText(/€50k–€55k gross annually/)).toHaveLength(2);
+    expect(screen.getAllByText(/Confirm whether employment from Spain is available/)).toHaveLength(2);
+    expect(screen.getAllByText(/Culture not evaluated/)).toHaveLength(2);
+    expect(screen.queryByText(/%/)).not.toBeInTheDocument();
     expect(screen.queryByText(/Ashby|Greenhouse|Lever|Web form/)).not.toBeInTheDocument();
     expect(screen.queryByText(/source occurrences|not started/i)).not.toBeInTheDocument();
+  });
+
+  it("summarizes pre-Queue evaluation work without rendering role cards or actions", () => {
+    render(
+      <PreQueueStatus roles={[
+        {
+          roleId: "pending",
+          company: "Acme",
+          title: "Frontend Engineer",
+          state: "syncing",
+          reason: "evaluation_result_read_pending",
+          attempt: 1,
+          updatedAt: "2026-09-01T12:00:00Z",
+        },
+        {
+          roleId: "attention",
+          company: "Beta",
+          title: "Product Engineer",
+          state: "needs_attention",
+          reason: "evaluation_result_invalid_or_stale",
+          attempt: 2,
+          updatedAt: "2026-09-01T12:00:00Z",
+        },
+      ]} />,
+    );
+
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "1 role is being evaluated. 1 needs attention in System.",
+    );
+    expect(screen.queryByRole("article")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button")).not.toBeInTheDocument();
   });
 
   it("keeps queue filters in System instead of primary navigation", async () => {

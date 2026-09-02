@@ -30,6 +30,8 @@ export interface RoleSummary {
 
 export interface QueueEvaluationSummary {
   nativeScore: number;
+  legitimacy: "High Confidence" | "Proceed with Caution" | "Suspicious";
+  riskLevel: "Low" | "Medium" | "High";
   strengths: string[];
   blockers: string[];
   gaps: string[];

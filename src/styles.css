@@ -269,6 +269,14 @@ h3 {
   letter-spacing: -0.035em;
 }
 
+.pre-queue-status {
+  max-width: 62ch;
+  margin: 0.45rem 0 0;
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  line-height: 1.45;
+}
+
 .status-workspace > p:not(.eyebrow),
 .activity-summary {
   max-width: 68ch;
@@ -774,11 +782,12 @@ h3 {
   grid-template-columns: minmax(0, 1fr) auto;
   grid-template-areas:
     "heading actions"
-    "meta actions";
-  align-items: center;
-  gap: 0.22rem 1rem;
-  min-height: 5.25rem;
-  padding: 0.78rem 1rem;
+    "meta actions"
+    "decision actions";
+  align-items: start;
+  gap: 0.25rem 1.25rem;
+  min-height: 5rem;
+  padding: 0.9rem 1rem;
   border: 1px solid var(--line);
   border-radius: 0.875rem;
   color: inherit;
@@ -831,9 +840,63 @@ a.role-card__title:hover {
   line-height: 1.45;
 }
 
-.role-card__uncertainty {
+.role-card__decision {
+  grid-area: decision;
+  display: grid;
+  gap: 0.28rem;
   min-width: 0;
-  color: color-mix(in oklch, var(--text) 72%, var(--text-muted));
+  margin-top: 0.35rem;
+}
+
+.role-card__evaluation-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.3rem 0.75rem;
+}
+
+.role-card__score {
+  color: var(--primary-foreground);
+  font-family: var(--font-heading, "Space Grotesk Variable", sans-serif);
+  font-size: 0.9rem;
+  font-weight: 720;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+  white-space: nowrap;
+}
+
+.role-card__risk {
+  color: var(--text-muted);
+  font-size: 0.7rem;
+  line-height: 1.4;
+}
+
+.role-card__decision-line {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 0.5rem;
+  max-width: 72ch;
+  margin: 0;
+  color: color-mix(in oklch, var(--text) 82%, var(--text-muted));
+  font-size: 0.73rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.role-card__decision-line > span {
+  color: var(--text-muted);
+  font-size: 0.66rem;
+  font-weight: 720;
+  letter-spacing: 0.035em;
+  text-transform: uppercase;
+}
+
+.role-card__decision-line--attention {
+  color: var(--danger);
+}
+
+.role-card__decision-line--uncertainty {
+  color: color-mix(in oklch, var(--text) 68%, var(--text-muted));
 }
 
 .role-card__actions {
@@ -841,6 +904,7 @@ a.role-card__title:hover {
   display: flex;
   align-items: center;
   justify-self: end;
+  align-self: center;
   gap: 0.4rem;
 }
 
@@ -1320,6 +1384,7 @@ a.role-card__title:hover {
     grid-template-areas:
       "heading"
       "meta"
+      "decision"
       "actions";
     gap: 0.35rem;
     padding: 0.9rem;
@@ -1330,8 +1395,9 @@ a.role-card__title:hover {
     margin-top: 0.35rem;
   }
 
-  .role-card__uncertainty {
-    flex-basis: 100%;
+  .role-card__decision-line {
+    grid-template-columns: 1fr;
+    gap: 0.12rem;
   }
 
   .browser-setup__fields {
