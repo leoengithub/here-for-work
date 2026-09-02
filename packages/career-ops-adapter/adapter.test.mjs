@@ -995,11 +995,11 @@ test("provider-neutral preparation commits only through fixed career-ops writers
   }, fixture.env);
   assert.equal(answers.ok, true);
   assert.deepEqual(answers.result.fillPlan.instructions, [
-    { fieldId: "email", value: "test@example.test", classification: "safe_verified" },
-    { fieldId: "why", value: "The role matches my verified React and accessibility work. Its product scope also matches my source-backed frontend experience.", classification: "grounded_draft" },
-    { fieldId: "phone", value: "+34 600 000 000", classification: "safe_verified" },
-    { fieldId: "country", value: "Spain", classification: "safe_verified" },
-    { fieldId: "salary", value: "52000", classification: "canonical_preference" },
+    { fieldId: "email", value: "test@example.test", classification: "safe_verified", required: true },
+    { fieldId: "why", value: "The role matches my verified React and accessibility work. Its product scope also matches my source-backed frontend experience.", classification: "grounded_draft", required: true },
+    { fieldId: "phone", value: "+34 600 000 000", classification: "safe_verified", required: false },
+    { fieldId: "country", value: "Spain", classification: "safe_verified", required: true },
+    { fieldId: "salary", value: "52000", classification: "canonical_preference", required: false },
   ]);
   assert.deepEqual(answers.result.reviewItems.find((item) => item.fieldId === "why"), {
     fieldId: "why",
@@ -1065,14 +1065,14 @@ test("provider-neutral preparation commits only through fixed career-ops writers
       contextHash: answers.result.contextHash,
       reviewItems: answers.result.reviewItems,
       fillResults: [
-        { fieldId: "email", status: "verified", reason: null },
-        { fieldId: "why", status: "verified", reason: null },
-        { fieldId: "phone", status: "verified", reason: null },
-        { fieldId: "country", status: "verified", reason: null },
-        { fieldId: "salary", status: "verified", reason: null },
-        { fieldId: "monthlySalary", status: "skipped", reason: "No canonical monthly conversion." },
-        { fieldId: "usdSalary", status: "skipped", reason: "No canonical USD conversion." },
-        { fieldId: "unlabeled", status: "skipped", reason: "No visible label." },
+        { fieldId: "email", status: "verified", reasonCode: "verified", reason: null, mutated: true, readBackSha256: "1".repeat(64) },
+        { fieldId: "why", status: "verified", reasonCode: "verified", reason: null, mutated: true, readBackSha256: "2".repeat(64) },
+        { fieldId: "phone", status: "verified", reasonCode: "verified", reason: null, mutated: true, readBackSha256: "3".repeat(64) },
+        { fieldId: "country", status: "verified", reasonCode: "verified", reason: null, mutated: true, readBackSha256: "4".repeat(64) },
+        { fieldId: "salary", status: "verified", reasonCode: "verified", reason: null, mutated: true, readBackSha256: "5".repeat(64) },
+        { fieldId: "monthlySalary", status: "skipped", reasonCode: "unsupported_control", reason: "No canonical monthly conversion.", mutated: false, readBackSha256: null },
+        { fieldId: "usdSalary", status: "skipped", reasonCode: "unsupported_control", reason: "No canonical USD conversion.", mutated: false, readBackSha256: null },
+        { fieldId: "unlabeled", status: "skipped", reasonCode: "unsupported_control", reason: "No visible label.", mutated: false, readBackSha256: null },
       ],
       cvPdfPath: commit.result.artifacts.cvPdf.path,
       eventDate: "2026-08-30",

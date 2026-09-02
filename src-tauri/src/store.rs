@@ -17,7 +17,7 @@ use crate::domain::{
     RoleSummary, RunSummary, ScheduledRun, SourceScheduleSummary,
 };
 
-const SCHEMA_VERSION: i64 = 18;
+const SCHEMA_VERSION: i64 = 19;
 const MAX_RUN_ATTEMPTS: i64 = 3;
 const MAX_BROWSER_COMMAND_ATTEMPTS: i64 = 3;
 const MAX_EVALUATION_SYNC_ATTEMPTS: i64 = 3;
@@ -66,6 +66,27 @@ pub struct PreparationCompletion<'a> {
 }
 
 impl Store {
+    fn table_exists(&self, name: &str) -> Result<bool, StoreError> {
+        let count = self.connection.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+            [name],
+            |row| row.get::<_, i64>(0),
+        )?;
+        Ok(count == 1)
+    }
+
+    fn column_exists(&self, table: &str, column: &str) -> Result<bool, StoreError> {
+        let pragma = format!("PRAGMA table_info({table})");
+        let mut statement = self.connection.prepare(&pragma)?;
+        let mut rows = statement.query([])?;
+        while let Some(row) = rows.next()? {
+            if row.get::<_, String>(1)? == column {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     fn current_preparation_evaluation(
         &self,
         role_id: &str,
@@ -547,6 +568,95 @@ impl Store {
                  COMMIT;",
             )?;
             version = 18;
+        }
+        if version < 19 {
+            if !self.table_exists("browser_sessions")? {
+                self.connection.execute_batch(
+                    "BEGIN IMMEDIATE;
+                     CREATE TABLE browser_sessions (
+                       id TEXT PRIMARY KEY,
+                       purpose TEXT NOT NULL,
+                       role_id TEXT REFERENCES roles(id),
+                       status TEXT NOT NULL,
+                       ats TEXT,
+                       page_title TEXT,
+                       page_url TEXT,
+                       snapshot_fingerprint TEXT,
+                       fields_json TEXT,
+                       field_count INTEGER NOT NULL DEFAULT 0,
+                       safe_field_count INTEGER NOT NULL DEFAULT 0,
+                       needs_user_count INTEGER NOT NULL DEFAULT 0,
+                       error_code TEXT,
+                       created_at TEXT NOT NULL,
+                       updated_at TEXT NOT NULL,
+                       preparation_id TEXT REFERENCES preparation_jobs(id),
+                       provider TEXT,
+                       answers_context_hash TEXT,
+                       review_items_json TEXT,
+                       fill_results_json TEXT,
+                       answers_report_hash TEXT,
+                       driver_owner TEXT,
+                       driver_lease_id TEXT,
+                       driver_lease_state TEXT NOT NULL DEFAULT 'none',
+                       fallback_eligible INTEGER NOT NULL DEFAULT 0,
+                       handoff_reason TEXT
+                     );
+                     CREATE UNIQUE INDEX IF NOT EXISTS browser_sessions_driver_lease
+                       ON browser_sessions(driver_lease_id) WHERE driver_lease_id IS NOT NULL;
+                     COMMIT;",
+                )?;
+            }
+            if !self.column_exists("browser_sessions", "driver_owner")? {
+                self.connection.execute(
+                    "ALTER TABLE browser_sessions ADD COLUMN driver_owner TEXT",
+                    [],
+                )?;
+            }
+            if !self.column_exists("browser_sessions", "driver_lease_id")? {
+                self.connection.execute(
+                    "ALTER TABLE browser_sessions ADD COLUMN driver_lease_id TEXT",
+                    [],
+                )?;
+            }
+            if !self.column_exists("browser_sessions", "driver_lease_state")? {
+                self.connection.execute(
+                    "ALTER TABLE browser_sessions ADD COLUMN driver_lease_state TEXT NOT NULL DEFAULT 'none'",
+                    [],
+                )?;
+            }
+            if !self.column_exists("browser_sessions", "fallback_eligible")? {
+                self.connection.execute(
+                    "ALTER TABLE browser_sessions ADD COLUMN fallback_eligible INTEGER NOT NULL DEFAULT 0",
+                    [],
+                )?;
+            }
+            if !self.column_exists("browser_sessions", "handoff_reason")? {
+                self.connection.execute(
+                    "ALTER TABLE browser_sessions ADD COLUMN handoff_reason TEXT",
+                    [],
+                )?;
+            }
+            self.connection.execute_batch(
+                "BEGIN IMMEDIATE;
+                 UPDATE browser_sessions
+                    SET driver_owner = 'extension',
+                        driver_lease_id = lower(
+                          hex(randomblob(4)) || '-' || hex(randomblob(2)) || '-4' || substr(hex(randomblob(2)), 2) ||
+                          '-' || substr('89ab', abs(random()) % 4 + 1, 1) || substr(hex(randomblob(2)), 2) ||
+                          '-' || hex(randomblob(6))
+                        ),
+                        driver_lease_state = CASE
+                          WHEN status IN ('review_required', 'submitted_tracking_pending', 'applied_recorded') THEN 'released'
+                          WHEN status = 'action_required' THEN 'human_handoff'
+                          ELSE 'held'
+                        END
+                  WHERE purpose = 'application';
+                 CREATE UNIQUE INDEX IF NOT EXISTS browser_sessions_driver_lease
+                   ON browser_sessions(driver_lease_id) WHERE driver_lease_id IS NOT NULL;
+                 UPDATE schema_meta SET version = 19;
+                 COMMIT;",
+            )?;
+            version = 19;
         }
         if version != SCHEMA_VERSION {
             return Err(StoreError::Database(rusqlite::Error::InvalidQuery));
@@ -1254,11 +1364,22 @@ impl Store {
         let transaction = self.connection.transaction()?;
         let now = Utc::now().to_rfc3339();
         let session_id = Uuid::new_v4().to_string();
+        let driver_lease_id = Uuid::new_v4().to_string();
         transaction.execute(
             "INSERT INTO browser_sessions(
-               id, purpose, role_id, preparation_id, provider, status, page_url, created_at, updated_at
-             ) VALUES (?1, 'application', ?2, ?3, ?4, 'waiting_for_extension', ?5, ?6, ?6)",
-            params![session_id, preparation.0, preparation_id, preparation.1, form_url, now],
+               id, purpose, role_id, preparation_id, provider, status, page_url,
+               driver_owner, driver_lease_id, driver_lease_state, created_at, updated_at
+             ) VALUES (?1, 'application', ?2, ?3, ?4, 'waiting_for_extension', ?5,
+                       'extension', ?6, 'held', ?7, ?7)",
+            params![
+                session_id,
+                preparation.0,
+                preparation_id,
+                preparation.1,
+                form_url,
+                driver_lease_id,
+                now
+            ],
         )?;
         insert_browser_command(
             &transaction,
@@ -1383,6 +1504,25 @@ impl Store {
             .map_err(StoreError::from)
     }
 
+    pub fn browser_command_result_matches(
+        &self,
+        command_id: &str,
+        session_id: &str,
+        command_type: &str,
+        driver_lease_id: Option<&str>,
+    ) -> Result<bool, StoreError> {
+        let matches = self.connection.query_row(
+            "SELECT COUNT(*) FROM browser_commands c
+               JOIN browser_sessions b ON b.id = c.session_id
+              WHERE c.id = ?1 AND c.status = 'leased' AND c.session_id = ?2
+                AND c.command_type = ?3
+                AND ((b.driver_lease_id IS NULL AND ?4 IS NULL) OR b.driver_lease_id = ?4)",
+            params![command_id, session_id, command_type, driver_lease_id],
+            |row| row.get::<_, i64>(0),
+        )?;
+        Ok(matches == 1)
+    }
+
     pub fn claim_browser_command(
         &mut self,
         now: DateTime<Utc>,
@@ -1406,16 +1546,39 @@ impl Store {
               )",
             [now_text.clone()],
         )?;
+        transaction.execute(
+            "UPDATE browser_sessions
+                SET driver_lease_state = CASE
+                      WHEN EXISTS (SELECT 1 FROM browser_commands c WHERE c.session_id = browser_sessions.id
+                                   AND c.status = 'permanent' AND c.error_code = 'lease_expired'
+                                   AND c.command_type != 'inspect_request') THEN 'human_handoff'
+                      WHEN EXISTS (SELECT 1 FROM browser_commands c WHERE c.session_id = browser_sessions.id
+                                   AND c.status = 'permanent' AND c.error_code = 'lease_expired'
+                                   AND c.command_type = 'inspect_request') THEN 'released'
+                      ELSE 'human_handoff' END,
+                    fallback_eligible = CASE
+                      WHEN NOT EXISTS (SELECT 1 FROM browser_commands c WHERE c.session_id = browser_sessions.id
+                                       AND c.status = 'permanent' AND c.error_code = 'lease_expired'
+                                       AND c.command_type != 'inspect_request')
+                       AND EXISTS (SELECT 1 FROM browser_commands c WHERE c.session_id = browser_sessions.id
+                                   AND c.status = 'permanent' AND c.error_code = 'lease_expired'
+                                   AND c.command_type = 'inspect_request') THEN 1 ELSE 0 END,
+                    handoff_reason = 'extension_command_expired'
+              WHERE purpose = 'application' AND status = 'action_required'
+                AND error_code = 'extension_command_expired'",
+            [],
+        )?;
         let candidate = transaction
             .query_row(
-                "SELECT c.id, c.session_id, c.command_type, c.payload_json
+                "SELECT c.id, c.session_id, c.command_type, c.payload_json, s.driver_lease_id
                    FROM browser_commands c
                    JOIN browser_sessions s ON s.id = c.session_id
                   WHERE c.status = 'pending' AND c.attempt < ?1
                     AND (
-                      (c.command_type = 'focus_review' AND s.status = 'review_required')
+                      (c.command_type = 'focus_review' AND s.status = 'review_required'
+                        AND s.driver_lease_state = 'released')
                       OR
-                      s.id = (
+                      (s.driver_lease_state IN ('held', 'none') AND s.id = (
                         SELECT active.id FROM browser_sessions active
                          WHERE active.purpose = 'application'
                            AND active.status IN (
@@ -1424,7 +1587,7 @@ impl Store {
                              'saving_answers', 'releasing'
                            )
                          ORDER BY active.created_at, active.rowid LIMIT 1
-                      )
+                      ))
                       OR (
                         s.purpose != 'application'
                         AND NOT EXISTS (
@@ -1446,11 +1609,13 @@ impl Store {
                         row.get::<_, String>(1)?,
                         row.get::<_, String>(2)?,
                         row.get::<_, String>(3)?,
+                        row.get::<_, Option<String>>(4)?,
                     ))
                 },
             )
             .optional()?;
-        let Some((command_id, session_id, command_type, payload_json)) = candidate else {
+        let Some((command_id, session_id, command_type, payload_json, driver_lease_id)) = candidate
+        else {
             transaction.commit()?;
             return Ok(None);
         };
@@ -1482,6 +1647,7 @@ impl Store {
             command_id,
             session_id,
             command_type,
+            driver_lease_id,
             payload,
         }))
     }
@@ -1529,6 +1695,26 @@ impl Store {
                 AND status != 'action_required'",
             [now_text.clone()],
         )?;
+        transaction.execute(
+            "UPDATE browser_sessions
+                SET driver_lease_state = CASE
+                      WHEN EXISTS (SELECT 1 FROM browser_commands c WHERE c.session_id = browser_sessions.id
+                                   AND c.status = 'permanent' AND c.command_type != 'inspect_request')
+                        THEN 'human_handoff'
+                      WHEN EXISTS (SELECT 1 FROM browser_commands c WHERE c.session_id = browser_sessions.id
+                                   AND c.status = 'permanent' AND c.command_type = 'inspect_request')
+                        THEN 'released' ELSE 'human_handoff' END,
+                    fallback_eligible = CASE
+                      WHEN NOT EXISTS (SELECT 1 FROM browser_commands c WHERE c.session_id = browser_sessions.id
+                                       AND c.status = 'permanent' AND c.command_type != 'inspect_request')
+                       AND EXISTS (SELECT 1 FROM browser_commands c WHERE c.session_id = browser_sessions.id
+                                   AND c.status = 'permanent' AND c.command_type = 'inspect_request')
+                        THEN 1 ELSE 0 END,
+                    handoff_reason = error_code
+              WHERE purpose = 'application' AND status = 'action_required'
+                AND error_code IN ('extension_command_expired', 'extension_handshake_timeout')",
+            [],
+        )?;
         let session_ids = {
             let mut statement = transaction.prepare(
                 "SELECT DISTINCT b.id
@@ -1574,11 +1760,28 @@ impl Store {
                 "inspected page does not match the prepared role".to_string(),
             ));
         }
-        let no_compatible_fields = inspection
-            .fields
-            .as_array()
-            .is_some_and(|fields| fields.is_empty());
-        let next_status = if purpose == "application" && !no_compatible_fields {
+        let no_compatible_fields = inspection.fields.as_array().is_none_or(|fields| {
+            !fields.iter().any(|field| {
+                field.get("control").and_then(serde_json::Value::as_str) != Some("unsupported")
+            })
+        });
+        let unsupported_flow =
+            purpose == "application" && inspection.flow_disposition != "fillable";
+        let blocked = purpose == "application" && (no_compatible_fields || unsupported_flow);
+        let fallback_eligible = blocked && inspection.flow_disposition != "human_handoff";
+        let handoff_reason = if no_compatible_fields {
+            Some("no_compatible_fields".to_string())
+        } else {
+            inspection
+                .flow_issues
+                .as_array()
+                .and_then(|issues| issues.first())
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        };
+        let next_status = if blocked {
+            "action_required"
+        } else if purpose == "application" {
             "drafting_answers"
         } else {
             "releasing"
@@ -1587,9 +1790,12 @@ impl Store {
             "UPDATE browser_sessions
                 SET status = ?1, ats = ?2, page_title = ?3, page_url = ?4,
                     snapshot_fingerprint = ?5, fields_json = ?6, field_count = ?7,
-                    safe_field_count = ?8, needs_user_count = ?9, error_code = NULL,
-                    updated_at = ?10
-              WHERE id = ?11",
+                    safe_field_count = ?8, needs_user_count = ?9, error_code = ?10,
+                    driver_lease_state = CASE WHEN ?11 THEN 'released'
+                                              WHEN ?12 THEN 'human_handoff'
+                                              ELSE driver_lease_state END,
+                    fallback_eligible = ?11, handoff_reason = ?10, updated_at = ?13
+              WHERE id = ?14",
             params![
                 next_status,
                 inspection.ats,
@@ -1600,16 +1806,19 @@ impl Store {
                 inspection.fields.as_array().map_or(0, Vec::len) as i64,
                 inspection.safe_field_count as i64,
                 inspection.needs_user_count as i64,
+                handoff_reason,
+                fallback_eligible,
+                blocked && !fallback_eligible,
                 now,
                 session_id
             ],
         )?;
-        if purpose == "connection_check" || no_compatible_fields {
+        if purpose == "connection_check" {
             insert_browser_command(
                 &transaction,
                 &session_id,
                 "release_for_review",
-                &serde_json::json!({ "expectedUrl": inspection.page_url }),
+                &serde_json::json!({ "expectedUrl": inspection.page_url, "connectionCheck": true }),
                 &now,
             )?;
         }
@@ -1720,13 +1929,17 @@ impl Store {
         let next_status = if has_browser_work {
             "filling"
         } else {
-            "persisting_answers"
+            "action_required"
         };
         let empty_fill_results = serde_json::json!([]);
         transaction.execute(
             "UPDATE browser_sessions SET status = ?1, answers_context_hash = ?2,
                     review_items_json = ?3, fill_results_json = ?4,
-                    error_code = NULL, updated_at = ?5 WHERE id = ?6",
+                    error_code = ?5,
+                    driver_lease_state = CASE WHEN ?6 THEN driver_lease_state ELSE 'human_handoff' END,
+                    fallback_eligible = 0,
+                    handoff_reason = CASE WHEN ?6 THEN NULL ELSE 'manual_completion_required' END,
+                    updated_at = ?7 WHERE id = ?8",
             params![
                 next_status,
                 context_hash,
@@ -1736,6 +1949,8 @@ impl Store {
                 } else {
                     Some(empty_fill_results.to_string())
                 },
+                if has_browser_work { None } else { Some("manual_completion_required") },
+                has_browser_work,
                 now,
                 session_id
             ],
@@ -1771,10 +1986,12 @@ impl Store {
     ) -> Result<BrowserSessionSummary, StoreError> {
         let transaction = self.connection.transaction()?;
         let session_id = leased_browser_command(&transaction, command_id, "fill_plan")?;
-        let payload_json = transaction.query_row(
-            "SELECT payload_json FROM browser_commands WHERE id = ?1",
+        let (payload_json, fields_json) = transaction.query_row(
+            "SELECT c.payload_json, b.fields_json
+               FROM browser_commands c JOIN browser_sessions b ON b.id = c.session_id
+              WHERE c.id = ?1",
             [command_id],
-            |row| row.get::<_, String>(0),
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
         )?;
         let payload: serde_json::Value = serde_json::from_str(&payload_json).map_err(|error| {
             StoreError::InvalidBrowserTransition(format!(
@@ -1782,6 +1999,32 @@ impl Store {
             ))
         })?;
         let results = normalized_browser_fill_results(results, &payload)?;
+        let fields: serde_json::Value = serde_json::from_str(&fields_json).map_err(|error| {
+            StoreError::InvalidBrowserTransition(format!("stored form fields are invalid: {error}"))
+        })?;
+        let required_ids = fields
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|field| {
+                field.get("required").and_then(serde_json::Value::as_bool) == Some(true)
+            })
+            .filter_map(|field| field.get("id").and_then(serde_json::Value::as_str))
+            .collect::<std::collections::BTreeSet<_>>();
+        let upload_id = payload
+            .pointer("/cvUpload/fieldId")
+            .and_then(serde_json::Value::as_str);
+        let required_failed = results.as_array().is_some_and(|items| {
+            items.iter().any(|item| {
+                let field_id = item.get("fieldId").and_then(serde_json::Value::as_str);
+                let required =
+                    field_id.is_some_and(|id| required_ids.contains(id) || upload_id == Some(id));
+                required
+                    && item.get("status").and_then(serde_json::Value::as_str) != Some("verified")
+                    && item.get("reasonCode").and_then(serde_json::Value::as_str)
+                        != Some("user_file_preserved")
+            })
+        });
         let now = Utc::now().to_rfc3339();
         transaction.execute(
             "UPDATE browser_commands SET status = 'completed', lease_expires_at = NULL,
@@ -1789,9 +2032,20 @@ impl Store {
             params![now, command_id],
         )?;
         transaction.execute(
-            "UPDATE browser_sessions SET status = 'persisting_answers', fill_results_json = ?1,
-                    error_code = NULL, updated_at = ?2 WHERE id = ?3",
-            params![results.to_string(), now, session_id],
+            "UPDATE browser_sessions SET status = ?1, fill_results_json = ?2,
+                    error_code = ?3,
+                    driver_lease_state = CASE WHEN ?4 THEN 'human_handoff' ELSE driver_lease_state END,
+                    fallback_eligible = 0,
+                    handoff_reason = CASE WHEN ?4 THEN 'required_fill_readback_failed' ELSE NULL END,
+                    updated_at = ?5 WHERE id = ?6",
+            params![
+                if required_failed { "action_required" } else { "persisting_answers" },
+                results.to_string(),
+                if required_failed { Some("required_fill_readback_failed") } else { None },
+                required_failed,
+                now,
+                session_id
+            ],
         )?;
         transaction.commit()?;
         self.browser_session(&session_id)
@@ -1947,7 +2201,9 @@ impl Store {
             params![now, command_id],
         )?;
         transaction.execute(
-            "UPDATE browser_sessions SET status = ?1, error_code = NULL, updated_at = ?2 WHERE id = ?3",
+            "UPDATE browser_sessions SET status = ?1, error_code = NULL,
+                    driver_lease_state = CASE WHEN purpose = 'application' THEN 'released' ELSE driver_lease_state END,
+                    fallback_eligible = 0, handoff_reason = NULL, updated_at = ?2 WHERE id = ?3",
             params![next_status, now, session_id],
         )?;
         if purpose == "connection_check" {
@@ -2071,6 +2327,7 @@ impl Store {
             "failed"
         };
         let now = Utc::now().to_rfc3339();
+        let fallback_eligible = browser_failure_is_fallback_eligible(&command_type, error_code);
         transaction.execute(
             "UPDATE browser_commands SET status = ?1, lease_expires_at = NULL,
                     error_code = ?2, updated_at = ?3 WHERE id = ?4",
@@ -2078,8 +2335,12 @@ impl Store {
         )?;
         transaction.execute(
             "UPDATE browser_sessions SET status = 'action_required', error_code = ?1,
-                    updated_at = ?2 WHERE id = ?3",
-            params![error_code, now, session_id],
+                    driver_lease_state = CASE
+                      WHEN purpose != 'application' THEN driver_lease_state
+                      WHEN ?2 THEN 'released' ELSE 'human_handoff' END,
+                    fallback_eligible = CASE WHEN purpose = 'application' AND ?2 THEN 1 ELSE 0 END,
+                    handoff_reason = ?1, updated_at = ?3 WHERE id = ?4",
+            params![error_code, fallback_eligible, now, session_id],
         )?;
         let application = transaction
             .query_row(
@@ -2129,11 +2390,17 @@ impl Store {
         session_id: &str,
     ) -> Result<BrowserSessionSummary, StoreError> {
         let transaction = self.connection.transaction()?;
-        let (status, error_code) = transaction
+        let (status, error_code, driver_lease_state) = transaction
             .query_row(
-                "SELECT status, error_code FROM browser_sessions WHERE id = ?1",
+                "SELECT status, error_code, driver_lease_state FROM browser_sessions WHERE id = ?1",
                 [session_id],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
             )
             .optional()?
             .ok_or_else(|| {
@@ -2142,6 +2409,11 @@ impl Store {
         if status != "action_required" {
             return Err(StoreError::InvalidBrowserTransition(
                 "only an action-required browser session can be retried".to_string(),
+            ));
+        }
+        if driver_lease_state == "human_handoff" {
+            return Err(StoreError::InvalidBrowserTransition(
+                "this browser session may have changed the live form and requires human review before another driver can run".to_string(),
             ));
         }
         if matches!(
@@ -2218,8 +2490,12 @@ impl Store {
             _ => "waiting_for_extension",
         };
         transaction.execute(
-            "UPDATE browser_sessions SET status = ?1, error_code = NULL, updated_at = ?2 WHERE id = ?3",
-            params![next_status, now, session_id],
+            "UPDATE browser_sessions SET status = ?1, error_code = NULL,
+                    driver_owner = CASE WHEN purpose = 'application' THEN 'extension' ELSE driver_owner END,
+                    driver_lease_id = CASE WHEN purpose = 'application' THEN ?2 ELSE driver_lease_id END,
+                    driver_lease_state = CASE WHEN purpose = 'application' THEN 'held' ELSE driver_lease_state END,
+                    fallback_eligible = 0, handoff_reason = NULL, updated_at = ?3 WHERE id = ?4",
+            params![next_status, Uuid::new_v4().to_string(), now, session_id],
         )?;
         transaction.commit()?;
         self.browser_session(session_id)
@@ -4479,10 +4755,60 @@ fn normalized_browser_fill_results(
     let items = results.as_array().ok_or_else(|| {
         StoreError::InvalidBrowserTransition("browser fill results are not an array".to_string())
     })?;
-    let upload_field_id = payload
-        .pointer("/cvUpload/fieldId")
-        .and_then(serde_json::Value::as_str);
+    let instructions = payload
+        .pointer("/plan/instructions")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| {
+            StoreError::InvalidBrowserTransition("stored fill plan has no instructions".to_string())
+        })?;
+    let mut expected = std::collections::BTreeMap::<String, String>::new();
+    for instruction in instructions {
+        let field_id = instruction
+            .get("fieldId")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                StoreError::InvalidBrowserTransition(
+                    "stored fill plan has an invalid field id".to_string(),
+                )
+            })?;
+        let value = instruction
+            .get("value")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                StoreError::InvalidBrowserTransition(
+                    "stored fill plan has an invalid value".to_string(),
+                )
+            })?;
+        if expected
+            .insert(field_id.to_string(), hash_browser_readback(value))
+            .is_some()
+        {
+            return Err(StoreError::InvalidBrowserTransition(
+                "stored fill plan contains a duplicate field id".to_string(),
+            ));
+        }
+    }
+    if let Some(upload) = payload.get("cvUpload") {
+        let field_id = upload
+            .get("fieldId")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                StoreError::InvalidBrowserTransition(
+                    "stored CV upload has an invalid field id".to_string(),
+                )
+            })?;
+        let hash = upload
+            .get("sha256")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                StoreError::InvalidBrowserTransition(
+                    "stored CV upload has an invalid hash".to_string(),
+                )
+            })?;
+        expected.insert(field_id.to_string(), hash.to_string());
+    }
     let mut normalized = Vec::<serde_json::Value>::with_capacity(items.len());
+    let mut seen = std::collections::BTreeSet::<String>::new();
     for item in items {
         let field_id = item
             .get("fieldId")
@@ -4492,20 +4818,60 @@ fn normalized_browser_fill_results(
                     "browser fill result is missing its field id".to_string(),
                 )
             })?;
-        if let Some(position) = normalized.iter().position(|existing| {
-            existing.get("fieldId").and_then(serde_json::Value::as_str) == Some(field_id)
-        }) {
-            if upload_field_id == Some(field_id) {
-                normalized[position] = item.clone();
-                continue;
-            }
+        if !expected.contains_key(field_id) {
+            return Err(StoreError::InvalidBrowserTransition(
+                "browser fill results contain an unplanned field id".to_string(),
+            ));
+        }
+        if !seen.insert(field_id.to_string()) {
             return Err(StoreError::InvalidBrowserTransition(
                 "browser fill results contain a duplicate field id".to_string(),
             ));
         }
+        if item.get("status").and_then(serde_json::Value::as_str) == Some("verified")
+            && item
+                .get("readBackSha256")
+                .and_then(serde_json::Value::as_str)
+                != expected.get(field_id).map(String::as_str)
+        {
+            return Err(StoreError::InvalidBrowserTransition(
+                "browser fill read-back hash does not match the planned value".to_string(),
+            ));
+        }
         normalized.push(item.clone());
     }
+    if seen.len() != expected.len() || expected.keys().any(|field_id| !seen.contains(field_id)) {
+        return Err(StoreError::InvalidBrowserTransition(
+            "browser fill results do not cover every planned field exactly once".to_string(),
+        ));
+    }
     Ok(serde_json::Value::Array(normalized))
+}
+
+fn hash_browser_readback(value: &str) -> String {
+    let normalized = value.replace("\r\n", "\n").replace('\r', "\n");
+    format!("{:x}", Sha256::digest(normalized.trim().as_bytes()))
+}
+
+fn browser_failure_is_fallback_eligible(command_type: &str, error_code: &str) -> bool {
+    match command_type {
+        "inspect_request" => matches!(
+            error_code,
+            "extension_handshake_timeout"
+                | "extension_command_expired"
+                | "no_active_application_page"
+                | "unsupported_or_unavailable_page"
+                | "extension_message_interrupted"
+                | "application_tab_recovery_failed"
+                | "inspection_failed"
+                | "invalid_form_snapshot"
+        ),
+        "fill_plan" => matches!(
+            error_code,
+            "snapshot_mismatch" | "form_drift_before_fill" | "invalid_fill_plan_duplicate_field"
+        ),
+        _ => false,
+    }
 }
 
 fn leased_browser_command(
@@ -5050,7 +5416,10 @@ fn missed_nominal_times(
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_EVALUATION_SYNC_ATTEMPTS, PreparationCompletion, QueueFilters, Store};
+    use super::{
+        MAX_EVALUATION_SYNC_ATTEMPTS, PreparationCompletion, QueueFilters, Store,
+        hash_browser_readback,
+    };
     use crate::domain::{
         BrowserSessionSummary, EvaluationResultRead, HistoryRecord, ImportResult, PreparationWork,
         QueueGroup,
@@ -6456,6 +6825,8 @@ mod tests {
             page_url: "https://jobs.ashbyhq.com/acme/role".to_string(),
             snapshot_fingerprint: "a".repeat(64),
             fields,
+            flow_disposition: "fillable".to_string(),
+            flow_issues: serde_json::json!([]),
             safe_field_count: 1,
             needs_user_count: 1,
         };
@@ -6567,7 +6938,7 @@ mod tests {
     }
 
     #[test]
-    fn application_session_with_no_compatible_fields_releases_for_manual_review() {
+    fn application_session_with_no_compatible_fields_releases_driver_for_future_fallback() {
         let directory = tempfile::tempdir().unwrap();
         let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
         import_evaluated(&mut store, DATASET);
@@ -6615,12 +6986,27 @@ mod tests {
                     page_url: "https://example.test/jobs/1".to_string(),
                     snapshot_fingerprint: "f".repeat(64),
                     fields: serde_json::json!([]),
+                    flow_disposition: "fallback_eligible".to_string(),
+                    flow_issues: serde_json::json!(["custom_widget"]),
                     safe_field_count: 0,
                     needs_user_count: 0,
                 },
             )
             .unwrap();
-        assert_eq!(inspected.status, "releasing");
+        assert_eq!(inspected.status, "action_required");
+        let lease_state: (String, i64, Option<String>) = store.connection.query_row(
+            "SELECT driver_lease_state, fallback_eligible, handoff_reason FROM browser_sessions WHERE id = ?1",
+            [&inspected.id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).unwrap();
+        assert_eq!(
+            lease_state,
+            (
+                "released".to_string(),
+                1,
+                Some("no_compatible_fields".to_string())
+            )
+        );
         assert!(
             store
                 .take_in_app_outcome_notifications(5)
@@ -6628,27 +7014,13 @@ mod tests {
                 .is_empty()
         );
 
-        let release = store
-            .claim_browser_command(chrono::Utc::now(), chrono::Duration::seconds(30))
-            .unwrap()
-            .unwrap();
-        assert_eq!(release.command_type, "release_for_review");
-        assert_eq!(
+        assert!(
             store
-                .complete_browser_release(&release.command_id)
+                .claim_browser_command(chrono::Utc::now(), chrono::Duration::seconds(30))
                 .unwrap()
-                .status,
-            "review_required"
+                .is_none()
         );
         assert!(store.claim_answer_work().unwrap().is_none());
-        let ready = store.take_in_app_outcome_notifications(5).unwrap();
-        assert_eq!(ready.len(), 1);
-        assert_eq!(ready[0].event_kind, "application_ready");
-        assert_eq!(ready[0].action_kind, "review_form");
-        assert_eq!(
-            ready[0].browser_session_id.as_deref(),
-            Some(inspected.id.as_str())
-        );
         assert!(
             store
                 .take_in_app_outcome_notifications(5)
@@ -6857,6 +7229,8 @@ mod tests {
                     "required": true, "options": [], "classification": "compensation", "reason": "canonical preference"
                 }
             ]),
+            flow_disposition: "fillable".to_string(),
+            flow_issues: serde_json::json!([]),
             safe_field_count: 1,
             needs_user_count: 2,
         };
@@ -6919,15 +7293,51 @@ mod tests {
         assert_eq!(fill.command_type, "fill_plan");
         assert_eq!(fill.payload["cvUpload"]["fieldId"], "resume");
         assert!(fill.payload.get("uploads").is_none());
+        assert!(fill.driver_lease_id.is_some());
+        assert!(
+            store
+                .browser_command_result_matches(
+                    &fill.command_id,
+                    &fill.session_id,
+                    &fill.command_type,
+                    fill.driver_lease_id.as_deref(),
+                )
+                .unwrap()
+        );
+        assert!(
+            !store
+                .browser_command_result_matches(
+                    &fill.command_id,
+                    &fill.session_id,
+                    &fill.command_type,
+                    Some("00000000-0000-4000-8000-000000000000"),
+                )
+                .unwrap()
+        );
+        assert!(store.complete_browser_fill(
+            &fill.command_id,
+            &serde_json::json!([
+                { "fieldId": "email", "status": "verified", "reasonCode": "verified", "reason": null, "mutated": true, "readBackSha256": hash_browser_readback("verified@example.test") }
+            ]),
+        ).is_err());
+        assert!(store.complete_browser_fill(
+            &fill.command_id,
+            &serde_json::json!([
+                { "fieldId": "email", "status": "verified", "reasonCode": "verified", "reason": null, "mutated": true, "readBackSha256": hash_browser_readback("verified@example.test") },
+                { "fieldId": "email", "status": "verified", "reasonCode": "verified", "reason": null, "mutated": true, "readBackSha256": hash_browser_readback("verified@example.test") },
+                { "fieldId": "story", "status": "verified", "reasonCode": "verified", "reason": null, "mutated": true, "readBackSha256": hash_browser_readback("A grounded first sentence. A grounded second sentence.") },
+                { "fieldId": "salary", "status": "verified", "reasonCode": "verified", "reason": null, "mutated": true, "readBackSha256": hash_browser_readback("52000") },
+                { "fieldId": "resume", "status": "verified", "reasonCode": "verified", "reason": null, "mutated": true, "readBackSha256": "c".repeat(64) }
+            ]),
+        ).is_err());
         store
             .complete_browser_fill(
                 &fill.command_id,
                 &serde_json::json!([
-                    { "fieldId": "resume", "status": "skipped", "reason": "File controls use the verified upload path." },
-                    { "fieldId": "email", "status": "verified", "reason": null },
-                    { "fieldId": "story", "status": "verified", "reason": null },
-                    { "fieldId": "salary", "status": "verified", "reason": null },
-                    { "fieldId": "resume", "status": "verified", "reason": null }
+                    { "fieldId": "email", "status": "verified", "reasonCode": "verified", "reason": null, "mutated": true, "readBackSha256": hash_browser_readback("verified@example.test") },
+                    { "fieldId": "story", "status": "verified", "reasonCode": "verified", "reason": null, "mutated": true, "readBackSha256": hash_browser_readback("A grounded first sentence. A grounded second sentence.") },
+                    { "fieldId": "salary", "status": "verified", "reasonCode": "verified", "reason": null, "mutated": true, "readBackSha256": hash_browser_readback("52000") },
+                    { "fieldId": "resume", "status": "verified", "reasonCode": "verified", "reason": null, "mutated": true, "readBackSha256": "c".repeat(64) }
                 ]),
             )
             .unwrap();
@@ -7013,6 +7423,8 @@ mod tests {
                 "id": "email", "label": "Email", "control": "input", "inputType": "email",
                 "required": true, "options": [], "classification": "safe_verified", "reason": "verified"
             }]),
+            flow_disposition: "fillable".to_string(),
+            flow_issues: serde_json::json!([]),
             safe_field_count: 1,
             needs_user_count: 0,
         };
@@ -7021,6 +7433,41 @@ mod tests {
             .unwrap();
         assert_eq!(reinspected.status, "drafting_answers");
         assert_eq!(reinspected.snapshot_fingerprint, Some("9".repeat(64)));
+        let refill_work = store.claim_answer_work().unwrap().unwrap();
+        let refill_plan = serde_json::json!({
+            "protocolVersion": 1,
+            "snapshotFingerprint": "9".repeat(64),
+            "instructions": [{ "fieldId": "email", "value": "verified@example.test", "classification": "safe_verified" }]
+        });
+        store
+            .complete_answer_work(
+                &refill_work.session_id,
+                &"8".repeat(64),
+                &refill_plan,
+                &serde_json::json!([]),
+                None,
+            )
+            .unwrap();
+        let refill_command = store
+            .claim_browser_command(chrono::Utc::now(), chrono::Duration::seconds(30))
+            .unwrap()
+            .unwrap();
+        let handoff = store
+            .complete_browser_fill(
+                &refill_command.command_id,
+                &serde_json::json!([{
+                    "fieldId": "email", "status": "failed", "reasonCode": "readback_mismatch",
+                    "reason": "Settled read-back did not match the planned value.", "mutated": true,
+                    "readBackSha256": hash_browser_readback("framework rewrite")
+                }]),
+            )
+            .unwrap();
+        assert_eq!(handoff.status, "action_required");
+        assert_eq!(
+            handoff.error_code.as_deref(),
+            Some("required_fill_readback_failed")
+        );
+        assert!(store.retry_browser_session(&handoff.id).is_err());
         store.mark_submitted_tracking_pending(&session.id).unwrap();
         assert_eq!(
             store.browser_session(&session.id).unwrap().status,
@@ -7213,6 +7660,8 @@ mod tests {
                 "label": "Private question",
                 "classification": "sensitive"
             }]),
+            flow_disposition: "fillable".to_string(),
+            flow_issues: serde_json::json!([]),
             safe_field_count: 0,
             needs_user_count: 1,
         };
@@ -7302,6 +7751,17 @@ mod tests {
                        attempt INTEGER NOT NULL DEFAULT 0, input_hash TEXT,
                        current_receipt_key TEXT, lease_expires_at TEXT,
                        created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+                     );
+                     CREATE TABLE browser_sessions(
+                       id TEXT PRIMARY KEY, purpose TEXT NOT NULL, role_id TEXT,
+                       status TEXT NOT NULL, ats TEXT, page_title TEXT, page_url TEXT,
+                       snapshot_fingerprint TEXT, fields_json TEXT,
+                       field_count INTEGER NOT NULL DEFAULT 0,
+                       safe_field_count INTEGER NOT NULL DEFAULT 0,
+                       needs_user_count INTEGER NOT NULL DEFAULT 0, error_code TEXT,
+                       created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                       preparation_id TEXT, provider TEXT, answers_context_hash TEXT,
+                       review_items_json TEXT, fill_results_json TEXT, answers_report_hash TEXT
                      );
                      INSERT INTO evaluation_receipts VALUES (
                        'receipt-1', 'role-1', 42, 'reports/42.md', 'hash', 'revision',

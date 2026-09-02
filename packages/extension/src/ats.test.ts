@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { classifyField, detectAts, inspectForm } from "./ats";
 import { BROWSER_COMMAND_TYPES } from "./contracts";
 import type { FileUploadInstruction, FillPlan } from "./contracts";
@@ -100,6 +100,7 @@ describe("ATS trust boundary", () => {
     const snapshot = await inspectForm(doc, new URL("https://apply.example.com/form"));
 
     expect(snapshot.fields.map((field) => field.id)).toEqual(["location"]);
+    expect(snapshot.flow).toEqual({ disposition: "fallback_eligible", issues: ["multi_step_form"] });
     expect(doc.querySelector<HTMLInputElement>("#first-name")?.dataset.hfwFieldId).toBeUndefined();
     expect(doc.querySelector<HTMLInputElement>("#location")?.dataset.hfwFieldId).toBe("location");
   });
@@ -111,7 +112,7 @@ describe("ATS trust boundary", () => {
     const snapshot = await inspectForm(doc, new URL("https://apply.example.com/form"));
     const section = doc.querySelector("section");
     section?.setAttribute("hidden", "");
-    const plan = {
+    const plan: FillPlan = {
       protocolVersion: 1,
       snapshotFingerprint: snapshot.fingerprint,
       instructions: [{ fieldId: "email", value: "verified@example.test", classification: "safe_verified" }],
@@ -119,7 +120,14 @@ describe("ATS trust boundary", () => {
 
     const result = await applyFillPlan(plan, snapshot.fingerprint, doc);
 
-    expect(result).toEqual([{ fieldId: "email", status: "skipped", reason: "Control is unavailable or unsupported." }]);
+    expect(result).toEqual([{
+      fieldId: "email",
+      status: "failed",
+      reasonCode: "control_hidden",
+      reason: "The inspected control is no longer visible.",
+      mutated: false,
+      readBackSha256: null,
+    }]);
     expect(doc.querySelector<HTMLInputElement>("#email")?.value).toBe("");
   });
 
@@ -174,7 +182,14 @@ describe("ATS trust boundary", () => {
       });
     });
 
-    expect(results).toEqual([{ fieldId: "resume", status: "verified", reason: null }]);
+    expect(results).toEqual([{
+      fieldId: "resume",
+      status: "verified",
+      reasonCode: "verified",
+      reason: null,
+      mutated: true,
+      readBackSha256: hash,
+    }]);
     expect(results.filter((item) => item.fieldId === "resume")).toHaveLength(1);
     expect(doc.querySelector<HTMLInputElement>("#resume")?.files?.item(0)?.name).toBe("Leonardo_Gomez_Frontend_Engineer.pdf");
   });
@@ -208,7 +223,10 @@ describe("ATS trust boundary", () => {
     expect(results).toEqual([{
       fieldId: "resume",
       status: "skipped",
+      reasonCode: "user_file_preserved",
       reason: "The CV already selected by the user was preserved.",
+      mutated: false,
+      readBackSha256: null,
     }]);
     expect(element.files?.item(0)?.name).toBe("my-selected-cv.pdf");
   });
@@ -258,6 +276,114 @@ describe("ATS trust boundary", () => {
     expect(doc.querySelector<HTMLSelectElement>("#work-country")?.value).toBe("Spain");
     expect(doc.querySelector<HTMLInputElement>("#salary")?.value).toBe("52000");
     expect(doc.querySelector<HTMLInputElement>("#resume")?.files?.item(0)?.name).toBe("Leonardo_Gomez_Frontend_Engineer.pdf");
+  });
+
+  it("waits for framework rewrites before accepting read-back", async () => {
+    const doc = new DOMParser().parseFromString(
+      "<form><label for='name'>Name</label><input id='name' autocomplete='name'></form>",
+      "text/html",
+    );
+    const snapshot = await inspectForm(doc, new URL("https://apply.example.com/form"));
+    const input = doc.querySelector<HTMLInputElement>("#name")!;
+    input.addEventListener("change", () => setTimeout(() => { input.value = "framework rewrite"; }, 0));
+
+    const results = await applyFillPlan({
+      protocolVersion: 1,
+      snapshotFingerprint: snapshot.fingerprint,
+      instructions: [{ fieldId: "name", value: "Safe Value", classification: "safe_verified" }],
+    }, snapshot.fingerprint, doc, [], undefined, { settleDelaysMs: [10, 10] });
+
+    expect(results[0]).toMatchObject({ status: "failed", reasonCode: "readback_mismatch", mutated: true });
+  });
+
+  it("detects a control replaced after its events settle", async () => {
+    const doc = new DOMParser().parseFromString(
+      "<form><label for='email'>Email</label><input id='email' type='email'></form>",
+      "text/html",
+    );
+    const snapshot = await inspectForm(doc, new URL("https://apply.example.com/form"));
+    const input = doc.querySelector<HTMLInputElement>("#email")!;
+    input.addEventListener("change", () => setTimeout(() => {
+      const replacement = input.cloneNode() as HTMLInputElement;
+      input.replaceWith(replacement);
+    }, 0));
+
+    const results = await applyFillPlan({
+      protocolVersion: 1,
+      snapshotFingerprint: snapshot.fingerprint,
+      instructions: [{ fieldId: "email", value: "safe@example.test", classification: "safe_verified" }],
+    }, snapshot.fingerprint, doc, [], undefined, { settleDelaysMs: [10, 10] });
+
+    expect(results[0]).toMatchObject({ status: "failed", reasonCode: "control_replaced", mutated: true });
+  });
+
+  it("verifies native selects by option text after change events settle", async () => {
+    const doc = new DOMParser().parseFromString(
+      "<form><label for='country'>Country</label><select id='country'><option value='ES'>Spain</option></select></form>",
+      "text/html",
+    );
+    const snapshot = await inspectForm(doc, new URL("https://apply.example.com/form"));
+    const results = await applyFillPlan({
+      protocolVersion: 1,
+      snapshotFingerprint: snapshot.fingerprint,
+      instructions: [{ fieldId: "country", value: "Spain", classification: "safe_verified" }],
+    }, snapshot.fingerprint, doc, [], undefined, { settleDelaysMs: [] });
+
+    expect(results[0]).toMatchObject({ status: "verified", reasonCode: "verified" });
+    expect(doc.querySelector<HTMLSelectElement>("#country")?.value).toBe("ES");
+  });
+
+  it("rejects duplicate planned fields before mutating the page", async () => {
+    const doc = new DOMParser().parseFromString(
+      "<form><label for='email'>Email</label><input id='email' type='email'></form>",
+      "text/html",
+    );
+    const snapshot = await inspectForm(doc, new URL("https://apply.example.com/form"));
+    const plan: FillPlan = {
+      protocolVersion: 1,
+      snapshotFingerprint: snapshot.fingerprint,
+      instructions: [
+        { fieldId: "email", value: "one@example.test", classification: "safe_verified" },
+        { fieldId: "email", value: "two@example.test", classification: "safe_verified" },
+      ],
+    };
+
+    await expect(applyFillPlan(plan, snapshot.fingerprint, doc)).rejects.toThrow("invalid_fill_plan_duplicate_field");
+    expect(doc.querySelector<HTMLInputElement>("#email")?.value).toBe("");
+  });
+
+  it.each([
+    ["custom widget", "<form><div role='combobox' aria-label='Country'></div></form>", "custom_widget"],
+    ["embedded frame", "<iframe title='Application form' src='https://forms.example.test/apply'></iframe>", "embedded_frame"],
+    ["modal", "<div role='dialog'><form><input name='email' type='email'></form></div>", "modal_form"],
+  ])("classifies %s flows as fallback eligible", async (_name, html, issue) => {
+    const snapshot = await inspectForm(new DOMParser().parseFromString(html, "text/html"), new URL("https://apply.example.com/form"));
+    expect(snapshot.flow.disposition).toBe("fallback_eligible");
+    expect(snapshot.flow.issues).toContain(issue);
+  });
+
+  it.each([
+    ["authentication", "<form><input type='password'></form>", "authentication_required"],
+    ["CAPTCHA", "<form><div data-sitekey='public-key'></div><input name='email' type='email'></form>", "captcha_or_antibot"],
+  ])("classifies %s as a human handoff", async (_name, html, issue) => {
+    const snapshot = await inspectForm(new DOMParser().parseFromString(html, "text/html"), new URL("https://apply.example.com/form"));
+    expect(snapshot.flow.disposition).toBe("human_handoff");
+    expect(snapshot.flow.issues).toContain(issue);
+  });
+
+  it("detects form drift before any fill", async () => {
+    const doc = new DOMParser().parseFromString(
+      "<form><label for='email'>Email</label><input id='email' type='email'></form>",
+      "text/html",
+    );
+    const snapshot = await inspectForm(doc, new URL("https://apply.example.com/form"));
+    const fingerprint = vi.fn().mockResolvedValue("f".repeat(64));
+    await expect(applyFillPlan({
+      protocolVersion: 1,
+      snapshotFingerprint: snapshot.fingerprint,
+      instructions: [{ fieldId: "email", value: "safe@example.test", classification: "safe_verified" }],
+    }, snapshot.fingerprint, doc, [], undefined, { currentFingerprint: fingerprint })).rejects.toThrow("form_drift_before_fill");
+    expect(doc.querySelector<HTMLInputElement>("#email")?.value).toBe("");
   });
 
   it("guards the terminal control only until release", () => {

@@ -249,7 +249,10 @@ export interface BrowserSessionSummary {
   needsUserCount: number;
   errorCode: string | null;
   reviewItems: Array<{ fieldId: string; label: string; decision: string; answer?: string; provenance?: string[]; reason?: string }> | null;
-  fillResults: Array<{ fieldId: string; status: string; reason: string | null }> | null;
+  fillResults: Array<{ fieldId: string; status: string; reasonCode: string; reason: string | null; mutated: boolean; readBackSha256: string | null }> | null;
+  flow?: { disposition: "fillable" | "fallback_eligible" | "human_handoff"; issues: string[] } | null;
+  driverLeaseId?: string | null;
+  driverLeaseState?: "held" | "released" | null;
   updatedAt: string;
 }
 

@@ -378,6 +378,7 @@ pub struct BrowserCommand {
     pub command_id: String,
     pub session_id: String,
     pub command_type: String,
+    pub driver_lease_id: Option<String>,
     pub payload: serde_json::Value,
 }
 
@@ -388,6 +389,8 @@ pub struct BrowserInspection {
     pub page_url: String,
     pub snapshot_fingerprint: String,
     pub fields: serde_json::Value,
+    pub flow_disposition: String,
+    pub flow_issues: serde_json::Value,
     pub safe_field_count: usize,
     pub needs_user_count: usize,
 }

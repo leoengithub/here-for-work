@@ -1302,7 +1302,7 @@ function validateAnswerResult(result, expectedHash, snapshot, sources) {
     if (!answer) throw new Error("Answer result referenced the wrong form fields.");
     const [verifiedValue, factKey] = verifiedValueForField(field, facts);
     if (field.classification === "safe_verified" && verifiedValue) {
-      instructions.push({ fieldId: field.id, value: verifiedValue, classification: "safe_verified" });
+      instructions.push({ fieldId: field.id, value: verifiedValue, classification: "safe_verified", required: field.required === true });
       reviewItems.push({ fieldId: field.id, label: field.label, decision: "fill", answer: verifiedValue, provenance: [`config/profile.yml:${factKey}`] });
       continue;
     }
@@ -1310,7 +1310,7 @@ function validateAnswerResult(result, expectedHash, snapshot, sources) {
       ? canonicalCompensationForField(field, sources)
       : null;
     if (compensation) {
-      instructions.push({ fieldId: field.id, value: compensation.value, classification: "canonical_preference" });
+      instructions.push({ fieldId: field.id, value: compensation.value, classification: "canonical_preference", required: field.required === true });
       reviewItems.push({
         fieldId: field.id,
         label: field.label,
@@ -1324,7 +1324,7 @@ function validateAnswerResult(result, expectedHash, snapshot, sources) {
       ? verifiedAnswerFromSources(answer, sources)
       : null;
     if (verifiedSourceAnswer) {
-      instructions.push({ fieldId: field.id, value: verifiedSourceAnswer.value, classification: "safe_verified" });
+      instructions.push({ fieldId: field.id, value: verifiedSourceAnswer.value, classification: "safe_verified", required: field.required === true });
       reviewItems.push({
         fieldId: field.id,
         label: field.label,
@@ -1338,7 +1338,7 @@ function validateAnswerResult(result, expectedHash, snapshot, sources) {
       ? groundedDraftFromSources(answer, field, sources)
       : null;
     if (groundedDraft) {
-      instructions.push({ fieldId: field.id, value: groundedDraft.value, classification: "grounded_draft" });
+      instructions.push({ fieldId: field.id, value: groundedDraft.value, classification: "grounded_draft", required: field.required === true });
       reviewItems.push({
         fieldId: field.id,
         label: field.label,
@@ -1382,12 +1382,16 @@ function validateAnswerCommit(input) {
   const fillResultIds = new Set();
   for (const item of input.fillResults) {
     if (!item || typeof item !== "object" || Array.isArray(item)) throw new Error("fill result is invalid.");
-    if (Object.keys(item).some((key) => !["fieldId", "status", "reason"].includes(key))) throw new Error("fill result contains an unknown field.");
+    if (Object.keys(item).some((key) => !["fieldId", "status", "reasonCode", "reason", "mutated", "readBackSha256"].includes(key))
+        || Object.keys(item).length !== 6) throw new Error("fill result has the wrong shape.");
     if (typeof item.fieldId !== "string" || item.fieldId.length < 1 || item.fieldId.length > 500) throw new Error("fill result fieldId is invalid.");
     if (fillResultIds.has(item.fieldId)) throw new Error("fill result fieldId is duplicated.");
     fillResultIds.add(item.fieldId);
     if (!["verified", "skipped", "failed"].includes(item.status)) throw new Error("fill result status is invalid.");
+    if (!["verified", "user_file_preserved", "unsafe_instruction", "control_missing", "control_hidden", "control_replaced", "control_ambiguous", "unsupported_control", "unsupported_option", "write_failed", "readback_mismatch", "attachment_invalid", "attachment_failed"].includes(item.reasonCode)) throw new Error("fill result reasonCode is invalid.");
     if (item.reason !== null && (typeof item.reason !== "string" || item.reason.length > 1_000)) throw new Error("fill result reason is invalid.");
+    if (typeof item.mutated !== "boolean") throw new Error("fill result mutated flag is invalid.");
+    if (item.readBackSha256 !== null && (typeof item.readBackSha256 !== "string" || !/^[a-f0-9]{64}$/.test(item.readBackSha256))) throw new Error("fill result read-back hash is invalid.");
     if (item.status === "verified") verified.add(item.fieldId);
   }
   const freeText = [];

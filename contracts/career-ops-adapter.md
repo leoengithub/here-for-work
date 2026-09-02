@@ -140,11 +140,13 @@ The extension keeps provider execution separate from canonical writes:
    write succeeds. A failure leaves the browser session recoverable and retries
    only the answer writer, not inspection or filling.
 
-This implemented extension-only sequence is not yet the complete approved browser-driver
-contract. The extension remains primary, but success requires exactly one result for every
-planned field and correct settled read-back for every required fillable. Expired transport
-or handshake, wrong or missing tab, zero compatible fields, missing results, read-back
-mismatch, and unsupported multi-page, modal, or iframe behavior are fallback-eligible.
+The implemented extension-only sequence follows the primary browser-driver contract in
+[`browser-driver.md`](browser-driver.md). Success requires exactly one result for every planned
+field and correct settled read-back for every required fillable. Hard pre-fill transport or
+handshake failure, wrong or missing tab, zero compatible fields, and unsupported multi-page,
+modal, iframe, or custom-widget behavior can release the extension lease for a future fallback.
+Missing or invalid result sets fail closed. A read-back mismatch after mutation is instead a
+human handoff because another driver cannot safely infer what the page retained.
 
 Only one driver may own a preparation. The extension must release its lease before any
 review-only fallback driver takes over. Automatic fallback is limited to a hard pre-fill

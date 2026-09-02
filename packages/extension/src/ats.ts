@@ -1,4 +1,4 @@
-import type { AtsFamily, FieldClassification, FormField, FormSnapshot } from "./contracts";
+import type { AtsFamily, FieldClassification, FormField, FormFlowIssue, FormSnapshot } from "./contracts";
 import { PROTOCOL_VERSION } from "./contracts";
 
 const supportedHosts: Record<string, AtsFamily> = {
@@ -72,7 +72,7 @@ function detectedLanguage(element: HTMLInputElement | HTMLTextAreaElement | HTML
   return language.length <= 35 && /^[a-z]{2,8}(?:-[a-z0-9]{1,8})*$/i.test(language) ? language : null;
 }
 
-export function isControlVisible(element: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement): boolean {
+export function isControlVisible(element: Element): boolean {
   for (let current: Element | null = element; current; current = current.parentElement) {
     if (current.hasAttribute("hidden") || current.getAttribute("aria-hidden") === "true") return false;
     const inlineStyle = (current as HTMLElement).style;
@@ -81,6 +81,41 @@ export function isControlVisible(element: HTMLInputElement | HTMLTextAreaElement
     if (style?.display === "none" || style?.visibility === "hidden" || style?.visibility === "collapse") return false;
   }
   return true;
+}
+
+function flowIssuePriority(issue: FormFlowIssue): number {
+  return ["authentication_required", "captcha_or_antibot"].includes(issue) ? 2 : 1;
+}
+
+function flowIssues(doc: Document, nativeControls: Array<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>, customControls: HTMLElement[]): FormFlowIssue[] {
+  const issues = new Set<FormFlowIssue>();
+  const visibleControls = nativeControls.filter((control) => isControlVisible(control));
+  if (visibleControls.some((control) => control instanceof HTMLInputElement && control.type.toLowerCase() === "password")) {
+    issues.add("authentication_required");
+  }
+  const captcha = Array.from(doc.querySelectorAll<HTMLElement | HTMLIFrameElement>(
+    "[data-sitekey], [class*='captcha' i], [id*='captcha' i], iframe[src*='captcha' i], iframe[title*='challenge' i]",
+  )).some((element) => isControlVisible(element));
+  if (captcha) issues.add("captcha_or_antibot");
+  const relevantFrame = Array.from(doc.querySelectorAll<HTMLIFrameElement>("iframe")).some((frame) => {
+    if (!isControlVisible(frame)) return false;
+    const identity = `${frame.src} ${frame.title} ${frame.name}`.toLowerCase();
+    return /apply|application|job|form|captcha|challenge/.test(identity);
+  });
+  if (relevantFrame) issues.add("embedded_frame");
+  if (customControls.some((control) => isControlVisible(control))) issues.add("custom_widget");
+  if (visibleControls.some((control) => control.closest("dialog[open], [role='dialog'], [aria-modal='true']"))) {
+    issues.add("modal_form");
+  }
+  const hiddenStepControl = nativeControls.some((control) => {
+    if (control instanceof HTMLInputElement && ["hidden", "submit", "button"].includes(control.type.toLowerCase())) return false;
+    return !control.disabled && !isControlVisible(control) && Boolean(control.closest("form"));
+  });
+  if (visibleControls.length > 0 && hiddenStepControl) issues.add("multi_step_form");
+  if (visibleControls.filter((control) => !(control instanceof HTMLInputElement && ["hidden", "submit", "button"].includes(control.type.toLowerCase()))).length === 0) {
+    issues.add("no_compatible_fields");
+  }
+  return [...issues].sort((left, right) => left.localeCompare(right));
 }
 
 export function classifyField(label: string, inputType: string, autocomplete = ""): { classification: FieldClassification; reason: string } {
@@ -127,7 +162,11 @@ export async function inspectForm(doc: Document = document, pageUrl = new URL(do
   const allControls = Array.from(
     doc.querySelectorAll<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>("input, textarea, select"),
   );
+  const customControls = Array.from(doc.querySelectorAll<HTMLElement>(
+    "[role='combobox']:not(input), [role='listbox'], [contenteditable='true']",
+  )).filter((element) => !element.closest("[data-hfw-ignore]"));
   for (const element of allControls) delete element.dataset.hfwFieldId;
+  for (const element of customControls) delete element.dataset.hfwFieldId;
   const controls = allControls.filter((element) => {
     const inputType = element instanceof HTMLInputElement ? element.type.toLowerCase() : "";
     return !element.disabled
@@ -165,7 +204,40 @@ export async function inspectForm(doc: Document = document, pageUrl = new URL(do
       ...classification,
     };
   });
-  const fingerprintInput = JSON.stringify({ ats, url: pageUrl.href, fields });
+  for (const [index, element] of customControls.entries()) {
+    if (!isControlVisible(element)) continue;
+    const baseId = element.id || element.getAttribute("name") || `unsupported-widget-${index}`;
+    const occurrence = ids.get(baseId) ?? 0;
+    ids.set(baseId, occurrence + 1);
+    const id = occurrence === 0 ? baseId : `${baseId}--${occurrence + 1}`;
+    element.dataset.hfwFieldId = id;
+    fields.push({
+      id,
+      label: text(element.getAttribute("aria-label") || element.textContent || element.getAttribute("placeholder")),
+      control: "unsupported",
+      inputType: element.getAttribute("role") || "contenteditable",
+      inputMode: null,
+      required: element.getAttribute("aria-required") === "true",
+      options: [],
+      language: null,
+      maxLength: null,
+      maxWords: null,
+      minSentences: null,
+      maxSentences: null,
+      classification: "unsupported",
+      reason: "This custom widget requires human completion.",
+    });
+  }
+  const issues = flowIssues(doc, allControls, customControls);
+  const flow = {
+    disposition: issues.some((issue) => flowIssuePriority(issue) === 2)
+      ? "human_handoff" as const
+      : issues.length > 0
+        ? "fallback_eligible" as const
+        : "fillable" as const,
+    issues,
+  };
+  const fingerprintInput = JSON.stringify({ ats, url: pageUrl.href, fields, flow });
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(fingerprintInput));
   const fingerprint = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
   return {
@@ -174,6 +246,7 @@ export async function inspectForm(doc: Document = document, pageUrl = new URL(do
     url: pageUrl.href,
     title: text(doc.title),
     fields,
+    flow,
     fingerprint,
   };
 }

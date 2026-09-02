@@ -42,7 +42,7 @@
         },
         {
           "type": "object",
-          "required": ["protocolVersion", "type", "extensionId", "commandId", "sessionId", "commandType", "status"],
+          "required": ["protocolVersion", "type", "extensionId", "commandId", "sessionId", "commandType", "driverLeaseId", "status"],
           "properties": {
             "protocolVersion": { "const": 1 },
             "type": { "const": "command_result" },
@@ -50,16 +50,75 @@
             "commandId": { "type": "string", "format": "uuid" },
             "sessionId": { "type": "string", "format": "uuid" },
             "commandType": { "$ref": "#/$defs/commandType" },
+            "driverLeaseId": {
+              "oneOf": [
+                { "type": "string", "format": "uuid" },
+                { "type": "null" }
+              ]
+            },
             "status": { "enum": ["completed", "failed"] },
             "result": { "type": "object" },
             "error": { "type": "string", "maxLength": 4000 }
           },
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "commandType": { "const": "fill_plan" },
+                  "status": { "const": "completed" }
+                },
+                "required": ["commandType", "status"]
+              },
+              "then": {
+                "required": ["result"],
+                "properties": { "result": { "$ref": "#/$defs/fillResultEnvelope" } }
+              }
+            }
+          ],
           "additionalProperties": false
         }
       ]
     },
     "commandType": {
       "enum": ["inspect_request", "fill_plan", "release_for_review", "focus_review"]
+    },
+    "fillResultEnvelope": {
+      "type": "object",
+      "required": ["ok", "results"],
+      "properties": {
+        "ok": { "const": true },
+        "results": {
+          "type": "array",
+          "maxItems": 300,
+          "items": { "$ref": "#/$defs/fillResult" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "fillResult": {
+      "type": "object",
+      "required": ["fieldId", "status", "reasonCode", "reason", "mutated", "readBackSha256"],
+      "properties": {
+        "fieldId": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "status": { "enum": ["verified", "skipped", "failed"] },
+        "reasonCode": {
+          "enum": [
+            "verified", "user_file_preserved", "unsafe_instruction", "control_missing",
+            "control_hidden", "control_replaced", "control_ambiguous", "unsupported_control",
+            "unsupported_option", "write_failed", "readback_mismatch", "attachment_invalid",
+            "attachment_failed"
+          ]
+        },
+        "reason": { "type": ["string", "null"], "maxLength": 1000 },
+        "mutated": { "type": "boolean" },
+        "readBackSha256": {
+          "oneOf": [
+            { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+            { "type": "null" }
+          ]
+        }
+      },
+      "additionalProperties": false
     },
     "appResponse": {
       "oneOf": [
@@ -75,7 +134,7 @@
         },
         {
           "type": "object",
-          "required": ["protocolVersion", "ok", "type", "commandId", "sessionId", "commandType", "payload"],
+          "required": ["protocolVersion", "ok", "type", "commandId", "sessionId", "commandType", "driverLeaseId", "payload"],
           "properties": {
             "protocolVersion": { "const": 1 },
             "ok": { "const": true },
@@ -83,6 +142,12 @@
             "commandId": { "type": "string", "format": "uuid" },
             "sessionId": { "type": "string", "format": "uuid" },
             "commandType": { "$ref": "#/$defs/commandType" },
+            "driverLeaseId": {
+              "oneOf": [
+                { "type": "string", "format": "uuid" },
+                { "type": "null" }
+              ]
+            },
             "payload": { "type": "object" }
           },
           "additionalProperties": false

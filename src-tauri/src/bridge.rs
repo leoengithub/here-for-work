@@ -108,6 +108,7 @@ fn handle_message(app: &tauri::AppHandle, bytes: &[u8]) -> Value {
                     "commandId": command.command_id,
                     "sessionId": command.session_id,
                     "commandType": command.command_type,
+                    "driverLeaseId": command.driver_lease_id,
                     "payload": command.payload,
                 }),
                 Err(error) => {
@@ -192,7 +193,15 @@ struct FormSnapshot {
     url: String,
     title: String,
     fields: Vec<FormField>,
+    flow: FormFlow,
     fingerprint: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct FormFlow {
+    disposition: String,
+    issues: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -222,6 +231,31 @@ fn handle_command_result(
     let Some(command_id) = message.get("commandId").and_then(Value::as_str) else {
         return json!({ "protocolVersion": 1, "ok": false, "error": "missing_command_id" });
     };
+    let Some(session_id) = message.get("sessionId").and_then(Value::as_str) else {
+        return json!({ "protocolVersion": 1, "ok": false, "error": "missing_session_id" });
+    };
+    let Some(command_type) = message.get("commandType").and_then(Value::as_str) else {
+        return json!({ "protocolVersion": 1, "ok": false, "error": "missing_command_type" });
+    };
+    let driver_lease_id = match message.get("driverLeaseId") {
+        Some(Value::String(value)) => Some(value.as_str()),
+        Some(Value::Null) => None,
+        _ => {
+            return json!({ "protocolVersion": 1, "ok": false, "error": "missing_driver_lease_id" });
+        }
+    };
+    match store.browser_command_result_matches(
+        command_id,
+        session_id,
+        command_type,
+        driver_lease_id,
+    ) {
+        Ok(true) => {}
+        Ok(false) => {
+            return json!({ "protocolVersion": 1, "ok": false, "error": "stale_or_mismatched_driver_lease" });
+        }
+        Err(_) => return json!({ "protocolVersion": 1, "ok": false, "error": "store_unavailable" }),
+    }
     let status = message.get("status").and_then(Value::as_str);
     if status == Some("failed") {
         let error_code = message
@@ -229,7 +263,7 @@ fn handle_command_result(
             .and_then(Value::as_str)
             .map(normalize_error_code)
             .unwrap_or_else(|| "extension_command_failed".to_string());
-        let result = if message.get("commandType").and_then(Value::as_str) == Some("focus_review") {
+        let result = if command_type == "focus_review" {
             store.fail_focus_review(command_id, &error_code)
         } else {
             store.fail_browser_command(command_id, &error_code)
@@ -244,10 +278,9 @@ fn handle_command_result(
     if status != Some("completed") {
         return json!({ "protocolVersion": 1, "ok": false, "error": "invalid_command_status" });
     }
-    let command_type = message.get("commandType").and_then(Value::as_str);
     let result = message.get("result").cloned().unwrap_or_else(|| json!({}));
     match command_type {
-        Some("inspect_request") => {
+        "inspect_request" => {
             if result.get("ok").and_then(Value::as_bool) != Some(true) {
                 let error = result
                     .get("error")
@@ -283,6 +316,8 @@ fn handle_command_result(
                 page_url: snapshot.url,
                 snapshot_fingerprint: snapshot.fingerprint,
                 fields: snapshot_value["fields"].clone(),
+                flow_disposition: snapshot.flow.disposition,
+                flow_issues: json!(snapshot.flow.issues),
                 safe_field_count,
                 needs_user_count,
             };
@@ -293,7 +328,7 @@ fn handle_command_result(
                 }
             }
         }
-        Some("release_for_review") => {
+        "release_for_review" => {
             if result.get("ok").and_then(Value::as_bool) != Some(true) {
                 return match store.fail_browser_command(command_id, "release_failed") {
                     Ok(_) => json!({ "protocolVersion": 1, "ok": true, "type": "result_ack" }),
@@ -309,7 +344,7 @@ fn handle_command_result(
                 }
             }
         }
-        Some("focus_review") => {
+        "focus_review" => {
             if result.get("ok").and_then(Value::as_bool) != Some(true) {
                 return match store.fail_focus_review(command_id, "focus_review_failed") {
                     Ok(_) => json!({ "protocolVersion": 1, "ok": true, "type": "result_ack" }),
@@ -325,7 +360,7 @@ fn handle_command_result(
                 }
             }
         }
-        Some("fill_plan") => {
+        "fill_plan" => {
             if result.get("ok").and_then(Value::as_bool) != Some(true) {
                 return match store.fail_browser_command(command_id, "fill_failed") {
                     Ok(_) => json!({ "protocolVersion": 1, "ok": true, "type": "result_ack" }),
@@ -368,7 +403,7 @@ fn valid_fill_results(value: &Value) -> bool {
             Some(Value::String(value)) => value.len() <= 1_000,
             _ => false,
         };
-        object.len() == 3
+        object.len() == 6
             && object
                 .get("fieldId")
                 .and_then(Value::as_str)
@@ -378,6 +413,38 @@ fn valid_fill_results(value: &Value) -> bool {
                 .and_then(Value::as_str)
                 .is_some_and(|value| matches!(value, "verified" | "skipped" | "failed"))
             && valid_reason
+            && object
+                .get("reasonCode")
+                .and_then(Value::as_str)
+                .is_some_and(|value| {
+                    matches!(
+                        value,
+                        "verified"
+                            | "user_file_preserved"
+                            | "unsafe_instruction"
+                            | "control_missing"
+                            | "control_hidden"
+                            | "control_replaced"
+                            | "control_ambiguous"
+                            | "unsupported_control"
+                            | "unsupported_option"
+                            | "write_failed"
+                            | "readback_mismatch"
+                            | "attachment_invalid"
+                            | "attachment_failed"
+                    )
+                })
+            && object.get("mutated").and_then(Value::as_bool).is_some()
+            && match object.get("readBackSha256") {
+                Some(Value::Null) => true,
+                Some(Value::String(value)) => {
+                    value.len() == 64
+                        && value
+                            .bytes()
+                            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+                }
+                _ => false,
+            }
     })
 }
 
@@ -392,6 +459,33 @@ fn validate_form_snapshot(value: Value) -> Result<FormSnapshot, &'static str> {
         || !allowed_form_url(&snapshot.url, &snapshot.ats)
         || snapshot.title.len() > 500
         || snapshot.fields.len() > 300
+        || !matches!(
+            snapshot.flow.disposition.as_str(),
+            "fillable" | "fallback_eligible" | "human_handoff"
+        )
+        || snapshot.flow.issues.len() > 8
+        || snapshot.flow.issues.iter().any(|issue| {
+            !matches!(
+                issue.as_str(),
+                "authentication_required"
+                    | "captcha_or_antibot"
+                    | "custom_widget"
+                    | "embedded_frame"
+                    | "modal_form"
+                    | "multi_step_form"
+                    | "no_compatible_fields"
+            )
+        })
+        || (snapshot.flow.disposition == "fillable" && !snapshot.flow.issues.is_empty())
+        || (snapshot.fields.is_empty() && snapshot.flow.disposition == "fillable")
+        || (snapshot.flow.disposition != "fillable" && snapshot.flow.issues.is_empty())
+        || (snapshot.flow.disposition == "human_handoff"
+            && !snapshot.flow.issues.iter().any(|issue| {
+                matches!(
+                    issue.as_str(),
+                    "authentication_required" | "captcha_or_antibot"
+                )
+            }))
         || snapshot.fingerprint.len() != 64
         || !snapshot
             .fingerprint
@@ -400,15 +494,20 @@ fn validate_form_snapshot(value: Value) -> Result<FormSnapshot, &'static str> {
     {
         return Err("invalid_form_snapshot");
     }
+    let mut field_ids = std::collections::BTreeSet::new();
     for field in &snapshot.fields {
         if field.id.is_empty()
+            || !field_ids.insert(field.id.as_str())
             || field.id.len() > 500
             || field.label.len() > 2_000
             || field.input_type.len() > 100
             || field.reason.len() > 1_000
             || field.options.len() > 200
             || field.options.iter().any(|option| option.len() > 1_000)
-            || !matches!(field.control.as_str(), "input" | "textarea" | "select")
+            || !matches!(
+                field.control.as_str(),
+                "input" | "textarea" | "select" | "unsupported"
+            )
             || !matches!(
                 field.classification.as_str(),
                 "safe_verified"
@@ -496,6 +595,15 @@ fn allowed_form_url(value: &str, family: &str) -> bool {
 
 fn normalize_error_code(error: &str) -> String {
     let normalized = error.to_lowercase();
+    if matches!(
+        normalized.as_str(),
+        "snapshot_mismatch"
+            | "form_drift_before_fill"
+            | "invalid_fill_plan_duplicate_field"
+            | "verified_fill_required"
+    ) {
+        return normalized;
+    }
     if normalized.contains("automation control") || normalized.contains("webdriver") {
         return "automation_marked_session".to_string();
     }
@@ -580,6 +688,7 @@ mod tests {
                 "classification": "safe_verified",
                 "reason": "Verified profile fact."
             }],
+            "flow": { "disposition": "fillable", "issues": [] },
             "fingerprint": "a".repeat(64)
         });
         assert!(super::validate_form_snapshot(valid.clone()).is_ok());
@@ -597,6 +706,8 @@ mod tests {
 
         let mut empty_form = valid.clone();
         empty_form["fields"] = json!([]);
+        empty_form["flow"] =
+            json!({ "disposition": "fallback_eligible", "issues": ["no_compatible_fields"] });
         assert!(super::validate_form_snapshot(empty_form).is_ok());
 
         let mut unknown_classification = valid;
@@ -623,6 +734,7 @@ mod tests {
                 "classification": "grounded_narrative",
                 "reason": "Grounded draft pending review."
             }],
+            "flow": { "disposition": "fillable", "issues": [] },
             "fingerprint": "b".repeat(64)
         });
         assert!(super::validate_form_snapshot(grounded).is_ok());
@@ -644,5 +756,33 @@ mod tests {
             ),
             "application_tab_recovery_failed"
         );
+    }
+
+    #[test]
+    fn fill_results_require_one_typed_readback_envelope_per_entry() {
+        let verified = json!([{
+            "fieldId": "email",
+            "status": "verified",
+            "reasonCode": "verified",
+            "reason": null,
+            "mutated": true,
+            "readBackSha256": "a".repeat(64)
+        }]);
+        assert!(super::valid_fill_results(&verified));
+
+        let mut missing_reason_code = verified.clone();
+        missing_reason_code[0]
+            .as_object_mut()
+            .unwrap()
+            .remove("reasonCode");
+        assert!(!super::valid_fill_results(&missing_reason_code));
+
+        let mut uppercase_hash = verified.clone();
+        uppercase_hash[0]["readBackSha256"] = json!("A".repeat(64));
+        assert!(!super::valid_fill_results(&uppercase_hash));
+
+        let duplicate_field_results = json!([verified[0].clone(), verified[0].clone()]);
+        assert!(super::valid_fill_results(&duplicate_field_results));
+        // Exact field identity and cardinality are checked against the stored plan in Store.
     }
 }

@@ -22,6 +22,7 @@ export type ExtensionMessage =
       commandId: string;
       sessionId: string;
       commandType: CommandType;
+      driverLeaseId: string | null;
       status: "completed" | "failed";
       result?: {
         [k: string]: unknown;
@@ -43,6 +44,7 @@ export type AppResponse =
       commandId: string;
       sessionId: string;
       commandType: CommandType;
+      driverLeaseId: string | null;
       payload: {
         [k: string]: unknown;
       };

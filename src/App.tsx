@@ -337,6 +337,9 @@ function browserFailureExplanation(errorCode: string | null): string {
   if (errorCode === "application_tab_recovery_failed") {
     return "The application tab could not be restored. Retry opens the application again.";
   }
+  if (errorCode === "public_browser_fallback_unavailable") {
+    return "The extension released its lease before filling. A second review-only driver is unavailable because career-ops does not expose the required public lease and result contract; complete the released page manually.";
+  }
   return "HereForWork could not finish the browser step. Check the selected Chrome profile, then retry.";
 }
 
@@ -487,6 +490,9 @@ export function BrowserSessions({
           {session.status === "review_required" ? (
             <div>
               <p>The page is released for your review. HereForWork cannot submit it.</p>
+              {session.errorCode === "public_browser_fallback_unavailable" ? (
+                <p>The extension stopped before filling. The separate review-only fallback is unavailable, so use the grounded answers and complete this page manually.</p>
+              ) : null}
               {session.fieldCount === 0 ? (
                 <p>No compatible fields were found after the inspection window. Complete this form manually; the application itself remains available.</p>
               ) : null}

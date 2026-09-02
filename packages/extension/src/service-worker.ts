@@ -13,6 +13,7 @@ let pollTimer: ReturnType<typeof setTimeout> | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let awaitingResponse = false;
 let nativeConfirmed = false;
+let pendingResultCacheKey: string | null = null;
 
 const installationId = createInstallationIdResolver(
   async () => (await chrome.storage.local.get("installationId")).installationId,
@@ -65,6 +66,7 @@ function isBrowserCommand(message: unknown): message is BrowserCommand {
     && candidate.type === "command"
     && typeof candidate.commandId === "string"
     && typeof candidate.sessionId === "string"
+    && (candidate.driverLeaseId === null || typeof candidate.driverLeaseId === "string")
     && BROWSER_COMMAND_TYPES.some((type) => type === candidate.commandType)
     && Boolean(candidate.payload)
     && typeof candidate.payload === "object";
@@ -103,6 +105,10 @@ function sessionTabKey(sessionId: string): string {
   return `browser-session:${sessionId}`;
 }
 
+function commandResultKey(commandId: string): string {
+  return `browser-command-result:${commandId}`;
+}
+
 async function rememberedTabId(sessionId: string): Promise<number> {
   const key = sessionTabKey(sessionId);
   const stored = await chrome.storage.session.get(key);
@@ -116,7 +122,7 @@ async function executeCommand(command: BrowserCommand): Promise<unknown> {
     const expectedUrl = command.payload.expectedUrl;
     const tabId = typeof expectedUrl === "string" ? await expectedTabId(expectedUrl) : await activeTabId();
     const result = await retryMessage(
-      () => chrome.tabs.sendMessage(tabId, { type: "inspect", allowEmpty: typeof expectedUrl === "string" }),
+      () => chrome.tabs.sendMessage(tabId, { type: "inspect" }),
       () => new Promise((resolve) => setTimeout(resolve, 250)),
     );
     if (result?.ok) await chrome.storage.session.set({ [sessionTabKey(command.sessionId)]: tabId });
@@ -139,7 +145,10 @@ async function executeCommand(command: BrowserCommand): Promise<unknown> {
       const expectedUrl = command.payload.expectedUrl;
       tabId = typeof expectedUrl === "string" ? await expectedTabId(expectedUrl) : await activeTabId();
     }
-    const result = await chrome.tabs.sendMessage(tabId, { type: "release_for_review" });
+    const result = await chrome.tabs.sendMessage(tabId, {
+      type: "release_for_review",
+      connectionCheck: command.payload.connectionCheck === true,
+    });
     return result;
   }
   if (command.commandType === "focus_review") {
@@ -160,13 +169,43 @@ async function executeCommand(command: BrowserCommand): Promise<unknown> {
 }
 
 function returnCommandResult(command: BrowserCommand): void {
-  void executeCommand(command).then((result) => {
+  void (async () => {
+    const cacheKey = commandResultKey(command.commandId);
+    if (command.commandType === "fill_plan") {
+      const cached = (await chrome.storage.session.get(cacheKey))[cacheKey] as {
+        sessionId?: string;
+        driverLeaseId?: string | null;
+        status?: string;
+        result?: unknown;
+      } | undefined;
+      if (cached?.sessionId === command.sessionId
+          && cached?.driverLeaseId === command.driverLeaseId
+          && cached?.status === "completed") {
+        return { result: cached.result, cacheKey };
+      }
+    }
+    const result = await executeCommand(command);
+    if (command.commandType === "fill_plan") {
+      await chrome.storage.session.set({
+        [cacheKey]: {
+          sessionId: command.sessionId,
+          driverLeaseId: command.driverLeaseId,
+          status: "completed",
+          result,
+        },
+      });
+      return { result, cacheKey };
+    }
+    return { result, cacheKey: null };
+  })().then(({ result, cacheKey }) => {
+    pendingResultCacheKey = cacheKey;
     void postNative({
       protocolVersion: 1,
       type: "command_result",
       commandId: command.commandId,
       sessionId: command.sessionId,
       commandType: command.commandType,
+      driverLeaseId: command.driverLeaseId,
       status: "completed",
       result,
     });
@@ -177,6 +216,7 @@ function returnCommandResult(command: BrowserCommand): void {
       commandId: command.commandId,
       sessionId: command.sessionId,
       commandType: command.commandType,
+      driverLeaseId: command.driverLeaseId,
       status: "failed",
       error: error instanceof Error ? error.message : String(error),
     });
@@ -200,6 +240,10 @@ function connect(): void {
       if (!nativeConfirmed) {
         schedulePoll();
         return;
+      }
+      if (message.type === "result_ack" && pendingResultCacheKey) {
+        void chrome.storage.session.remove(pendingResultCacheKey);
+        pendingResultCacheKey = null;
       }
       if (message.type === "command" && isBrowserCommand(message)) returnCommandResult(message);
       schedulePoll();
