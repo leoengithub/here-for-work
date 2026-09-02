@@ -1,0 +1,220 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hereforwork.local/contracts/career-ops-capabilities.schema.json",
+  "title": "HereForWork career-ops capability manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract",
+    "schemaVersion",
+    "adapterProtocolVersion",
+    "upstreamRevision",
+    "upstreamDeclaredVersion",
+    "autoPdfScoreThreshold",
+    "operations",
+    "sourceOfTruth",
+    "forbiddenOperations",
+    "capabilities",
+    "diagnostics"
+  ],
+  "properties": {
+    "contract": { "type": "string", "const": "hereforwork.career-ops-capabilities" },
+    "schemaVersion": { "type": "integer", "const": 1 },
+    "adapterProtocolVersion": { "type": "integer", "const": 1 },
+    "upstreamRevision": {
+      "type": ["string", "null"],
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "upstreamDeclaredVersion": {
+      "type": ["string", "null"],
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$"
+    },
+    "autoPdfScoreThreshold": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["value", "source"],
+      "properties": {
+        "value": { "type": ["number", "null"], "minimum": 0, "maximum": 5 },
+        "source": {
+          "type": "string",
+          "enum": ["configured", "upstream_default", "unavailable"]
+        }
+      }
+    },
+    "operations": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/operation" },
+      "uniqueItems": true,
+      "minItems": 14,
+      "maxItems": 14
+    },
+    "sourceOfTruth": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "profileFacts",
+        "evaluation",
+        "generatedArtifacts",
+        "groundedAnswers",
+        "applicationHistory",
+        "operationalState"
+      ],
+      "properties": {
+        "profileFacts": { "type": "string", "const": "career-ops" },
+        "evaluation": { "type": "string", "const": "career-ops" },
+        "generatedArtifacts": { "type": "string", "const": "career-ops" },
+        "groundedAnswers": { "type": "string", "const": "career-ops" },
+        "applicationHistory": { "type": "string", "const": "career-ops" },
+        "operationalState": { "type": "string", "const": "here-for-work" }
+      }
+    },
+    "forbiddenOperations": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "application.submit",
+          "application.finalize",
+          "message.send",
+          "shell.run",
+          "browser.command"
+        ]
+      },
+      "uniqueItems": true,
+      "minItems": 5,
+      "maxItems": 5
+    },
+    "capabilities": {
+      "type": "array",
+      "minItems": 8,
+      "maxItems": 8,
+      "items": { "$ref": "#/$defs/capability" }
+    },
+    "diagnostics": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/diagnostic" }
+    }
+  },
+  "$defs": {
+    "operation": {
+      "type": "string",
+      "enum": [
+        "capabilities.get",
+        "health.check",
+        "history.snapshot",
+        "profile.queue_filters.get",
+        "preparation.context.get",
+        "preparation.result.recover",
+        "preparation.result.commit",
+        "preparation.artifacts.delete",
+        "answers.context.get",
+        "answers.result.validate",
+        "answers.result.commit",
+        "role.discard",
+        "role.discard.undo",
+        "application.applied.confirm"
+      ]
+    },
+    "capabilityId": {
+      "type": "string",
+      "enum": [
+        "discovery.reverse_ats.run.v1",
+        "discovery.company_ats.preview.v1",
+        "liveness.role.read.v1",
+        "evaluation.full_ag.run.v1",
+        "evaluation.result.read.v1",
+        "artifacts.inspect.v1",
+        "browser.review_fallback.v1",
+        "canonical.applied.write.v1"
+      ]
+    },
+    "constraint": {
+      "type": "string",
+      "enum": [
+        "requires_exact_upstream_revision",
+        "requires_isolated_execution",
+        "writes_no_career_ops_checkout_state",
+        "requires_safe_shape_probe",
+        "preview_only",
+        "no_implicit_config_write",
+        "requires_typed_per_role_evidence",
+        "requires_atomic_evaluation_receipt",
+        "native_score_1_to_5",
+        "requires_report_tracker_identity",
+        "requires_structured_artifact_provenance",
+        "requires_single_driver_lease_transfer",
+        "review_only_no_submit",
+        "canonical_tracking_only",
+        "requires_user_confirmed_submission"
+      ]
+    },
+    "capability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "status",
+        "interfaceClass",
+        "sourceRevision",
+        "probeRevision",
+        "constraints"
+      ],
+      "properties": {
+        "id": { "$ref": "#/$defs/capabilityId" },
+        "status": {
+          "type": "string",
+          "enum": ["supported", "degraded", "unavailable"]
+        },
+        "interfaceClass": {
+          "type": "string",
+          "enum": ["contracted", "conditional", "missing"]
+        },
+        "sourceRevision": {
+          "type": ["string", "null"],
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "probeRevision": {
+          "type": "string",
+          "const": "hereforwork.career-ops-capability-probes.v1"
+        },
+        "constraints": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/constraint" },
+          "uniqueItems": true
+        }
+      }
+    },
+    "diagnostic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "capabilityId", "message", "action"],
+      "properties": {
+        "code": {
+          "type": "string",
+          "enum": [
+            "upstream_revision_unavailable",
+            "upstream_version_unavailable",
+            "upstream_version_mismatch",
+            "auto_pdf_threshold_invalid",
+            "auto_pdf_threshold_product_mismatch",
+            "isolated_execution_required",
+            "safe_shape_probe_required",
+            "typed_interface_unavailable",
+            "structured_provenance_unavailable",
+            "public_browser_fallback_unavailable",
+            "canonical_writer_unavailable",
+            "canonical_writer_compatibility_unverified"
+          ]
+        },
+        "capabilityId": {
+          "anyOf": [
+            { "$ref": "#/$defs/capabilityId" },
+            { "type": "null" }
+          ]
+        },
+        "message": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "action": { "type": "string", "minLength": 1, "maxLength": 500 }
+      }
+    }
+  }
+}

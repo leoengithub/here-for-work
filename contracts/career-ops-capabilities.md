@@ -1,6 +1,6 @@
 # career-ops capability boundary
 
-Status: version 1 design; discovery/evaluation/browser operations are not implemented
+Status: version 1 manifest implemented; discovery/evaluation/browser operations are not implemented
 Audit date: 2026-09-02
 
 This document records which existing career-ops interfaces HereForWork may safely wrap,
@@ -118,6 +118,29 @@ capabilities[]:
   probeRevision
   constraints[]
 ```
+
+`capabilities.get` now emits this manifest from side-effect-free file/configuration reads
+and an exact Git `HEAD` probe. The Rust health/startup compatibility path deserializes it
+with closed DTOs, validates the complete capability ID/constraint set, rejects mixed or
+missing revisions from enabling a capability, and exposes the accepted manifest through
+the existing integration-health result. It does not persist the manifest or enable a new
+executor.
+
+The current probe revision intentionally keeps company-to-ATS preview and evaluation
+result reading degraded until safe strict result-shape probes exist. Reverse-ATS remains
+degraded when its script is present because checkout-local cache writes are not isolated.
+Typed liveness, full A-G execution/receipt, artifact freshness, and browser review fallback
+remain unavailable. The canonical Applied writer reports degraded—not supported—when the
+exact revision and all fixed writer scripts are readable: existing writes remain
+post-verified, but filename presence is not a side-effect-free semantic compatibility
+probe. Missing scripts or revision make it unavailable without removing the existing
+Applied operation.
+
+The health path reads and validates the manifest both before and after its filesystem and
+runtime checks, and rejects a revision change between them. This narrows but does not create
+a durable compatibility lease. Every future capability-gated operation must re-read the
+manifest immediately before execution and fail if its required capability or exact revision
+no longer matches.
 
 Unknown fields, unknown capability IDs, a missing revision, a failed probe, or a changed
 result shape disable only the affected capability and produce an actionable diagnostic.

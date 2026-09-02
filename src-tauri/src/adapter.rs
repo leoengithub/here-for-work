@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::domain::{HistoryRecord, QueueFilters};
+use crate::domain::{CareerOpsCapabilityManifest, HistoryRecord, QueueFilters};
 
 #[derive(Debug, Clone)]
 pub struct AdapterConfig {
@@ -217,6 +217,12 @@ struct CanonicalEffectResult {
     effect: CanonicalEffect,
 }
 
+#[derive(Debug, Clone)]
+pub struct AdapterHealth {
+    pub ready: bool,
+    pub capabilities: CareerOpsCapabilityManifest,
+}
+
 impl AdapterConfig {
     pub fn request(&self, operation: &str, input: Value) -> Result<Value, AdapterError> {
         let timeout = if operation.starts_with("preparation.") || operation.starts_with("answers.")
@@ -330,17 +336,41 @@ impl AdapterConfig {
             .ok_or_else(|| AdapterError::InvalidData("response result is missing".to_string()))
     }
 
-    pub fn health(&self, fallback_configuration: Option<&Value>) -> Result<bool, AdapterError> {
+    pub fn capabilities(&self) -> Result<CareerOpsCapabilityManifest, AdapterError> {
+        let result = self.request("capabilities.get", json!({}))?;
+        let manifest: CareerOpsCapabilityManifest = serde_json::from_value(result)
+            .map_err(|error| AdapterError::InvalidData(error.to_string()))?;
+        manifest.validate().map_err(AdapterError::InvalidData)?;
+        Ok(manifest)
+    }
+
+    pub fn health(
+        &self,
+        fallback_configuration: Option<&Value>,
+    ) -> Result<AdapterHealth, AdapterError> {
+        let capabilities_before = self.capabilities()?;
         let result = self.request_with_timeout_and_environment(
             "health.check",
             json!({}),
             Duration::from_secs(15),
             fallback_configuration,
         )?;
-        result
+        let capabilities = self.capabilities()?;
+        if capabilities_before.upstream_revision != capabilities.upstream_revision {
+            return Err(AdapterError::InvalidData(
+                "career-ops revision changed during compatibility checks".to_string(),
+            ));
+        }
+        let ready = result
             .get("ready")
             .and_then(Value::as_bool)
-            .ok_or_else(|| AdapterError::InvalidData("health result is missing ready".to_string()))
+            .ok_or_else(|| {
+                AdapterError::InvalidData("health result is missing ready".to_string())
+            })?;
+        Ok(AdapterHealth {
+            ready,
+            capabilities,
+        })
     }
 
     pub fn history_snapshot(&self) -> Result<Vec<HistoryRecord>, AdapterError> {

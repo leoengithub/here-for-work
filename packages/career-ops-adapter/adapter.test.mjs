@@ -39,7 +39,39 @@ function request(payload, env = {}) {
   });
 }
 
+function runCommand(command, args, cwd) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, { cwd, stdio: ["ignore", "pipe", "pipe"] });
+    const stdout = [];
+    const stderr = [];
+    child.stdout.on("data", (chunk) => stdout.push(chunk));
+    child.stderr.on("data", (chunk) => stderr.push(chunk));
+    child.on("error", reject);
+    child.on("close", (status) => resolve({
+      status,
+      stdout: Buffer.concat(stdout).toString("utf8"),
+      stderr: Buffer.concat(stderr).toString("utf8"),
+    }));
+  });
+}
+
 test("capabilities expose the fixed safety boundary", async () => {
+  const expectedOperations = [
+    "capabilities.get",
+    "health.check",
+    "history.snapshot",
+    "profile.queue_filters.get",
+    "preparation.context.get",
+    "preparation.result.recover",
+    "preparation.result.commit",
+    "preparation.artifacts.delete",
+    "answers.context.get",
+    "answers.result.validate",
+    "answers.result.commit",
+    "role.discard",
+    "role.discard.undo",
+    "application.applied.confirm",
+  ];
   const response = await request({
     id: "capabilities",
     protocolVersion: 1,
@@ -56,6 +88,112 @@ test("capabilities expose the fixed safety boundary", async () => {
     "browser.command",
   ]);
   assert.equal(response.result.sourceOfTruth.applicationHistory, "career-ops");
+  assert.deepEqual(response.result.operations, expectedOperations);
+  assert.equal(new Set(response.result.operations).size, expectedOperations.length);
+  assert.equal(response.result.contract, "hereforwork.career-ops-capabilities");
+  assert.equal(response.result.schemaVersion, 1);
+  assert.equal(response.result.upstreamRevision, null);
+  assert.equal(response.result.upstreamDeclaredVersion, null);
+  assert.deepEqual(response.result.autoPdfScoreThreshold, { value: null, source: "unavailable" });
+  assert.equal(response.result.capabilities.length, 8);
+  assert.ok(response.result.capabilities.every(({ status }) => status === "unavailable"));
+  assert.ok(response.result.diagnostics.some(({ code }) => code === "upstream_revision_unavailable"));
+
+  const schema = JSON.parse(await readFile(fileURLToPath(
+    new URL("../../contracts/career-ops-capabilities.schema.json", import.meta.url),
+  ), "utf8"));
+  assert.deepEqual(schema.$defs.operation.enum, expectedOperations);
+  assert.equal(schema.properties.operations.items.$ref, "#/$defs/operation");
+  assert.equal(schema.properties.operations.uniqueItems, true);
+  assert.equal(schema.properties.operations.minItems, expectedOperations.length);
+  assert.equal(schema.properties.operations.maxItems, expectedOperations.length);
+});
+
+test("capability probes pin exact revision, declared version, threshold, and fail-closed statuses", async () => {
+  const root = await mkdtemp(join(tmpdir(), "hfw-capabilities-"));
+  await mkdir(join(root, "config"), { recursive: true });
+  await Promise.all([
+    writeFile(join(root, "package.json"), '{"version":"1.31.0"}\n'),
+    writeFile(join(root, "VERSION"), "1.31.0\n"),
+    writeFile(join(root, "config/profile.yml"), "auto_pdf_score_threshold: 3.5\n"),
+    ...["scan-ats-full.mjs", "discover-ats.mjs", "tracker.mjs", "merge-tracker.mjs", "set-status.mjs"]
+      .map((name) => writeFile(join(root, name), "// capability fixture\n")),
+  ]);
+  for (const [command, args] of [
+    ["git", ["init", "--quiet"]],
+    ["git", ["add", "."]],
+    ["git", ["-c", "user.name=HereForWork Test", "-c", "user.email=test@hereforwork.local", "commit", "--quiet", "-m", "fixture"]],
+  ]) {
+    const result = await runCommand(command, args, root);
+    assert.equal(result.status, 0, result.stderr);
+  }
+
+  const response = await request({
+    id: "capability-probes",
+    protocolVersion: 1,
+    operation: "capabilities.get",
+    input: {},
+  }, { HFW_CAREER_OPS_ROOT: root });
+
+  assert.equal(response.ok, true, JSON.stringify(response));
+  assert.match(response.result.upstreamRevision, /^[0-9a-f]{40}$/);
+  assert.equal(response.result.upstreamDeclaredVersion, "1.31.0");
+  assert.deepEqual(response.result.autoPdfScoreThreshold, { value: 3.5, source: "configured" });
+  assert.deepEqual(response.result.capabilities.map(({ id }) => id), [
+    "discovery.reverse_ats.run.v1",
+    "discovery.company_ats.preview.v1",
+    "liveness.role.read.v1",
+    "evaluation.full_ag.run.v1",
+    "evaluation.result.read.v1",
+    "artifacts.inspect.v1",
+    "browser.review_fallback.v1",
+    "canonical.applied.write.v1",
+  ]);
+  assert.equal(response.result.capabilities.find(({ id }) => id === "canonical.applied.write.v1").status, "degraded");
+  assert.equal(response.result.capabilities.find(({ id }) => id === "discovery.reverse_ats.run.v1").status, "degraded");
+  assert.equal(response.result.capabilities.find(({ id }) => id === "discovery.company_ats.preview.v1").status, "degraded");
+  assert.equal(response.result.capabilities.find(({ id }) => id === "liveness.role.read.v1").status, "unavailable");
+  assert.equal(response.result.capabilities.find(({ id }) => id === "browser.review_fallback.v1").status, "unavailable");
+  assert.ok(response.result.capabilities.every(({ sourceRevision }) => sourceRevision === response.result.upstreamRevision));
+  assert.ok(response.result.diagnostics.some(({ code }) => code === "isolated_execution_required"));
+  assert.ok(response.result.diagnostics.some(({ code }) => code === "public_browser_fallback_unavailable"));
+  assert.ok(response.result.diagnostics.some(({ code }) => code === "canonical_writer_compatibility_unverified"));
+  assert.ok(!response.result.diagnostics.some(({ code }) => code === "auto_pdf_threshold_product_mismatch"));
+
+  await unlink(join(root, "config/profile.yml"));
+  const defaulted = await request({
+    id: "capability-default-threshold",
+    protocolVersion: 1,
+    operation: "capabilities.get",
+    input: {},
+  }, { HFW_CAREER_OPS_ROOT: root });
+  assert.deepEqual(defaulted.result.autoPdfScoreThreshold, { value: 3, source: "upstream_default" });
+  assert.ok(defaulted.result.diagnostics.some(({ code }) => code === "auto_pdf_threshold_product_mismatch"));
+});
+
+test("capabilities reject unknown inputs and report malformed threshold without exposing a path", async () => {
+  const root = await mkdtemp(join(tmpdir(), "hfw-capabilities-invalid-"));
+  await mkdir(join(root, "config"), { recursive: true });
+  await writeFile(join(root, "config/profile.yml"), "auto_pdf_score_threshold: many\n");
+  const malformed = await request({
+    id: "capability-invalid-threshold",
+    protocolVersion: 1,
+    operation: "capabilities.get",
+    input: {},
+  }, { HFW_CAREER_OPS_ROOT: root });
+  assert.deepEqual(malformed.result.autoPdfScoreThreshold, { value: null, source: "unavailable" });
+  const diagnostic = malformed.result.diagnostics.find(({ code }) => code === "auto_pdf_threshold_invalid");
+  assert.ok(diagnostic);
+  assert.doesNotMatch(JSON.stringify(malformed.result), new RegExp(root.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+
+  const unknown = await request({
+    id: "capability-unknown-input",
+    protocolVersion: 1,
+    operation: "capabilities.get",
+    input: { path: root },
+  }, { HFW_CAREER_OPS_ROOT: root });
+  assert.equal(unknown.ok, false);
+  assert.match(unknown.error.message, /unknown field/);
 });
 
 test("generic discovery resolves a source listing to its application form", async (context) => {

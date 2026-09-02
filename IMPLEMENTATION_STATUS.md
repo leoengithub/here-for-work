@@ -1,6 +1,6 @@
 # Implementation status
 
-Date: 2026-08-31
+Date: 2026-09-02
 Stage: generic public-HTTPS path live-proven; Greenhouse and Lever live observations remain
 
 ## Approved target not yet implemented
@@ -50,6 +50,21 @@ implementation work:
 
 Pre-Queue publication, artifact-aware reuse, and Playwright fallback therefore remain
 disabled until the required capabilities pass the fail-closed manifest and probes.
+
+The version-1 capability manifest is now implemented as JSON Schema plus generated
+TypeScript and closed Rust DTOs. `capabilities.get` reports the exact Git revision
+separately from declared version, the effective PDF threshold and whether it is configured
+or the upstream default, the fixed eight-capability status set, constraints, and bounded
+actionable diagnostics without renderer-facing filesystem paths. Startup and the existing
+integration health check both validate this manifest before treating future capabilities as
+available. This is compatibility gating only: it does not enable discovery, evaluation,
+artifact inspection, or a browser fallback.
+
+Health compares the exact career-ops revision before and after its compatibility checks.
+Future gated operations must still revalidate immediately before execution because this
+check is not a durable lease. The current canonical Applied writer is reported as degraded,
+not supported: its existing write remains post-verified, but readable script names do not
+pre-certify semantic compatibility.
 
 ## Verified implementation evidence
 

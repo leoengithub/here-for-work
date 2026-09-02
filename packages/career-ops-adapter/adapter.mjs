@@ -21,6 +21,13 @@ import {
 } from "./preparation-transaction.mjs";
 
 const PROTOCOL_VERSION = 1;
+const CAPABILITY_SCHEMA_VERSION = 1;
+const CAPABILITY_PROBE_REVISION = "hereforwork.career-ops-capability-probes.v1";
+const UPSTREAM_AUTO_PDF_SCORE_THRESHOLD_DEFAULT = 3.0;
+const PRODUCT_AUTO_PDF_SCORE_THRESHOLD = 3.5;
+const SEMVER_RE = /^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$/;
+const GIT_SHA_RE = /^[0-9a-f]{40}$/;
+const GIT_EXECUTABLE = process.platform === "win32" ? "git" : "/usr/bin/git";
 const root = process.env.HFW_CAREER_OPS_ROOT;
 const trackerDb = process.env.HFW_CAREER_OPS_INDEX;
 const stagingRoot = process.env.HFW_CAREER_OPS_STAGING;
@@ -97,6 +104,303 @@ async function canExecute(path) {
   } catch {
     return false;
   }
+}
+
+async function gitHeadRevision() {
+  if (!root || !(await canRead(root))) return null;
+  return new Promise((resolvePromise) => {
+    const child = spawn(GIT_EXECUTABLE, ["-C", root, "rev-parse", "--verify", "HEAD"], {
+      cwd: root,
+      env: { PATH: process.env.PATH },
+      stdio: ["ignore", "pipe", "ignore"],
+      shell: false,
+    });
+    const chunks = [];
+    let bytes = 0;
+    const timer = setTimeout(() => {
+      child.kill();
+      resolvePromise(null);
+    }, 3_000);
+    child.stdout.on("data", (chunk) => {
+      bytes += chunk.length;
+      if (bytes <= 256) chunks.push(chunk);
+    });
+    child.on("error", () => {
+      clearTimeout(timer);
+      resolvePromise(null);
+    });
+    child.on("close", (status) => {
+      clearTimeout(timer);
+      if (status !== 0 || bytes > 256) return resolvePromise(null);
+      const revision = Buffer.concat(chunks).toString("utf8").trim();
+      resolvePromise(GIT_SHA_RE.test(revision) ? revision : null);
+    });
+  });
+}
+
+async function upstreamDeclaredVersion() {
+  if (!root) return { value: null, diagnostic: "unavailable" };
+  let packageVersion = null;
+  let fileVersion = null;
+  try {
+    const packageJson = JSON.parse(await readFile(resolve(root, "package.json"), "utf8"));
+    if (typeof packageJson?.version === "string" && SEMVER_RE.test(packageJson.version)) {
+      packageVersion = packageJson.version;
+    }
+  } catch {}
+  try {
+    const firstToken = (await readFile(resolve(root, "VERSION"), "utf8")).trim().split(/\s+/u)[0];
+    if (SEMVER_RE.test(firstToken)) fileVersion = firstToken;
+  } catch {}
+  if (packageVersion && fileVersion && packageVersion !== fileVersion) {
+    return { value: null, diagnostic: "mismatch" };
+  }
+  const value = packageVersion ?? fileVersion;
+  return { value, diagnostic: value ? null : "unavailable" };
+}
+
+async function effectiveAutoPdfScoreThreshold() {
+  if (!root || !(await canRead(root))) return { value: null, source: "unavailable" };
+  let raw;
+  try {
+    raw = await readFile(resolve(root, "config/profile.yml"), "utf8");
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return { value: UPSTREAM_AUTO_PDF_SCORE_THRESHOLD_DEFAULT, source: "upstream_default" };
+    }
+    return { value: null, source: "unavailable" };
+  }
+  try {
+    const document = parseDocument(raw, {
+      schema: "core",
+      merge: false,
+      uniqueKeys: true,
+      maxAliasCount: 0,
+    });
+    if (document.errors.length > 0) return { value: null, source: "unavailable" };
+    const profile = document.toJS({ maxAliasCount: 0 });
+    if (!profile || typeof profile !== "object" || Array.isArray(profile)) {
+      return { value: null, source: "unavailable" };
+    }
+    if (!("auto_pdf_score_threshold" in profile)) {
+      return { value: UPSTREAM_AUTO_PDF_SCORE_THRESHOLD_DEFAULT, source: "upstream_default" };
+    }
+    const value = profile.auto_pdf_score_threshold;
+    if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > 5) {
+      return { value: null, source: "unavailable" };
+    }
+    return { value, source: "configured" };
+  } catch {
+    return { value: null, source: "unavailable" };
+  }
+}
+
+function capability(id, status, interfaceClass, sourceRevision, constraints) {
+  return {
+    id,
+    status: sourceRevision ? status : "unavailable",
+    interfaceClass,
+    sourceRevision,
+    probeRevision: CAPABILITY_PROBE_REVISION,
+    constraints,
+  };
+}
+
+async function capabilityManifest() {
+  const [revision, declaredVersion, threshold, surfaces] = await Promise.all([
+    gitHeadRevision(),
+    upstreamDeclaredVersion(),
+    effectiveAutoPdfScoreThreshold(),
+    Promise.all([
+      "scan-ats-full.mjs",
+      "discover-ats.mjs",
+      "tracker.mjs",
+      "merge-tracker.mjs",
+      "set-status.mjs",
+    ].map(async (name) => [name, Boolean(root && (await canRead(resolve(root, name))))])),
+  ]);
+  const readable = Object.fromEntries(surfaces);
+  const diagnostics = [];
+  const addDiagnostic = (code, capabilityId, message, action) => {
+    diagnostics.push({ code, capabilityId, message, action });
+  };
+  if (!revision) {
+    addDiagnostic(
+      "upstream_revision_unavailable",
+      null,
+      "The exact career-ops Git revision could not be verified; upstream-dependent capabilities are disabled.",
+      "Use a readable Git checkout with an exact HEAD revision and run the integration check again.",
+    );
+  }
+  if (declaredVersion.diagnostic === "mismatch") {
+    addDiagnostic(
+      "upstream_version_mismatch",
+      null,
+      "career-ops package metadata and VERSION disagree.",
+      "Resolve the upstream version metadata mismatch before relying on declared-version compatibility.",
+    );
+  } else if (declaredVersion.diagnostic === "unavailable") {
+    addDiagnostic(
+      "upstream_version_unavailable",
+      null,
+      "A valid declared career-ops version could not be read.",
+      "Restore valid package or VERSION metadata and run the integration check again.",
+    );
+  }
+  if (threshold.source === "unavailable") {
+    addDiagnostic(
+      "auto_pdf_threshold_invalid",
+      "evaluation.full_ag.run.v1",
+      "The effective auto_pdf_score_threshold could not be determined safely.",
+      "Correct the career-ops profile value or make its documented default readable; HereForWork will not rewrite it.",
+    );
+  } else if (threshold.value !== PRODUCT_AUTO_PDF_SCORE_THRESHOLD) {
+    addDiagnostic(
+      "auto_pdf_threshold_product_mismatch",
+      "evaluation.full_ag.run.v1",
+      `career-ops currently resolves auto_pdf_score_threshold to ${threshold.value}; the approved product target is ${PRODUCT_AUTO_PDF_SCORE_THRESHOLD}.`,
+      "Change the career-ops setting explicitly if you want the approved threshold; HereForWork will not change it automatically.",
+    );
+  }
+
+  const reverseStatus = readable["scan-ats-full.mjs"] ? "degraded" : "unavailable";
+  addDiagnostic(
+    readable["scan-ats-full.mjs"] ? "isolated_execution_required" : "typed_interface_unavailable",
+    "discovery.reverse_ats.run.v1",
+    readable["scan-ats-full.mjs"]
+      ? "The reverse-ATS JSON surface writes local cache state and is not isolated."
+      : "The reverse-ATS machine surface is unavailable.",
+    readable["scan-ats-full.mjs"]
+      ? "Provide an HFW-owned isolated execution and cache boundary before enabling this capability."
+      : "Install a revision with a supported typed reverse-ATS interface, then probe its exact result shape.",
+  );
+  const companyPreviewStatus = readable["discover-ats.mjs"] ? "degraded" : "unavailable";
+  addDiagnostic(
+    readable["discover-ats.mjs"] ? "safe_shape_probe_required" : "typed_interface_unavailable",
+    "discovery.company_ats.preview.v1",
+    readable["discover-ats.mjs"]
+      ? "The company-to-ATS preview exists, but no side-effect-free strict result-shape probe is installed."
+      : "The company-to-ATS preview surface is unavailable.",
+    readable["discover-ats.mjs"]
+      ? "Add a safe strict shape probe before enabling orchestration."
+      : "Install a revision with the documented typed preview surface.",
+  );
+  addDiagnostic(
+    "typed_interface_unavailable",
+    "liveness.role.read.v1",
+    "career-ops does not expose a typed public per-role liveness result.",
+    "Wait for an upstream-neutral active, expired, or uncertain result with evidence.",
+  );
+  addDiagnostic(
+    "typed_interface_unavailable",
+    "evaluation.full_ag.run.v1",
+    "career-ops does not expose a versioned full A-G execution and atomic receipt contract.",
+    "Wait for an upstream-neutral typed execution and receipt interface.",
+  );
+  addDiagnostic(
+    "safe_shape_probe_required",
+    "evaluation.result.read.v1",
+    "Report and tracker data exist, but no strict complete-result reconciliation probe is installed.",
+    "Add a revision-pinned strict parser that validates report sections, native score, and tracker identity.",
+  );
+  addDiagnostic(
+    "structured_provenance_unavailable",
+    "artifacts.inspect.v1",
+    "career-ops does not expose structured artifact identity, provenance, and freshness.",
+    "Wait for an upstream-neutral artifact inspection contract; file timestamps are not sufficient.",
+  );
+  addDiagnostic(
+    "public_browser_fallback_unavailable",
+    "browser.review_fallback.v1",
+    "The existing Playwright implementation is internal and has no transferable HereForWork lease contract.",
+    "Wait for a public review-only driver contract with typed field results and no submit authority.",
+  );
+  const appliedReady = readable["tracker.mjs"] && readable["merge-tracker.mjs"] && readable["set-status.mjs"];
+  if (appliedReady) {
+    addDiagnostic(
+      "canonical_writer_compatibility_unverified",
+      "canonical.applied.write.v1",
+      "The fixed Applied writer is execution-verified, but this career-ops revision has no side-effect-free semantic compatibility probe.",
+      "Keep post-write effect verification enabled and add a non-mutating upstream compatibility contract before reporting supported.",
+    );
+  } else {
+    addDiagnostic(
+      "canonical_writer_unavailable",
+      "canonical.applied.write.v1",
+      "One or more fixed canonical tracking writers are unavailable.",
+      "Restore tracker.mjs, merge-tracker.mjs, and set-status.mjs before recording Applied.",
+    );
+  }
+
+  const capabilities = [
+    capability("discovery.reverse_ats.run.v1", reverseStatus, "conditional", revision, [
+      "requires_exact_upstream_revision",
+      "requires_isolated_execution",
+      "writes_no_career_ops_checkout_state",
+    ]),
+    capability("discovery.company_ats.preview.v1", companyPreviewStatus, "contracted", revision, [
+      "requires_exact_upstream_revision",
+      "requires_safe_shape_probe",
+      "preview_only",
+      "no_implicit_config_write",
+    ]),
+    capability("liveness.role.read.v1", "unavailable", "missing", revision, [
+      "requires_exact_upstream_revision",
+      "requires_typed_per_role_evidence",
+    ]),
+    capability("evaluation.full_ag.run.v1", "unavailable", "missing", revision, [
+      "requires_exact_upstream_revision",
+      "requires_atomic_evaluation_receipt",
+      "native_score_1_to_5",
+    ]),
+    capability("evaluation.result.read.v1", "degraded", "conditional", revision, [
+      "requires_exact_upstream_revision",
+      "requires_safe_shape_probe",
+      "native_score_1_to_5",
+      "requires_report_tracker_identity",
+    ]),
+    capability("artifacts.inspect.v1", "unavailable", "missing", revision, [
+      "requires_exact_upstream_revision",
+      "requires_structured_artifact_provenance",
+    ]),
+    capability("browser.review_fallback.v1", "unavailable", "missing", revision, [
+      "requires_exact_upstream_revision",
+      "requires_single_driver_lease_transfer",
+      "review_only_no_submit",
+    ]),
+    capability("canonical.applied.write.v1", appliedReady ? "degraded" : "unavailable", "contracted", revision, [
+      "requires_exact_upstream_revision",
+      "canonical_tracking_only",
+      "requires_user_confirmed_submission",
+    ]),
+  ];
+
+  return {
+    contract: "hereforwork.career-ops-capabilities",
+    schemaVersion: CAPABILITY_SCHEMA_VERSION,
+    adapterProtocolVersion: PROTOCOL_VERSION,
+    upstreamRevision: revision,
+    upstreamDeclaredVersion: declaredVersion.value,
+    autoPdfScoreThreshold: threshold,
+    operations,
+    sourceOfTruth: {
+      profileFacts: "career-ops",
+      evaluation: "career-ops",
+      generatedArtifacts: "career-ops",
+      groundedAnswers: "career-ops",
+      applicationHistory: "career-ops",
+      operationalState: "here-for-work",
+    },
+    forbiddenOperations: [
+      "application.submit",
+      "application.finalize",
+      "message.send",
+      "shell.run",
+      "browser.command",
+    ],
+    capabilities,
+    diagnostics,
+  };
 }
 
 async function playwrightChromiumReady() {
@@ -1179,25 +1483,8 @@ async function ensureCanonicalRole(input, status, key, eventDate, canonical = {}
 async function execute(request) {
   switch (request.operation) {
     case "capabilities.get":
-      return {
-        protocolVersion: PROTOCOL_VERSION,
-        operations,
-        sourceOfTruth: {
-          profileFacts: "career-ops",
-          evaluation: "career-ops",
-          generatedArtifacts: "career-ops",
-          groundedAnswers: "career-ops",
-          applicationHistory: "career-ops",
-          operationalState: "here-for-work",
-        },
-        forbiddenOperations: [
-          "application.submit",
-          "application.finalize",
-          "message.send",
-          "shell.run",
-          "browser.command",
-        ],
-      };
+      assertInputKeys(request.input, [], request.operation);
+      return capabilityManifest();
     case "health.check": {
       const pdfFallback = await reviewedCvFallbackReady(userReviewedCvFallback);
       const checks = {

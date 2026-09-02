@@ -11,10 +11,10 @@ use std::sync::{Arc, Mutex};
 
 use adapter::{AdapterConfig, CanonicalRoleInput, PreparationRoleInput, discover_executable};
 use domain::{
-    BrowserSessionSummary, BrowserSetup, CheckResult, ChromeProfile, CvFallbackSetting,
-    DashboardState, ImportResult, IntegrationHealth, MaintenanceResult, OutcomeNotification,
-    PreparationDetail, PreparationWork, PrepareRoleOutcome, QueueFilters, ReconcileResult,
-    RestorePreflight, ScheduledRun,
+    BrowserSessionSummary, BrowserSetup, CareerOpsCheckResult, ChromeProfile, CvFallbackSetting,
+    DashboardState, HistoryRecord, ImportResult, IntegrationHealth, MaintenanceResult,
+    OutcomeNotification, PreparationDetail, PreparationWork, PrepareRoleOutcome, QueueFilters,
+    ReconcileResult, RestorePreflight, ScheduledRun,
 };
 use sha2::Digest;
 use store::{PreparationCompletion, Store};
@@ -1627,17 +1627,22 @@ fn check_integrations(state: tauri::State<'_, AppState>) -> IntegrationHealth {
         })
     });
     let career_ops = match state.adapter.health(fallback_configuration.as_ref()) {
-        Ok(true) => CheckResult {
+        Ok(health) if health.ready => CareerOpsCheckResult {
             ready: true,
-            detail: "career-ops canonical history is available.".to_string(),
+            detail: "career-ops canonical history is available; capability manifest v1 loaded."
+                .to_string(),
+            capabilities: Some(health.capabilities),
         },
-        Ok(false) => CheckResult {
+        Ok(health) => CareerOpsCheckResult {
             ready: false,
-            detail: "career-ops adapter checks did not all pass.".to_string(),
+            detail: "career-ops adapter checks did not all pass; capability manifest v1 loaded."
+                .to_string(),
+            capabilities: Some(health.capabilities),
         },
-        Err(error) => CheckResult {
+        Err(error) => CareerOpsCheckResult {
             ready: false,
             detail: error.to_string(),
+            capabilities: None,
         },
     };
     IntegrationHealth {
@@ -1659,11 +1664,15 @@ fn reconcile_application_history(
         .store
         .lock()
         .map_err(|_| "Operational store lock was poisoned".to_string())?;
+    reconcile_history_preserving_adapter_gate(&mut store, &records)
+}
+
+fn reconcile_history_preserving_adapter_gate(
+    store: &mut Store,
+    records: &[HistoryRecord],
+) -> Result<ReconcileResult, String> {
     store
-        .set_adapter_ready(true)
-        .map_err(|error| error.to_string())?;
-    store
-        .reconcile_history(&records)
+        .reconcile_history(records)
         .map_err(|error| error.to_string())
 }
 
@@ -1982,6 +1991,18 @@ pub fn run() {
                 tracker_index_path,
                 staging_path: career_ops_staging_path,
             };
+            let fallback_configuration =
+                store.cv_fallback_setting().ok().and_then(|setting| {
+                    match (&setting.path, &setting.sha256) {
+                        (Some(_), Some(_)) => serde_json::to_value(setting).ok(),
+                        _ => None,
+                    }
+                });
+            let adapter_ready = adapter
+                .health(fallback_configuration.as_ref())
+                .map(|health| health.ready)
+                .unwrap_or(false);
+            store.set_adapter_ready(adapter_ready)?;
             if !store.queue_filters_configured()? {
                 if let Ok(defaults) = adapter.queue_filter_defaults() {
                     store.set_queue_filters(&defaults)?;
@@ -2088,6 +2109,17 @@ mod tests {
             "native_notification_failed: system unavailable"
         );
         assert!(super::deliver_native_outcome(true, || Ok(())).is_ok());
+    }
+
+    #[test]
+    fn history_reconciliation_cannot_overwrite_a_failed_startup_compatibility_gate() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = crate::store::Store::open(directory.path().join("test.sqlite3")).unwrap();
+        store.set_adapter_ready(false).unwrap();
+
+        super::reconcile_history_preserving_adapter_gate(&mut store, &[]).unwrap();
+
+        assert_eq!(store.dashboard().unwrap().adapter_status, "not_configured");
     }
 
     #[test]

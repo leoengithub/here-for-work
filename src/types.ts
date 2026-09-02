@@ -145,8 +145,12 @@ export interface CheckResult {
   detail: string;
 }
 
+export interface CareerOpsCheckResult extends CheckResult {
+  capabilities: HereForWorkCareerOpsCapabilityManifest | null;
+}
+
 export interface IntegrationHealth {
-  careerOps: CheckResult;
+  careerOps: CareerOpsCheckResult;
   codex: CheckResult;
   claude: CheckResult;
 }
@@ -241,6 +245,7 @@ export interface ImportResult {
 import type { HereForWorkDiscoveryDataset } from "./generated/discovery-dataset";
 import type { HereForWorkDiscoveryRun } from "./generated/discovery-run";
 import type { ProviderProbeSchema } from "./generated/provider-probe";
+import type { HereForWorkCareerOpsCapabilityManifest } from "./generated/career-ops-capabilities";
 
 export type DiscoveryDataset = HereForWorkDiscoveryDataset;
 export type DiscoveryRun = HereForWorkDiscoveryRun;

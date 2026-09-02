@@ -63,7 +63,7 @@ export async function getDashboard(): Promise<DashboardState> {
 export async function checkIntegrations(): Promise<IntegrationHealth> {
   if (!isTauri()) {
     return {
-      careerOps: { ready: false, detail: "Available in the desktop app." },
+      careerOps: { ready: false, detail: "Available in the desktop app.", capabilities: null },
       codex: { ready: false, detail: "Available in the desktop app." },
       claude: { ready: false, detail: "Available in the desktop app." },
     };
