@@ -764,6 +764,25 @@ h3 {
   font-variant-numeric: tabular-nums;
 }
 
+.queue-group__attention-action {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin: -0.15rem 0 0.7rem;
+  padding: 0.7rem 0.85rem;
+  border: 1px solid var(--line);
+  border-radius: 0.75rem;
+  background: var(--surface-muted);
+}
+
+.queue-group__attention-action p {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.74rem;
+  line-height: 1.45;
+}
+
 .role-list {
   display: grid;
   gap: 0.65rem;
@@ -1604,6 +1623,11 @@ a.role-card__title:hover {
 
   .pre-queue-role {
     grid-template-columns: 1fr;
+  }
+
+  .queue-group__attention-action {
+    align-items: flex-start;
+    flex-direction: column;
   }
 }
 

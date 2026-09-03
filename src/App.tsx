@@ -283,15 +283,46 @@ export function formatPreQueueReason(reason: string): string {
   return plainReason ? `${plainReason[0].toUpperCase()}${plainReason.slice(1)}.` : "This role needs attention.";
 }
 
-function PreQueueAttentionGroup({ roles }: { roles: DashboardState["preQueueRoles"] }) {
+function preQueueRecoveryCopy(scope: NonNullable<DashboardState["preQueueRoles"][number]["recovery"]>["scope"]): string {
+  switch (scope) {
+    case "global_reconcile":
+      return "Included in the group retry above.";
+    case "repair_career_ops":
+      return "Career-ops needs repair before this role can be evaluated.";
+    default:
+      return "No recovery action is available yet.";
+  }
+}
+
+function PreQueueAttentionGroup({
+  roles,
+  busy,
+  onGlobalRecovery,
+}: {
+  roles: DashboardState["preQueueRoles"];
+  busy: boolean;
+  onGlobalRecovery: () => void;
+}) {
   const attentionRoles = roles.filter((role) => role.state === "needs_attention");
   if (attentionRoles.length === 0) return null;
+  const canRetryGlobally = attentionRoles.some((role) => (
+    role.recovery.scope === "global_reconcile"
+    && role.recovery.action === "reconcile_application_history"
+  ));
   return (
-    <section className="queue-group queue-group--attention" aria-labelledby="needs-attention-heading">
+    <section className="queue-group queue-group--attention" aria-labelledby="needs-attention-heading" aria-live="polite">
       <div className="queue-group__heading">
         <h3 id="needs-attention-heading">Needs attention</h3>
         <span aria-label={`${attentionRoles.length} roles`}>{attentionRoles.length}</span>
       </div>
+      {canRetryGlobally ? (
+        <div className="queue-group__attention-action">
+          <p>Some roles can be retried together from the latest canonical history.</p>
+          <Button variant="outline" type="button" onClick={onGlobalRecovery} disabled={busy}>
+            {busy ? "Retrying…" : "Retry history sync"}
+          </Button>
+        </div>
+      ) : null}
       <ul className="pre-queue-role-list" aria-label="Roles needing attention">
         {attentionRoles.map((role) => (
           <li className="pre-queue-role-list__item" key={role.roleId}>
@@ -301,7 +332,7 @@ function PreQueueAttentionGroup({ roles }: { roles: DashboardState["preQueueRole
                 <p className="pre-queue-role__company">{role.company}</p>
               </div>
               <p className="pre-queue-role__reason">{formatPreQueueReason(role.reason)}</p>
-              <p className="pre-queue-role__availability">No role-scoped recovery is available yet.</p>
+              <p className="pre-queue-role__availability">{preQueueRecoveryCopy(role.recovery.scope)}</p>
             </article>
           </li>
         ))}
@@ -2183,13 +2214,19 @@ export function App() {
             />
           </div>
 
-          {queueOperationalState.kind !== "idle" ? <QueueOperationalStatus dashboard={dashboard} /> : null}
+          {queueOperationalState.kind !== "idle" && attentionRoles.length === 0 ? (
+            <QueueOperationalStatus dashboard={dashboard} />
+          ) : null}
 
           {dashboard.roles.length === 0 && attentionRoles.length === 0 ? (
             queueOperationalState.kind === "idle" ? emptyQueueContent : null
           ) : (
             <div className="queue-groups">
-              <PreQueueAttentionGroup roles={dashboard.preQueueRoles} />
+              <PreQueueAttentionGroup
+                roles={dashboard.preQueueRoles}
+                busy={busy}
+                onGlobalRecovery={() => void reconcileHistory()}
+              />
               {groupOrder.map((group) => {
                 const roles = dashboard.roles.filter((role) => role.queueGroup === group);
                 if (roles.length === 0) return null;

@@ -410,10 +410,12 @@ describe("App", () => {
     expect(screen.getByRole("heading", { name: "Strong matches" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Other new roles" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Needs a decision" })).toBeInTheDocument();
-    expect(screen.getByText("1 role needs attention")).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Needs attention" })).toBeInTheDocument();
     expect(screen.getByText("Example Studio")).toBeInTheDocument();
     expect(screen.getByText("The evaluation result is invalid or stale.")).toBeInTheDocument();
+    expect(screen.getByText("Included in the group retry above.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Retry history sync" })).toBeEnabled();
+    expect(screen.queryByText("1 role needs attention")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Open System" })).not.toBeInTheDocument();
     expect(screen.getByLabelText("career-ops match score 4.6 out of 5")).toHaveTextContent("4.6/5");
     expect(screen.getByText("Legitimacy: Proceed with Caution · Risk: Medium")).toBeInTheDocument();
@@ -540,6 +542,17 @@ describe("App", () => {
     );
     expect(screen.queryByRole("article")).not.toBeInTheDocument();
     expect(screen.queryByRole("button")).not.toBeInTheDocument();
+  });
+
+  it("offers one typed group retry for globally recoverable attention roles", async () => {
+    window.history.replaceState({}, "", "/?queue-preview=blocked");
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "Review queue" });
+    expect(screen.getByRole("heading", { name: "Needs attention" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Retry history sync" })).toBeEnabled();
+    expect(screen.getAllByText("Included in the group retry above.")).toHaveLength(63);
+    expect(screen.queryByText("63 roles need attention before they can appear in Queue.")).not.toBeInTheDocument();
   });
 
   it("maps Queue operational snapshots to truthful status affordances", () => {

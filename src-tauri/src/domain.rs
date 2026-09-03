@@ -131,13 +131,20 @@ pub struct PreQueueRecovery {
 impl PreQueueRecovery {
     pub fn for_reason(reason: &str) -> Self {
         let (scope, action) = match reason {
-            "canonical_history_unavailable"
-            | "canonical_match_missing_or_ambiguous"
-            | "evaluation_compatibility_changed" => (
+            "canonical_history_unavailable" | "evaluation_compatibility_changed" => (
                 PreQueueRecoveryScope::GlobalReconcile,
                 Some("reconcile_application_history".to_string()),
             ),
-            "canonical_status_not_evaluated"
+            "evaluation_result_invalid_or_stale" => (
+                PreQueueRecoveryScope::GlobalReconcile,
+                Some("reconcile_application_history".to_string()),
+            ),
+            "canonical_match_missing_or_ambiguous"
+            | "source_identity_changed"
+            | "canonical_status_not_evaluated"
+            | "evaluation_receipt_pointer_unreadable"
+            | "evaluation_result_identity_mismatch"
+            | "canonical_evaluation_requires_refresh"
             | "evaluation_result_capability_unavailable"
             | "canonical_evaluation_missing_executor_unavailable" => (
                 PreQueueRecoveryScope::RepairCareerOps,
@@ -1446,5 +1453,55 @@ mod capability_manifest_tests {
         });
 
         assert!(serde_json::from_value::<EvaluationAuthorization>(authorization).is_err());
+    }
+}
+
+#[cfg(test)]
+mod pre_queue_recovery_tests {
+    use super::{PreQueueRecovery, PreQueueRecoveryScope};
+
+    #[test]
+    fn every_emitted_attention_reason_has_a_typed_recovery_scope() {
+        let global = [
+            "canonical_history_unavailable",
+            "evaluation_compatibility_changed",
+            "evaluation_result_invalid_or_stale",
+        ];
+        let career_ops = [
+            "canonical_match_missing_or_ambiguous",
+            "source_identity_changed",
+            "canonical_status_not_evaluated",
+            "evaluation_receipt_pointer_unreadable",
+            "evaluation_result_identity_mismatch",
+            "canonical_evaluation_requires_refresh",
+            "evaluation_result_capability_unavailable",
+            "canonical_evaluation_missing_executor_unavailable",
+        ];
+
+        for reason in global {
+            let recovery = PreQueueRecovery::for_reason(reason);
+            assert_eq!(
+                recovery.scope,
+                PreQueueRecoveryScope::GlobalReconcile,
+                "{reason}"
+            );
+            assert_eq!(
+                recovery.action.as_deref(),
+                Some("reconcile_application_history")
+            );
+        }
+        for reason in career_ops {
+            let recovery = PreQueueRecovery::for_reason(reason);
+            assert_eq!(
+                recovery.scope,
+                PreQueueRecoveryScope::RepairCareerOps,
+                "{reason}"
+            );
+            assert_eq!(recovery.action.as_deref(), Some("repair_career_ops"));
+        }
+
+        let unknown = PreQueueRecovery::for_reason("unrecognized_reason");
+        assert_eq!(unknown.scope, PreQueueRecoveryScope::None);
+        assert_eq!(unknown.action, None);
     }
 }

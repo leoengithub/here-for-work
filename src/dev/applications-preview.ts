@@ -158,7 +158,7 @@ export const queuePreviewDashboard: DashboardState = {
       title: "UI Engineer",
       state: "needs_attention",
       reason: "evaluation_result_invalid_or_stale",
-      recovery: { scope: "none", action: null },
+      recovery: { scope: "global_reconcile", action: "reconcile_application_history" },
       attempt: 2,
       updatedAt: now,
     },

@@ -7642,10 +7642,6 @@ mod tests {
         assert!(dashboard.roles.is_empty());
         assert_eq!(dashboard.pre_queue_roles.len(), 1);
         assert_eq!(dashboard.pre_queue_roles[0].state, "awaiting_evaluation");
-        assert_eq!(
-            dashboard.pre_queue_roles[0].recovery.scope,
-            crate::domain::PreQueueRecoveryScope::None
-        );
         assert_eq!(dashboard.handled_count, 0);
         let error = store
             .begin_preparation(&dashboard.pre_queue_roles[0].role_id, "codex")
@@ -7935,7 +7931,7 @@ mod tests {
         assert_eq!(held.pre_queue_roles[0].reason, "source_identity_changed");
         assert_eq!(
             held.pre_queue_roles[0].recovery.scope,
-            crate::domain::PreQueueRecoveryScope::None
+            crate::domain::PreQueueRecoveryScope::RepairCareerOps
         );
 
         allow_all_test_roles(&mut store);
