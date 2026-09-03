@@ -11,6 +11,7 @@ import { HugeiconsIcon } from "@hugeicons/react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Spinner } from "@/components/ui/spinner";
+import { Progress, ProgressLabel, ProgressValue } from "@/components/ui/progress";
 import { Alert, AlertAction, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
@@ -265,15 +266,126 @@ export function PreQueueStatus({ roles }: { roles: DashboardState["preQueueRoles
   return <p className="pre-queue-status" role="status">{parts.join(". ")}.</p>;
 }
 
-function HandledQueue() {
+export type QueueOperationalState =
+  | { kind: "evaluating"; count: number; startedAt: string | null }
+  | { kind: "progress"; completed: number; total: number }
+  | { kind: "waiting"; lastSuccessfulAt: string | null }
+  | { kind: "blocked"; count: number; runCount: number }
+  | { kind: "idle" };
+
+/**
+ * The queue deliberately derives its presentation from the durable dashboard
+ * snapshot. A role held in pre-Queue is never treated as an empty queue.
+ */
+export function deriveQueueOperationalState(dashboard: DashboardState): QueueOperationalState {
+  const attentionCount = dashboard.preQueueRoles.filter((role) => role.state === "needs_attention").length;
+  if (attentionCount > 0 || dashboard.actionRequiredRunCount > 0) {
+    return { kind: "blocked", count: attentionCount, runCount: dashboard.actionRequiredRunCount };
+  }
+
+  const awaitingCount = dashboard.preQueueRoles.filter((role) => role.state === "awaiting_evaluation").length;
+  const syncingCount = dashboard.preQueueRoles.filter((role) => role.state === "syncing").length;
+  if (syncingCount > 0 && awaitingCount === 0) {
+    const completed = dashboard.roles.length;
+    return { kind: "progress", completed, total: completed + syncingCount };
+  }
+
+  const evaluatingCount = awaitingCount + syncingCount;
+  if (evaluatingCount > 0) {
+    const timestamps = dashboard.preQueueRoles
+      .filter((role) => role.state === "awaiting_evaluation" || role.state === "syncing")
+      .map((role) => role.updatedAt)
+      .filter(Boolean)
+      .sort();
+    return { kind: "evaluating", count: evaluatingCount, startedAt: timestamps[0] ?? null };
+  }
+
+  if (dashboard.pendingRunCount > 0 || dashboard.lastSuccessfulDiscoveryAt !== null) {
+    return { kind: "waiting", lastSuccessfulAt: dashboard.lastSuccessfulDiscoveryAt };
+  }
+
+  return { kind: "idle" };
+}
+
+export function QueueOperationalStatus({
+  dashboard,
+  onOpenSystem,
+}: {
+  dashboard: DashboardState;
+  onOpenSystem?: () => void;
+}) {
+  const state = deriveQueueOperationalState(dashboard);
+  if (state.kind === "idle") return null;
+
+  if (state.kind === "blocked") {
+    const roleCopy = state.count === 1 ? "1 role" : `${state.count} roles`;
+    const runCopy = state.runCount === 1 ? "1 discovery run" : `${state.runCount} discovery runs`;
+    const explanation = state.count > 0 && state.runCount > 0
+      ? `${roleCopy} and ${runCopy} need attention before new roles can appear.`
+      : state.count > 0
+        ? `${roleCopy} need attention before they can appear in Queue.`
+        : `${runCopy} need attention before new roles can appear.`;
+    const heading = state.count > 0
+      ? `${state.count} ${state.count === 1 ? "role" : "roles"} need attention`
+      : `${state.runCount} discovery ${state.runCount === 1 ? "run" : "runs"} need attention`;
+    return (
+      <div className="queue-operational-status queue-operational-status--blocked" role="status" aria-live="polite">
+        <HugeiconsIcon icon={Alert02Icon} strokeWidth={2} aria-hidden="true" />
+        <div className="queue-operational-status__body">
+          <strong>{heading}</strong>
+          <p>{explanation}</p>
+        </div>
+        {onOpenSystem ? (
+          <Button variant="outline" type="button" onClick={onOpenSystem}>Open System</Button>
+        ) : null}
+      </div>
+    );
+  }
+
+  if (state.kind === "progress") {
+    const percentage = state.total > 0 ? (state.completed / state.total) * 100 : 0;
+    return (
+      <div className="queue-operational-status queue-operational-status--progress" role="status" aria-live="polite">
+        <div className="queue-operational-status__body">
+          <div className="queue-operational-status__line">
+            <strong>Evaluation progress</strong>
+            <span>{state.completed} of {state.total} complete</span>
+          </div>
+          <Progress value={percentage}>
+            <ProgressLabel className="visually-hidden">
+              Evaluation progress: {state.completed} of {state.total} complete
+            </ProgressLabel>
+            <ProgressValue className="visually-hidden" />
+          </Progress>
+        </div>
+      </div>
+    );
+  }
+
+  if (state.kind === "evaluating") {
+    return (
+      <div className="queue-operational-status queue-operational-status--evaluating" role="status" aria-live="polite">
+        <Spinner className="motion-reduce:animate-none" aria-hidden="true" />
+        <div className="queue-operational-status__body">
+          <strong>{state.count} {state.count === 1 ? "role is" : "roles are"} being evaluated</strong>
+          <p>{state.startedAt ? `Started ${formatRelative(state.startedAt)}.` : "Evaluation is in progress."}</p>
+        </div>
+      </div>
+    );
+  }
+
   return (
-    <Empty className="empty-state" role="region" aria-labelledby="handled-empty-title">
-      <EmptyHeader>
-        <EmptyMedia className="empty-state__mark" aria-hidden="true">H</EmptyMedia>
-        <EmptyTitle><h2 id="handled-empty-title">No new roles are waiting.</h2></EmptyTitle>
-        <EmptyDescription>Prepared and dismissed roles remain visible in Applications and canonical career-ops history.</EmptyDescription>
-      </EmptyHeader>
-    </Empty>
+    <div className="queue-operational-status queue-operational-status--waiting" role="status" aria-live="polite">
+      <HugeiconsIcon icon={Clock01Icon} strokeWidth={2} aria-hidden="true" />
+      <div className="queue-operational-status__body">
+        <strong>Queue is waiting for its next run</strong>
+        <p>
+          {state.lastSuccessfulAt
+            ? <time dateTime={state.lastSuccessfulAt}>Last successful run {formatRelative(state.lastSuccessfulAt)}.</time>
+            : "No successful run recorded yet."}
+        </p>
+      </div>
+    </div>
   );
 }
 
@@ -1648,19 +1760,10 @@ export function App() {
     return <main className="loading-shell" aria-live="polite">Opening your queue…</main>;
   }
 
-  const emptyQueueContent = dashboard.preQueueRoles.length > 0
-    ? (
-        <Empty className="empty-state" role="region" aria-labelledby="evaluating-empty-title">
-          <EmptyHeader>
-            <EmptyMedia className="empty-state__mark" aria-hidden="true">H</EmptyMedia>
-            <EmptyTitle><h2 id="evaluating-empty-title">No evaluated roles are ready yet.</h2></EmptyTitle>
-            <EmptyDescription>Roles appear here after career-ops finishes their full evaluation.</EmptyDescription>
-          </EmptyHeader>
-        </Empty>
-      )
-    : dashboard.preparations.length > 0 || dashboard.recentlyDismissed.length > 0
-      ? <HandledQueue />
-      : <EmptyQueue onImport={() => fileInputRef.current?.click()} />;
+  const queueOperationalState = deriveQueueOperationalState(dashboard);
+  const emptyQueueContent = queueOperationalState.kind !== "idle"
+    ? <QueueOperationalStatus dashboard={dashboard} onOpenSystem={() => setView("system")} />
+    : <EmptyQueue onImport={() => fileInputRef.current?.click()} />;
 
   let mainContent: ReactNode;
   if (view === "system") {
@@ -2004,7 +2107,6 @@ export function App() {
             <div>
               <p className="eyebrow">Today’s queue</p>
               <h2 id="queue-title">Review queue</h2>
-              <PreQueueStatus roles={dashboard.preQueueRoles} />
             </div>
             <div className="queue-heading__actions">
               <Button
@@ -2033,6 +2135,10 @@ export function App() {
               }}
             />
           </div>
+
+          {dashboard.roles.length > 0 ? (
+            <QueueOperationalStatus dashboard={dashboard} onOpenSystem={() => setView("system")} />
+          ) : null}
 
           {dashboard.roles.length === 0 ? (
             emptyQueueContent

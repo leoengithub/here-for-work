@@ -1,11 +1,20 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { App, BrowserSessions, PreQueueStatus, RoleRow, deriveApplicationState } from "./App";
+import {
+  App,
+  BrowserSessions,
+  PreQueueStatus,
+  QueueOperationalStatus,
+  RoleRow,
+  deriveApplicationState,
+  deriveQueueOperationalState,
+} from "./App";
 import type { BrowserSessionSummary, PreparationSummary } from "./types";
 import {
   applicationsPreviewBrowserSetup,
   applicationsPreviewDashboard,
   applicationsPreviewSessions,
+  getQueuePreviewDashboard,
 } from "./dev/applications-preview";
 
 afterEach(() => {
@@ -401,7 +410,8 @@ describe("App", () => {
     expect(screen.getByRole("heading", { name: "Strong matches" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Other new roles" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Needs a decision" })).toBeInTheDocument();
-    expect(screen.getByText("1 role is being evaluated. 1 needs attention in System.")).toBeInTheDocument();
+    expect(screen.getByText("1 role need attention")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Open System" })).toBeEnabled();
     expect(screen.getByLabelText("career-ops match score 4.6 out of 5")).toHaveTextContent("4.6/5");
     expect(screen.getByText("Legitimacy: Proceed with Caution · Risk: Medium")).toBeInTheDocument();
     expect(screen.getByText(/The role asks for production GraphQL ownership/)).toBeInTheDocument();
@@ -525,6 +535,47 @@ describe("App", () => {
     );
     expect(screen.queryByRole("article")).not.toBeInTheDocument();
     expect(screen.queryByRole("button")).not.toBeInTheDocument();
+  });
+
+  it("maps Queue operational snapshots to truthful status affordances", () => {
+    expect(deriveQueueOperationalState(getQueuePreviewDashboard("evaluating"))).toMatchObject({
+      kind: "evaluating",
+      count: 4,
+    });
+    expect(deriveQueueOperationalState(getQueuePreviewDashboard("progress"))).toMatchObject({
+      kind: "progress",
+      completed: 3,
+      total: 5,
+    });
+    expect(deriveQueueOperationalState(getQueuePreviewDashboard("waiting"))).toMatchObject({ kind: "waiting" });
+    expect(deriveQueueOperationalState(getQueuePreviewDashboard("blocked"))).toMatchObject({
+      kind: "blocked",
+      count: 63,
+    });
+    expect(deriveQueueOperationalState(getQueuePreviewDashboard("idle"))).toMatchObject({ kind: "idle" });
+
+    render(<QueueOperationalStatus dashboard={getQueuePreviewDashboard("blocked")} onOpenSystem={() => undefined} />);
+    expect(screen.getByRole("status")).toHaveTextContent("63 roles need attention");
+    expect(screen.getByRole("button", { name: "Open System" })).toBeEnabled();
+  });
+
+  it("renders each Queue operational state with its truthful affordance", () => {
+    const { rerender } = render(
+      <QueueOperationalStatus dashboard={getQueuePreviewDashboard("evaluating")} onOpenSystem={() => undefined} />,
+    );
+    expect(screen.getByRole("status")).toHaveTextContent("4 roles are being evaluated");
+    expect(screen.getByRole("status")).toHaveTextContent("Started");
+    expect(screen.queryByText(/ETA/i)).not.toBeInTheDocument();
+
+    rerender(<QueueOperationalStatus dashboard={getQueuePreviewDashboard("progress")} onOpenSystem={() => undefined} />);
+    expect(screen.getByRole("progressbar", { name: "Evaluation progress: 3 of 5 complete" })).toHaveAttribute("aria-valuenow", "60");
+    expect(screen.getByRole("status")).toHaveTextContent("3 of 5 complete");
+
+    rerender(<QueueOperationalStatus dashboard={getQueuePreviewDashboard("waiting")} onOpenSystem={() => undefined} />);
+    expect(screen.getByRole("status")).toHaveTextContent("Last successful run");
+
+    rerender(<QueueOperationalStatus dashboard={getQueuePreviewDashboard("idle")} onOpenSystem={() => undefined} />);
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
   });
 
   it("keeps queue filters in System instead of primary navigation", async () => {

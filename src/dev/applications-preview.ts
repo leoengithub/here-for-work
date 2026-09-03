@@ -164,6 +164,74 @@ export const queuePreviewDashboard: DashboardState = {
   preparations: [],
 };
 
+export type QueuePreviewMode = "decisions" | "evaluating" | "progress" | "waiting" | "blocked" | "idle";
+
+const preQueueFixture = (count: number, state: "awaiting_evaluation" | "syncing" | "needs_attention", reason: string) => (
+  Array.from({ length: count }, (_, index) => ({
+    roleId: `preview-${state}-${index + 1}`,
+    company: state === "needs_attention" ? "Northstar Tools" : "Example Labs",
+    title: state === "needs_attention" ? "Frontend Engineer" : "Platform Engineer",
+    state,
+    reason,
+    attempt: state === "needs_attention" ? 2 : 1,
+    updatedAt: "2026-09-03T08:00:00Z",
+  }))
+);
+
+export function getQueuePreviewDashboard(mode: QueuePreviewMode): DashboardState {
+  if (mode === "decisions") return queuePreviewDashboard;
+  if (mode === "evaluating") {
+    return {
+      ...queuePreviewDashboard,
+      roles: [],
+      preQueueRoles: preQueueFixture(4, "awaiting_evaluation", "evaluation_pending"),
+      lastSuccessfulDiscoveryAt: "2026-09-03T07:30:00Z",
+      pendingRunCount: 1,
+    };
+  }
+  if (mode === "progress") {
+    return {
+      ...queuePreviewDashboard,
+      preQueueRoles: preQueueFixture(2, "syncing", "evaluation_result_read_pending"),
+      pendingRunCount: 0,
+      actionRequiredRunCount: 0,
+    };
+  }
+  if (mode === "waiting") {
+    return {
+      ...queuePreviewDashboard,
+      roles: [],
+      preQueueRoles: [],
+      preparations: [],
+      recentlyDismissed: [],
+      lastSuccessfulDiscoveryAt: "2026-09-03T06:45:00Z",
+      pendingRunCount: 0,
+    };
+  }
+  if (mode === "blocked") {
+    return {
+      ...queuePreviewDashboard,
+      roles: [],
+      preQueueRoles: preQueueFixture(63, "needs_attention", "canonical_history_unavailable"),
+      preparations: [],
+      recentlyDismissed: [],
+      lastSuccessfulDiscoveryAt: "2026-09-03T06:45:00Z",
+      pendingRunCount: 0,
+      actionRequiredRunCount: 0,
+    };
+  }
+  return {
+    ...queuePreviewDashboard,
+    roles: [],
+    preQueueRoles: [],
+    preparations: [],
+    recentlyDismissed: [],
+    lastSuccessfulDiscoveryAt: null,
+    pendingRunCount: 0,
+    actionRequiredRunCount: 0,
+  };
+}
+
 function browserSession(
   id: string,
   preparationId: string,
@@ -215,5 +283,12 @@ export function isApplicationsPreview(): boolean {
 
 export function isQueuePreview(): boolean {
   return import.meta.env.DEV
-    && new URLSearchParams(window.location.search).get("queue-preview") === "decisions";
+    && new URLSearchParams(window.location.search).has("queue-preview");
+}
+
+export function getQueuePreviewMode(): QueuePreviewMode {
+  const mode = new URLSearchParams(window.location.search).get("queue-preview");
+  return mode === "evaluating" || mode === "progress" || mode === "waiting" || mode === "blocked" || mode === "idle"
+    ? mode
+    : "decisions";
 }
