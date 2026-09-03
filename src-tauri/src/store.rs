@@ -2886,6 +2886,19 @@ impl Store {
             .ok_or_else(|| StoreError::InvalidAdapterEffect("role was not found".to_string()))
     }
 
+    fn canonical_role_is_terminal(&self, role_id: &str) -> Result<bool, StoreError> {
+        self.connection
+            .query_row(
+                "SELECT LOWER(TRIM(COALESCE(canonical_status, '')))
+                        IN ('applied', 'discarded')
+                   FROM roles WHERE id = ?1",
+                [role_id],
+                |row| row.get::<_, bool>(0),
+            )
+            .optional()?
+            .ok_or_else(|| StoreError::InvalidPreparation("role was not found".to_string()))
+    }
+
     pub fn begin_applied_effect_for_session(
         &mut self,
         session_id: &str,
@@ -2990,6 +3003,11 @@ impl Store {
         if !matches!(provider, "codex" | "claude") {
             return Err(StoreError::InvalidPreparation(
                 "provider must be codex or claude".to_string(),
+            ));
+        }
+        if self.canonical_role_is_terminal(role_id)? {
+            return Err(StoreError::InvalidPreparation(
+                "the role already has a terminal canonical outcome".to_string(),
             ));
         }
         let evaluation = self.current_preparation_evaluation(role_id)?;
@@ -7134,6 +7152,14 @@ mod tests {
                 [&role_id],
             )
             .unwrap();
+        store
+            .connection
+            .execute(
+                "UPDATE evaluation_sync SET state = 'terminal', reason = 'canonical_terminal'
+                  WHERE role_id = ?1",
+                [&role_id],
+            )
+            .unwrap();
 
         let error = store.begin_preparation(&role_id, "codex").unwrap_err();
         assert!(error.to_string().contains("terminal canonical outcome"));
@@ -7149,6 +7175,14 @@ mod tests {
             .connection
             .execute(
                 "UPDATE roles SET canonical_status = 'Evaluated' WHERE id = ?1",
+                [&role_id],
+            )
+            .unwrap();
+        store
+            .connection
+            .execute(
+                "UPDATE evaluation_sync SET state = 'ready', reason = 'canonical_evaluation_verified'
+                  WHERE role_id = ?1",
                 [&role_id],
             )
             .unwrap();
