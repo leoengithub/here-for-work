@@ -2762,6 +2762,68 @@ impl Store {
         })
     }
 
+    fn retire_active_work_for_applied_role(
+        transaction: &Transaction<'_>,
+        role_id: &str,
+        now: &str,
+    ) -> Result<(), StoreError> {
+        let is_applied = transaction.query_row(
+            "SELECT LOWER(TRIM(COALESCE(canonical_status, ''))) = 'applied'
+               FROM roles WHERE id = ?1",
+            [role_id],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if !is_applied {
+            return Ok(());
+        }
+
+        transaction.execute(
+            "UPDATE preparation_jobs
+                SET status = 'cancelled', step = 'cancelled',
+                    error_class = NULL, error_stage = NULL, error_detail = NULL,
+                    retry_policy = NULL, updated_at = ?1
+              WHERE role_id = ?2 AND status IN ('queued', 'preparing')",
+            params![now, role_id],
+        )?;
+        transaction.execute(
+            "UPDATE browser_commands
+                SET status = 'permanent', error_code = 'canonical_terminal',
+                    lease_expires_at = NULL, updated_at = ?1
+              WHERE status IN ('pending', 'leased')
+                AND session_id IN (
+                  SELECT id FROM browser_sessions
+                   WHERE purpose = 'application' AND role_id = ?2
+                )",
+            params![now, role_id],
+        )?;
+        transaction.execute(
+            "UPDATE browser_sessions
+                SET status = 'applied_recorded', error_code = NULL,
+                    driver_lease_state = 'released', fallback_eligible = 0,
+                    handoff_reason = 'canonical_terminal', updated_at = ?1
+              WHERE purpose = 'application' AND role_id = ?2
+                AND status != 'applied_recorded'",
+            params![now, role_id],
+        )?;
+        transaction.execute(
+            "UPDATE roles
+                SET preparation_state = CASE
+                      WHEN EXISTS (
+                        SELECT 1 FROM preparation_jobs
+                         WHERE role_id = ?2 AND status = 'completed'
+                      ) THEN 'prepared' ELSE 'not_started' END,
+                    updated_at = ?1
+              WHERE id = ?2
+                AND preparation_state != CASE
+                      WHEN EXISTS (
+                        SELECT 1 FROM preparation_jobs
+                         WHERE role_id = ?2 AND status = 'completed'
+                      ) THEN 'prepared' ELSE 'not_started' END",
+            params![now, role_id],
+        )?;
+        Ok(())
+    }
+
     pub fn reconcile_history(
         &mut self,
         records: &[HistoryRecord],
@@ -2798,15 +2860,22 @@ impl Store {
 
         let mut matched = 0;
         for (role_id, company, title, application_url, current_status) in roles {
-            if let Some(record) =
-                deterministic_history_match(records, &company, &title, application_url.as_deref())
-            {
-                // Applied is a monotonic terminal outcome. History reads are intentionally
-                // bounded, so no matching record may replace its terminal identity or date.
-                if current_status.as_deref().is_some_and(is_applied_status) {
+            let record =
+                deterministic_history_match(records, &company, &title, application_url.as_deref());
+            // Applied is a monotonic terminal outcome. History reads are intentionally
+            // bounded, so no matching record may replace its terminal identity or date.
+            if current_status.as_deref().is_some_and(is_applied_status) {
+                Self::retire_active_work_for_applied_role(
+                    &transaction,
+                    &role_id,
+                    &Utc::now().to_rfc3339(),
+                )?;
+                if record.is_some() {
                     matched += 1;
-                    continue;
                 }
+                continue;
+            }
+            if let Some(record) = record {
                 let record_status = if is_applied_status(&record.status) {
                     "Applied"
                 } else if is_discarded_status(&record.status) {
@@ -2848,6 +2917,13 @@ impl Store {
                       WHERE role_id = ?3",
                     params![record_status, Utc::now().to_rfc3339(), role_id],
                 )?;
+                if record_status == "Applied" {
+                    Self::retire_active_work_for_applied_role(
+                        &transaction,
+                        &role_id,
+                        &Utc::now().to_rfc3339(),
+                    )?;
+                }
                 matched += 1;
             }
         }
@@ -7271,6 +7347,348 @@ mod tests {
             ("terminal".to_string(), "canonical_terminal".to_string())
         );
         assert!(store.dashboard().unwrap().roles.is_empty());
+    }
+
+    #[test]
+    fn newly_reconciled_applied_retires_only_active_role_work_and_preserves_evidence() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+        let completed = completed_preparation(&mut store);
+        store
+            .configure_browser(
+                "abcdefghijklmnopabcdefghijklmnop",
+                "019d0000-0000-7000-8000-000000000001",
+                "Profile 1",
+            )
+            .unwrap();
+        let session = store.queue_application_session(&completed.id).unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        for (id, status) in [
+            ("queued-evidence", "queued"),
+            ("preparing-evidence", "preparing"),
+        ] {
+            store
+                .connection
+                .execute(
+                    "INSERT INTO preparation_jobs(
+                       id, role_id, provider, status, step, attempt, context_hash, tracker_id,
+                       report_path, report_hash, cv_pdf_path, cv_pdf_hash, error_class,
+                       created_at, updated_at, error_stage, error_detail, retry_policy,
+                       cv_source, resolved_application_url
+                     ) VALUES (
+                       ?1, ?2, 'codex', ?3, ?3, 2, 'context-evidence', 77,
+                       'reports/preserve.md', 'report-hash-evidence',
+                       'output/preserve.pdf', 'cv-hash-evidence', 'old-error',
+                       ?4, ?4, 'old-stage', 'old-detail', 'retryable',
+                       'tailored_generated', 'https://example.test/jobs/1'
+                     )",
+                    rusqlite::params![id, completed.role_id, status, now],
+                )
+                .unwrap();
+        }
+        store
+            .connection
+            .execute(
+                "UPDATE roles SET preparation_state = 'preparing' WHERE id = ?1",
+                [&completed.role_id],
+            )
+            .unwrap();
+        store
+            .connection
+            .execute(
+                "UPDATE browser_sessions
+                    SET status = 'action_required', error_code = 'old-session-error',
+                        page_title = 'Preserved title', fill_results_json = '[{\"kept\":true}]',
+                        driver_lease_state = 'human_handoff', fallback_eligible = 1,
+                        handoff_reason = 'old-handoff'
+                  WHERE id = ?1",
+                [&session.id],
+            )
+            .unwrap();
+        store
+            .connection
+            .execute(
+                "INSERT INTO browser_commands(
+                   id, session_id, command_type, payload_json, status, attempt,
+                   lease_expires_at, error_code, created_at, updated_at
+                 ) VALUES (
+                   'leased-evidence', ?1, 'fill_plan', '{\"keep\":\"leased\"}',
+                   'leased', 2, '2099-01-01T00:00:00Z', NULL, ?2, ?2
+                 )",
+                rusqlite::params![session.id, now],
+            )
+            .unwrap();
+        store
+            .connection
+            .execute(
+                "INSERT INTO browser_commands(
+                   id, session_id, command_type, payload_json, status, attempt,
+                   lease_expires_at, error_code, created_at, updated_at
+                 ) VALUES (
+                   'completed-evidence', ?1, 'release_for_review',
+                   '{\"keep\":\"completed\"}', 'completed', 1, NULL,
+                   'completed-marker', ?2, ?2
+                 )",
+                rusqlite::params![session.id, now],
+            )
+            .unwrap();
+        let row_counts_before: (i64, i64, i64) = store
+            .connection
+            .query_row(
+                "SELECT
+                   (SELECT COUNT(*) FROM preparation_jobs WHERE role_id = ?1),
+                   (SELECT COUNT(*) FROM browser_sessions WHERE role_id = ?1),
+                   (SELECT COUNT(*) FROM browser_commands WHERE session_id = ?2)",
+                rusqlite::params![completed.role_id, session.id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        let applied = HistoryRecord {
+            id: 42,
+            date: "2026-09-03".to_string(),
+            company: "Northstar Tools".to_string(),
+            role: "Frontend Engineer".to_string(),
+            score: "4.2/5".to_string(),
+            status: " aPpLiEd ".to_string(),
+            pdf: "✅".to_string(),
+            report: "reports/042-example.md".to_string(),
+            notes: String::new(),
+        };
+
+        store
+            .reconcile_history(std::slice::from_ref(&applied))
+            .unwrap();
+
+        let preserved_preparations: i64 = store
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM preparation_jobs
+                  WHERE id IN ('queued-evidence', 'preparing-evidence')
+                    AND status = 'cancelled' AND step = 'cancelled'
+                    AND error_class IS NULL AND error_stage IS NULL
+                    AND error_detail IS NULL AND retry_policy IS NULL
+                    AND report_path = 'reports/preserve.md'
+                    AND report_hash = 'report-hash-evidence'
+                    AND cv_pdf_path = 'output/preserve.pdf'
+                    AND cv_pdf_hash = 'cv-hash-evidence'
+                    AND context_hash = 'context-evidence'
+                    AND tracker_id = 77 AND attempt = 2",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(preserved_preparations, 2);
+        let preserved_completed_preparation: i64 = store
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM preparation_jobs
+                  WHERE id = ?1 AND status = 'completed'
+                    AND report_path = 'reports/042-example.md'
+                    AND cv_pdf_path = 'output/042-example/cv.pdf'",
+                [&completed.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(preserved_completed_preparation, 1);
+        let retired_commands: i64 = store
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM browser_commands
+                  WHERE session_id = ?1 AND status = 'permanent'
+                    AND error_code = 'canonical_terminal' AND lease_expires_at IS NULL
+                    AND (
+                      (command_type = 'inspect_request' AND payload_json LIKE '%expectedUrl%'
+                        AND attempt = 0)
+                      OR (id = 'leased-evidence' AND payload_json = '{\"keep\":\"leased\"}'
+                        AND attempt = 2)
+                    )",
+                [&session.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(retired_commands, 2);
+        let preserved_completed_command: i64 = store
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM browser_commands
+                  WHERE id = 'completed-evidence' AND status = 'completed'
+                    AND error_code = 'completed-marker'
+                    AND payload_json = '{\"keep\":\"completed\"}' AND attempt = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(preserved_completed_command, 1);
+        let retired_session_and_role: i64 = store
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM browser_sessions b JOIN roles r ON r.id = b.role_id
+                  WHERE b.id = ?1 AND b.status = 'applied_recorded'
+                    AND b.error_code IS NULL AND b.driver_lease_state = 'released'
+                    AND b.fallback_eligible = 0 AND b.handoff_reason = 'canonical_terminal'
+                    AND b.page_title = 'Preserved title'
+                    AND b.fill_results_json = '[{\"kept\":true}]'
+                    AND r.canonical_status = 'Applied' AND r.preparation_state = 'prepared'",
+                [&session.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(retired_session_and_role, 1);
+        let scoped_updated_at: (String, String, String, String) = store
+            .connection
+            .query_row(
+                "SELECT
+                   (SELECT updated_at FROM preparation_jobs WHERE id = 'queued-evidence'),
+                   (SELECT updated_at FROM browser_commands WHERE id = 'leased-evidence'),
+                   (SELECT updated_at FROM browser_sessions WHERE id = ?1),
+                   (SELECT updated_at FROM roles WHERE id = ?2)",
+                rusqlite::params![session.id, completed.role_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+
+        store.reconcile_history(&[applied]).unwrap();
+
+        let row_counts_after: (i64, i64, i64) = store
+            .connection
+            .query_row(
+                "SELECT
+                   (SELECT COUNT(*) FROM preparation_jobs WHERE role_id = ?1),
+                   (SELECT COUNT(*) FROM browser_sessions WHERE role_id = ?1),
+                   (SELECT COUNT(*) FROM browser_commands WHERE session_id = ?2)",
+                rusqlite::params![completed.role_id, session.id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(row_counts_after, row_counts_before);
+        let repeated_updated_at: (String, String, String, String) = store
+            .connection
+            .query_row(
+                "SELECT
+                   (SELECT updated_at FROM preparation_jobs WHERE id = 'queued-evidence'),
+                   (SELECT updated_at FROM browser_commands WHERE id = 'leased-evidence'),
+                   (SELECT updated_at FROM browser_sessions WHERE id = ?1),
+                   (SELECT updated_at FROM roles WHERE id = ?2)",
+                rusqlite::params![session.id, completed.role_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(repeated_updated_at, scoped_updated_at);
+    }
+
+    #[test]
+    fn omitted_already_applied_role_retires_queued_work_without_completed_artifacts() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+        import_evaluated(&mut store, DATASET);
+        let role_id = store.dashboard().unwrap().roles[0].id.clone();
+        let queued = store.begin_preparation(&role_id, "codex").unwrap();
+        store
+            .connection
+            .execute(
+                "UPDATE roles SET canonical_status = ' aPpLiEd ' WHERE id = ?1",
+                [&role_id],
+            )
+            .unwrap();
+
+        store.reconcile_history(&[]).unwrap();
+
+        let state: (String, String, String, String) = store
+            .connection
+            .query_row(
+                "SELECT r.canonical_status, r.preparation_state, p.status, p.step
+                   FROM roles r JOIN preparation_jobs p ON p.role_id = r.id
+                  WHERE r.id = ?1 AND p.id = ?2",
+                rusqlite::params![role_id, queued.id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            state,
+            (
+                "Applied".to_string(),
+                "not_started".to_string(),
+                "cancelled".to_string(),
+                "cancelled".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn nonterminal_history_reconciliation_does_not_retire_active_work() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+        let completed = completed_preparation(&mut store);
+        store
+            .configure_browser(
+                "abcdefghijklmnopabcdefghijklmnop",
+                "019d0000-0000-7000-8000-000000000001",
+                "Profile 1",
+            )
+            .unwrap();
+        let session = store.queue_application_session(&completed.id).unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        store
+            .connection
+            .execute(
+                "INSERT INTO preparation_jobs(
+                   id, role_id, provider, status, step, attempt, created_at, updated_at
+                 ) VALUES ('nonterminal-queued', ?1, 'codex', 'queued', 'queued', 0, ?2, ?2)",
+                rusqlite::params![completed.role_id, now],
+            )
+            .unwrap();
+        store
+            .connection
+            .execute(
+                "UPDATE roles SET preparation_state = 'queued' WHERE id = ?1",
+                [&completed.role_id],
+            )
+            .unwrap();
+        let evaluated = HistoryRecord {
+            id: 42,
+            date: "2026-09-03".to_string(),
+            company: "Northstar Tools".to_string(),
+            role: "Frontend Engineer".to_string(),
+            score: "4.2/5".to_string(),
+            status: "Evaluated".to_string(),
+            pdf: "✅".to_string(),
+            report: "reports/042-example.md".to_string(),
+            notes: String::new(),
+        };
+
+        store.reconcile_history(&[evaluated]).unwrap();
+
+        let state: (String, String, String, String, String) = store
+            .connection
+            .query_row(
+                "SELECT r.canonical_status, r.preparation_state, p.status, b.status, c.status
+                   FROM roles r
+                   JOIN preparation_jobs p ON p.role_id = r.id AND p.id = 'nonterminal-queued'
+                   JOIN browser_sessions b ON b.role_id = r.id AND b.id = ?2
+                   JOIN browser_commands c ON c.session_id = b.id
+                  WHERE r.id = ?1",
+                rusqlite::params![completed.role_id, session.id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            state,
+            (
+                "Evaluated".to_string(),
+                "queued".to_string(),
+                "queued".to_string(),
+                "waiting_for_extension".to_string(),
+                "pending".to_string()
+            )
+        );
     }
 
     #[test]
