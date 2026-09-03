@@ -1917,6 +1917,7 @@ async function readEvaluationResult(input) {
       || afterCapabilityEntry?.compatibilityFingerprint !== expectedFingerprint) {
     throw new Error("career-ops evaluation result format changed during the read.");
   }
+  const { company, role, ...evaluationSummary } = evaluation;
   const notEvaluatedRiskSignals = Object.entries(evaluation.riskSummary)
     .filter(([, value]) => value === "not_evaluated")
     .map(([key]) => key);
@@ -1926,10 +1927,10 @@ async function readEvaluationResult(input) {
     upstreamRevision: before.upstreamRevision,
     compatibilityFingerprint: expectedFingerprint,
     report: { path: report.normalized, sha256: reportHash },
-    role: { company: evaluation.company, title: evaluation.role },
+    role: { company, title: role },
     canonical: { trackerId, status: tracker.status, score: evaluation.score, reportPath: report.normalized },
     evaluation: {
-      ...evaluation,
+      ...evaluationSummary,
       materialUncertainty: {
         confidence: evaluation.confidence,
         authorizationQuestion: evaluation.authorization.question,

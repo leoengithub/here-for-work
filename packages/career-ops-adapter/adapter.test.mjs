@@ -461,6 +461,8 @@ test("evaluation result read accepts the explicitly recognized legacy Machine Su
   assert.equal(response.result.evaluation.riskLevel, "High");
   assert.equal(response.result.evaluation.confidence, "Low");
   assert.deepEqual(response.result.evaluation.strengths, ["React", "TypeScript"]);
+  assert.equal(Object.hasOwn(response.result.evaluation, "company"), false);
+  assert.equal(Object.hasOwn(response.result.evaluation, "role"), false);
   assert.equal(response.result.evaluation.authorization.evidence[0], "The role's authorization path is not stated");
   assert.ok(response.result.evaluation.authorization.evidence.some((item) => /https:\/\/jobs\.example\.test\/roles\/7/.test(item)));
   assert.deepEqual(response.result.evaluation.materialUncertainty.notEvaluatedRiskSignals, [
