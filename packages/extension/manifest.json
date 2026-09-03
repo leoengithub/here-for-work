@@ -3,7 +3,7 @@
   "name": "HereForWork Form Assistant",
   "version": "0.1.0",
   "description": "Inspects, safely fills, and verifies web application forms for review. It never submits.",
-  "permissions": ["nativeMessaging", "storage"],
+  "permissions": ["nativeMessaging", "scripting", "storage"],
   "host_permissions": ["<all_urls>"],
   "background": {
     "service_worker": "service-worker.js",

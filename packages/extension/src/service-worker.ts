@@ -11,6 +11,7 @@ import {
   completeDurableCommand,
 } from "./durable-command-cache";
 import { installMainWorldFinalizationGuard, releaseMainWorldFinalizationGuard } from "./main-world-guard";
+import { requireScriptingApi } from "./scripting-permission";
 
 const HOST_NAME = "com.hereforwork.bridge";
 const POLL_INTERVAL_MS = 750;
@@ -116,13 +117,13 @@ function mainGuardKey(tabId: number): string {
 }
 
 async function installMainGuard(tabId: number): Promise<void> {
-  if (!chrome.scripting?.executeScript) throw new Error("finalization_guard_permission_required");
+  const scripting = requireScriptingApi(chrome.scripting);
   const key = mainGuardKey(tabId);
   const stored = (await chrome.storage.local.get(key))[key] as { tabId?: number; token?: string } | undefined;
   const token = stored?.tabId === tabId && typeof stored.token === "string"
     ? stored.token
     : crypto.randomUUID();
-  await chrome.scripting.executeScript({
+  await scripting.executeScript({
     target: { tabId },
     world: "MAIN",
     func: installMainWorldFinalizationGuard,
@@ -132,11 +133,11 @@ async function installMainGuard(tabId: number): Promise<void> {
 }
 
 async function releaseMainGuard(tabId: number): Promise<void> {
-  if (!chrome.scripting?.executeScript) throw new Error("finalization_guard_permission_required");
+  const scripting = requireScriptingApi(chrome.scripting);
   const key = mainGuardKey(tabId);
   const stored = (await chrome.storage.local.get(key))[key] as { tabId?: number; token?: string } | undefined;
   if (stored?.tabId !== tabId || typeof stored.token !== "string") throw new Error("finalization_guard_unavailable");
-  const [execution] = await chrome.scripting.executeScript({
+  const [execution] = await scripting.executeScript({
     target: { tabId },
     world: "MAIN",
     func: releaseMainWorldFinalizationGuard,

@@ -47,9 +47,11 @@ release, submit, or create a replacement tab when the reviewed tab is gone.
 
 The finalization guard blocks captured submit/click events plus programmatic
 `HTMLFormElement.submit()` and `requestSubmit()` calls from page listeners while fill events are
-dispatched. Installing and restoring that guard in the page's main JavaScript world requires the
-extension `scripting` permission. Until that permission is explicitly approved and declared, the
-driver fails closed with `finalization_guard_permission_required` before inspection.
+dispatched. Installing and restoring that guard in the page's main JavaScript world uses the
+extension's declared `scripting` permission. That permission is used only to install and restore
+this guard in the already selected application tab; it does not add a browser command, widen host
+access, or permit submission. If the API is unavailable, the driver fails closed with
+`finalization_guard_permission_required` before inspection.
 
 A hard inspection failure or a fill-plan rejection proven to occur before mutation may release
 the extension lease and mark a future fallback eligible. A partial fill, read-back uncertainty,
