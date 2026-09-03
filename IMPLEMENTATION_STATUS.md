@@ -21,11 +21,11 @@ Before inspection and fill, the service worker installs it in the selected appli
 page `MAIN` world. Only verified `release_for_review` restores the original
 `submit`/`requestSubmit` descriptors and captured listeners, removes the guard, and releases
 the lease for human review. This permission adds no browser command, host access, or submission
-capability. The previously recorded Apple Silicon package includes the exact manifest and
-integrated browser source, passed strict code-signature verification, and completed a
-read-only Queue, Applications, and System launch/navigation smoke check without executing
-an application or form action. It predates the typed incremental-import update; no new app
-build or push is claimed for the current source.
+capability. The current post-import Apple Silicon package includes the typed discovery
+import, exact manifest, and integrated browser source; it was rebuilt, strict-signature
+verified, installed at `/Users/leo/Desktop/HereForWork.app`, and passed a read-only
+Queue/System launch/navigation smoke check. No historical backlog was imported and no live
+form action was executed. No push is claimed.
 
 The Greenhouse and Lever evidence in `evidence/HFW-BROWSER-25` is an isolated,
 reversible public-form observation using synthetic values. It proves current page shape,
@@ -131,7 +131,9 @@ cutover has occurred.
 
 Current source validation passed on 2026-09-03: frontend 93 tests, adapter 53,
 discovery-contract 15, Rust 125 plus 4, typechecks, contract checks, extension build,
-Clippy, and formatting. No app build or push is claimed for this change.
+Clippy, and formatting. The post-import package build, strict-signature verification,
+installation, and read-only Queue/System launch smoke also passed. The historical backlog
+remains unimported, no live form action was executed, and no push is claimed.
 
 ## Verified implementation evidence
 

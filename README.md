@@ -9,17 +9,17 @@ HereForWork is a local-first, review-before-submit job-search companion. It is i
 Personal-proof implementation. The stack and implementation direction are recorded in
 [STACK_SELECTION.md](STACK_SELECTION.md) and [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md).
 
-The current source uses schema-v22 SQLite migrations. The last recorded Apple Silicon
-proof package is at:
+The current source uses schema-v22 SQLite migrations. The current post-import Apple
+Silicon proof package is at:
 
 ```text
 src-tauri/target/release/bundle/macos/HereForWork.app
 ```
 
-That earlier package includes the local React/Tauri queue, real private proof import,
-canonical-history reconciliation, scheduling/catch-up records, Codex and Claude CLI
-conformance, provider-neutral report/CV preparation, grounded live-form answers, login
-launch, notifications, backup/export, a native messaging host, and an unpacked all-sites
+The package includes the local React/Tauri queue, typed discovery import, real private
+proof import, canonical-history reconciliation, scheduling/catch-up records, Codex and
+Claude CLI conformance, provider-neutral report/CV preparation, grounded live-form answers,
+login launch, notifications, backup/export, a native messaging host, and an unpacked all-sites
 extension with generic form support plus Ashby/Greenhouse/Lever detection. The extension is paired with the selected ordinary
 Chrome profile on this Mac; a new installation still requires that one manual step.
 
@@ -31,10 +31,9 @@ not inspect or fill the page again.
 The recorded proof package also contains run and browser-command leases with bounded retries,
 pre-migration backup, restore preflight, redacted diagnostics, provider/native-host
 boundary tests, and the approved full-width Queue / Applications information
-architecture with secondary System controls. That previously recorded package predates the
-current typed incremental-import documentation update; no app rebuild or push is claimed
-here for these changes. It was installed at `/Users/leo/Desktop/HereForWork.app` for the
-local personal proof.
+architecture with secondary System controls. This package was rebuilt after the typed
+incremental-import update, strict-signature verified, and installed at
+`/Users/leo/Desktop/HereForWork.app` for the local personal proof. No push is claimed.
 The real Ashby inspection, Codex preparation, career-ops answer persistence, and explicitly
 authorized fill/read-back/release paths now pass. Only verified Name and Email were filled;
 all other fields and the user-owned terminal action remained untouched. Greenhouse and
@@ -45,9 +44,8 @@ needed for the no-finalization guard. It is used only in the already selected ap
 tab: the guard is installed in the page's `MAIN` world before inspection/fill and restores
 the original `submit`/`requestSubmit` descriptors and listeners only after verified
 `release_for_review`. It adds no browser command, host access, or submission capability.
-That previously recorded package contains the exact manifest and passed a read-only launch
-and navigation smoke check through Queue, Applications, and System; no application or form
-action was executed.
+The package contains the exact manifest and passed a read-only launch and navigation smoke
+check through Queue, Applications, and System; no live form action was executed.
 
 The first integration uses career-ops as the sole authority for verified profile data, native 1–5 match scoring, application artifacts and their provenance, grounded answers, and canonical tracking. HereForWork owns orchestration, the unified review queue, user-triggered preparation, notifications, retries, and the browser workflow. Scheduling is an end-state HereForWork responsibility; the existing scheduled tasks remain the authoritative executors until each source completes the staged, explicitly approved migration in [SCHEDULING_MIGRATION.md](SCHEDULING_MIGRATION.md).
 
@@ -96,7 +94,9 @@ producer/exporter output, shadow consumption, automatic sync, and cutover remain
 
 Current source validation on 2026-09-03 passed: frontend 93 tests, adapter 53,
 discovery-contract 15, Rust 125 plus 4, typechecks, contract checks, extension build,
-Clippy, and formatting. This documentation update does not claim a new app build or push.
+Clippy, and formatting. The post-import package build, strict-signature verification,
+installation, and read-only Queue/System launch smoke also passed. The historical backlog
+remains unimported, no live form action was executed, and no push is claimed.
 
 ## Local validation
 
