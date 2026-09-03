@@ -1532,6 +1532,19 @@ const MACHINE_SUMMARY_KEYS = Object.freeze([
   "engagement_mechanism", "authorization_question", "work_auth", "discard_reasons", "via",
   "company_confidential", "advertised_comp", "reports_to", "risk_summary",
 ]);
+// career-ops reports written before the typed evaluation-result contract used
+// this exact Machine Summary shape. Recognize only this bounded legacy shape;
+// arbitrary or partially migrated reports remain fail-closed.
+const LEGACY_MACHINE_SUMMARY_KEYS = Object.freeze([
+  "company", "role", "score", "status", "url", "legitimacy", "location", "remote",
+  "work_auth", "authorization_confidence", "authorization_evidence", "authorization_scope",
+  "engagement_mechanism", "authorization_question", "advertised_comp", "primary_fit", "risks",
+  "recommendation", "risk_summary",
+]);
+const LEGACY_RISK_SUMMARY_KEYS = Object.freeze([
+  "authorization", "technical_gap", "work_mode", "form_completeness", "seniority", "compensation",
+]);
+const LEGACY_MACHINE_SUMMARY_FORMAT = "legacy_machine_summary_v1";
 const RISK_SUMMARY_KEYS = Object.freeze([
   "legitimacy", "classification", "culture", "interview_redflags", "ai_infra", "ai_screening_disclosure",
 ]);
@@ -1606,14 +1619,133 @@ function machineSummaryFromReport(report) {
   try { summary = document.toJS({ maxAliasCount: 0 }); } catch { throw new Error("Machine Summary YAML is malformed."); }
   if (!summary || typeof summary !== "object" || Array.isArray(summary)) throw new Error("Machine Summary must be a YAML object.");
   const keys = Object.keys(summary);
-  if (keys.length !== MACHINE_SUMMARY_KEYS.length || keys.some((key) => !MACHINE_SUMMARY_KEYS.includes(key))) {
+  if (keys.length === MACHINE_SUMMARY_KEYS.length && keys.every((key) => MACHINE_SUMMARY_KEYS.includes(key))) {
+    return { format: "current", summary };
+  }
+  if (keys.length === LEGACY_MACHINE_SUMMARY_KEYS.length && keys.every((key) => LEGACY_MACHINE_SUMMARY_KEYS.includes(key))) {
+    return { format: LEGACY_MACHINE_SUMMARY_FORMAT, summary };
+  }
+  {
     throw new Error("Machine Summary contains an unknown or missing field.");
   }
-  return summary;
+}
+
+function legacySourceUrls(report) {
+  const matches = [...report.matchAll(/^## Sources[ \t]*$/gm)];
+  if (matches.length !== 1) throw new Error("Legacy evaluation report must contain exactly one Sources section.");
+  const afterHeading = report.slice(matches[0].index + matches[0][0].length);
+  const nextHeading = afterHeading.search(/^## /m);
+  const body = nextHeading === -1 ? afterHeading : afterHeading.slice(0, nextHeading);
+  const urls = [...body.matchAll(/https:\/\/[^\s)]+/gi)]
+    .map(([url]) => url.replace(/[.,;:]+$/, ""));
+  if (urls.length < 1 || urls.length > 8) throw new Error("Legacy Sources must contain bounded HTTPS evidence.");
+  return urls;
+}
+
+function legacyAuthorizationConfidence(value) {
+  return {
+    Excelente: "excellent", Excellent: "excellent",
+    Interesante: "interesting", Interesting: "interesting",
+    Investigar: "investigate", Investigate: "investigate",
+    Problema: "problem", Problem: "problem",
+  }[value] ?? (() => { throw new Error("Legacy authorization confidence is invalid."); })();
+}
+
+function legacyAuthorizationScope(value) {
+  const normalized = strictText(value, "Legacy authorization scope", 2_000).toLowerCase();
+  if (normalized.includes("job-specific") && normalized.includes("company-wide")) return "mixed";
+  if (normalized.includes("job-specific")) return "job-specific";
+  if (normalized.includes("company-wide")) return "company-wide";
+  if (normalized === "none") return "none";
+  throw new Error("Legacy authorization scope is invalid.");
+}
+
+function legacyRiskLevel(riskSummary) {
+  const levels = Object.values(riskSummary).map((value) => ({ high: 3, medium: 2, low: 1 }[value]));
+  if (levels.some((value) => value === undefined)) throw new Error("Legacy risk summary contains an invalid severity.");
+  return Math.max(...levels) === 3 ? "High" : Math.max(...levels) === 2 ? "Medium" : "Low";
+}
+
+function validateLegacyEvaluationReport(report, summary, tracker) {
+  const headingPositions = A_G_HEADINGS.map((heading) => {
+    const matches = [...report.matchAll(new RegExp(`^${heading.replace(")", "\\)")}[^\\n]*$`, "gm"))];
+    if (matches.length !== 1) throw new Error(`Evaluation report must contain exactly one ${heading} section.`);
+    return matches[0].index;
+  });
+  if (headingPositions.some((position, index) => index > 0 && position <= headingPositions[index - 1])) {
+    throw new Error("Evaluation report A–G sections are incomplete or out of order.");
+  }
+  if ([...report.matchAll(/^## Risk Summary[ \t]*$/gm)].length !== 1) throw new Error("Evaluation report must contain exactly one Risk Summary section.");
+  const company = strictText(summary.company, "Legacy Machine Summary company", 500);
+  const role = strictText(summary.role, "Legacy Machine Summary role", 500);
+  const reportScore = strictScore(summary.score, "Legacy Machine Summary score");
+  const trackerScore = parseTrackerScore(tracker.score);
+  if (reportScore !== trackerScore) throw new Error("Machine Summary score does not match the canonical tracker score.");
+  strictEnum(summary.status, "Legacy Machine Summary status", ["Review"]);
+  strictText(summary.url, "Legacy Machine Summary URL", 2_000);
+  if (!/^https:\/\/[^\s]+$/i.test(summary.url)) throw new Error("Legacy Machine Summary URL must be HTTPS.");
+  const legitimacyTier = strictEnum(summary.legitimacy, "Legacy legitimacy", ["High Confidence", "Proceed with Caution", "Suspicious"]);
+  const legitimacyKey = { "High Confidence": "high_confidence", "Proceed with Caution": "proceed_with_caution", Suspicious: "suspicious" }[legitimacyTier];
+  strictText(summary.location, "Legacy location", 500);
+  strictText(summary.remote, "Legacy remote arrangement", 500);
+  const legacyWorkAuth = strictText(summary.work_auth, "Legacy work authorization", 2_000);
+  const authorizationConfidence = legacyAuthorizationConfidence(strictText(summary.authorization_confidence, "Legacy authorization confidence", 100));
+  const authorizationEvidence = strictText(summary.authorization_evidence, "Legacy authorization evidence", 2_000);
+  const sourceUrls = legacySourceUrls(report);
+  const authorizationQuestion = strictText(summary.authorization_question, "Legacy authorization question", 2_000);
+  const engagementMechanism = strictText(summary.engagement_mechanism, "Legacy engagement mechanism", 100);
+  const normalizedEngagement = { Unknown: "unknown", unknown: "unknown", employee_payroll: "employee_payroll", contractor: "contractor", eor: "eor" }[engagementMechanism];
+  if (!normalizedEngagement) throw new Error("Legacy engagement mechanism is invalid.");
+  if (summary.advertised_comp !== null) strictText(summary.advertised_comp, "Legacy advertised compensation", 2_000);
+  const strengths = strictTextList(summary.primary_fit, "Legacy primary fit", 12);
+  const gaps = strictTextList(summary.risks, "Legacy risks", 12);
+  const nextAction = strictText(summary.recommendation, "Legacy recommendation", 2_000);
+  const riskSummary = summary.risk_summary;
+  if (!riskSummary || typeof riskSummary !== "object" || Array.isArray(riskSummary)) throw new Error("Legacy risk_summary is invalid.");
+  const riskKeys = Object.keys(riskSummary);
+  if (riskKeys.length < 2 || riskKeys.length > LEGACY_RISK_SUMMARY_KEYS.length
+      || !riskKeys.includes("authorization") || riskKeys.some((key) => !LEGACY_RISK_SUMMARY_KEYS.includes(key))) {
+    throw new Error("Legacy risk_summary contains an unknown or missing field.");
+  }
+  const riskLevel = legacyRiskLevel(riskSummary);
+  const confidence = authorizationConfidence === "excellent" ? "High" : authorizationConfidence === "interesting" ? "Medium" : "Low";
+  return {
+    company,
+    role,
+    score: reportScore,
+    finalDecision: "Consider",
+    legitimacyTier,
+    archetype: "Legacy evaluation",
+    nextAction,
+    strengths,
+    blockers: [],
+    gaps,
+    compensation: { advertised: summary.advertised_comp === null ? null : strictText(summary.advertised_comp, "Legacy advertised compensation", 2_000) },
+    authorization: {
+      confidence: authorizationConfidence,
+      evidence: [authorizationEvidence, ...sourceUrls].slice(0, 8),
+      scope: legacyAuthorizationScope(summary.authorization_scope),
+      engagementMechanism: normalizedEngagement,
+      question: authorizationQuestion,
+      legacyWorkAuth: ["sponsors", "not_needed", "unstated", "no_sponsorship"].includes(legacyWorkAuth) ? legacyWorkAuth : "unstated",
+    },
+    riskLevel,
+    confidence,
+    riskSummary: {
+      legitimacy: legitimacyKey,
+      classification: "not_evaluated",
+      culture: "not_evaluated",
+      interviewRedflags: "not_evaluated",
+      aiInfra: "not_evaluated",
+      aiScreeningDisclosure: "not_evaluated",
+    },
+  };
 }
 
 function validateEvaluationReport(report, tracker) {
-  const summary = machineSummaryFromReport(report);
+  const parsed = machineSummaryFromReport(report);
+  const summary = parsed.summary;
+  if (parsed.format === LEGACY_MACHINE_SUMMARY_FORMAT) return validateLegacyEvaluationReport(report, summary, tracker);
   const headingPositions = A_G_HEADINGS.map((heading) => {
     const matches = [...report.matchAll(new RegExp(`^${heading.replace(")", "\\)")}[^\\n]*$`, "gm"))];
     if (matches.length !== 1) throw new Error(`Evaluation report must contain exactly one ${heading} section.`);

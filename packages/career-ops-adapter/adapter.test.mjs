@@ -162,6 +162,58 @@ Fixture.
 Fixture.
 `;
 
+const legacyEvaluationReport = `# Legacy evaluation: Example Co — Frontend Engineer
+
+## A) Role Summary
+Legacy role summary.
+## B) Match With CV
+Legacy match.
+## C) Level And Strategy
+Legacy strategy.
+## D) Compensation And Demand
+Legacy compensation.
+## E) Company And Hiring Evidence
+Legacy company evidence.
+## F) Risks
+Legacy risks.
+## G) Posting Legitimacy
+Legacy legitimacy.
+## Risk Summary
+Legacy risk summary.
+## Sources
+- Job posting: https://jobs.example.test/roles/7
+
+## Machine Summary
+
+\`\`\`yaml
+company: Example Co
+role: Frontend Engineer
+score: 4.2
+status: Review
+url: https://jobs.example.test/roles/7
+legitimacy: High Confidence
+location: Remote, Europe
+remote: Remote
+work_auth: Authorization path is unconfirmed
+authorization_confidence: Investigar
+authorization_evidence: The role's authorization path is not stated
+authorization_scope: Job-specific requirement; company-wide context is unconfirmed
+engagement_mechanism: Unknown
+authorization_question: Confirm the legal employment path before applying.
+advertised_comp: null
+primary_fit:
+  - React
+  - TypeScript
+risks:
+  - Authorization path unconfirmed
+  - Level requires confirmation
+recommendation: Review and verify the authorization path before preparing.
+risk_summary:
+  authorization: high
+  technical_gap: medium
+\`\`\`
+`;
+
 async function evaluationFixture({ report = evaluationReport, tracker = {}, initializeGit = true, canonicalTracker = "root" } = {}) {
   const fixtureRoot = await mkdtemp(join(tmpdir(), "hfw-evaluation-result-"));
   await mkdir(join(fixtureRoot, "batch"), { recursive: true });
@@ -398,6 +450,38 @@ test("evaluation result read returns a typed, native-score projection", async ()
     "classification", "culture", "interviewRedflags", "aiInfra", "aiScreeningDisclosure",
   ]);
   assert.equal(response.result.evaluation.authorization.evidence.length, 1);
+});
+
+test("evaluation result read accepts the explicitly recognized legacy Machine Summary shape", async () => {
+  const fixture = await evaluationFixture({ report: legacyEvaluationReport });
+  const response = await readEvaluation(fixture);
+  assert.equal(response.ok, true, JSON.stringify(response));
+  assert.equal(response.result.canonical.score, 4.2);
+  assert.equal(response.result.evaluation.finalDecision, "Consider");
+  assert.equal(response.result.evaluation.riskLevel, "High");
+  assert.equal(response.result.evaluation.confidence, "Low");
+  assert.deepEqual(response.result.evaluation.strengths, ["React", "TypeScript"]);
+  assert.equal(response.result.evaluation.authorization.evidence[0], "The role's authorization path is not stated");
+  assert.ok(response.result.evaluation.authorization.evidence.some((item) => /https:\/\/jobs\.example\.test\/roles\/7/.test(item)));
+  assert.deepEqual(response.result.evaluation.materialUncertainty.notEvaluatedRiskSignals, [
+    "classification", "culture", "interviewRedflags", "aiInfra", "aiScreeningDisclosure",
+  ]);
+});
+
+test("evaluation result read rejects an ambiguous legacy Machine Summary shape", async () => {
+  const fixture = await evaluationFixture({
+    report: legacyEvaluationReport.replace("technical_gap: medium", "unknown_risk: medium"),
+  });
+  const response = await readEvaluation(fixture);
+  assert.equal(response.ok, false);
+  assert.match(response.error.message, /unknown or missing field/);
+});
+
+test("legacy Machine Summary cannot replace the canonical native tracker score", async () => {
+  const fixture = await evaluationFixture({ report: legacyEvaluationReport, tracker: { score: "4.1/5" } });
+  const response = await readEvaluation(fixture);
+  assert.equal(response.ok, false);
+  assert.match(response.error.message, /does not match the canonical tracker score/);
 });
 
 test("artifact inspection reuses the canonical report but refreshes an unproven CV without writing", async () => {

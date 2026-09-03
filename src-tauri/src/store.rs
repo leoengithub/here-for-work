@@ -7840,12 +7840,15 @@ mod tests {
     }
 
     #[test]
-    fn canonical_history_unavailability_does_not_poison_a_role_without_a_receipt() {
+    fn legacy_machine_summary_receipt_promotes_after_history_outage() {
         let directory = tempfile::tempdir().unwrap();
         let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
         store.import_dataset(DATASET).unwrap();
         let role = store.evaluation_sync_roles().unwrap().remove(0);
-        let input_hash = format!("history-recovered:{}", role.source_identity_hash);
+        // The adapter's legacy Machine Summary projection is normalized before
+        // it reaches the store; a prior history outage must not make that
+        // recoverable receipt permanently unclaimable.
+        let input_hash = format!("legacy-machine-summary-v1:{}", role.source_identity_hash);
 
         store
             .mark_evaluation_sync_unavailable(&role.role_id, "canonical_history_unavailable")
