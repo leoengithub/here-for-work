@@ -193,6 +193,7 @@ export function getQueuePreviewDashboard(mode: QueuePreviewMode): DashboardState
     return {
       ...queuePreviewDashboard,
       preQueueRoles: preQueueFixture(2, "syncing", "evaluation_result_read_pending"),
+      queueEvaluationProgress: { completed: 3, total: 5 },
       pendingRunCount: 0,
       actionRequiredRunCount: 0,
     };

@@ -285,9 +285,18 @@ export function deriveQueueOperationalState(dashboard: DashboardState): QueueOpe
 
   const awaitingCount = dashboard.preQueueRoles.filter((role) => role.state === "awaiting_evaluation").length;
   const syncingCount = dashboard.preQueueRoles.filter((role) => role.state === "syncing").length;
-  if (syncingCount > 0 && awaitingCount === 0) {
-    const completed = dashboard.roles.length;
-    return { kind: "progress", completed, total: completed + syncingCount };
+  const exactProgress = dashboard.queueEvaluationProgress;
+  if (
+    syncingCount > 0 &&
+    awaitingCount === 0 &&
+    exactProgress &&
+    Number.isInteger(exactProgress.completed) &&
+    Number.isInteger(exactProgress.total) &&
+    exactProgress.completed >= 0 &&
+    exactProgress.total > 0 &&
+    exactProgress.completed <= exactProgress.total
+  ) {
+    return { kind: "progress", completed: exactProgress.completed, total: exactProgress.total };
   }
 
   const evaluatingCount = awaitingCount + syncingCount;
@@ -323,11 +332,11 @@ export function QueueOperationalStatus({
     const explanation = state.count > 0 && state.runCount > 0
       ? `${roleCopy} and ${runCopy} need attention before new roles can appear.`
       : state.count > 0
-        ? `${roleCopy} need attention before they can appear in Queue.`
-        : `${runCopy} need attention before new roles can appear.`;
+        ? `${roleCopy} ${state.count === 1 ? "needs" : "need"} attention before they can appear in Queue.`
+        : `${runCopy} ${state.runCount === 1 ? "needs" : "need"} attention before new roles can appear.`;
     const heading = state.count > 0
-      ? `${state.count} ${state.count === 1 ? "role" : "roles"} need attention`
-      : `${state.runCount} discovery ${state.runCount === 1 ? "run" : "runs"} need attention`;
+      ? `${state.count} ${state.count === 1 ? "role needs" : "roles need"} attention`
+      : `${state.runCount} discovery ${state.runCount === 1 ? "run needs" : "runs need"} attention`;
     return (
       <div className="queue-operational-status queue-operational-status--blocked" role="status" aria-live="polite">
         <HugeiconsIcon icon={Alert02Icon} strokeWidth={2} aria-hidden="true" />

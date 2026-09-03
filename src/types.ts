@@ -62,6 +62,12 @@ export interface ActivityEntry {
   occurredAt: string;
 }
 
+/** Exact producer-supplied evaluation totals; absent means progress is unknown. */
+export interface QueueEvaluationProgress {
+  completed: number;
+  total: number;
+}
+
 export interface DashboardState {
   roles: RoleSummary[];
   preQueueRoles: PreQueueRoleSummary[];
@@ -79,6 +85,7 @@ export interface DashboardState {
   recentRuns: RunSummary[];
   discoveryRuns: DiscoveryRunDiagnostic[];
   discoveryCursors: DiscoveryCursor[];
+  queueEvaluationProgress?: QueueEvaluationProgress | null;
 }
 
 export interface QueueFilters {

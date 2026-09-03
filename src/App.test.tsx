@@ -410,7 +410,7 @@ describe("App", () => {
     expect(screen.getByRole("heading", { name: "Strong matches" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Other new roles" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Needs a decision" })).toBeInTheDocument();
-    expect(screen.getByText("1 role need attention")).toBeInTheDocument();
+    expect(screen.getByText("1 role needs attention")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Open System" })).toBeEnabled();
     expect(screen.getByLabelText("career-ops match score 4.6 out of 5")).toHaveTextContent("4.6/5");
     expect(screen.getByText("Legitimacy: Proceed with Caution · Risk: Medium")).toBeInTheDocument();
@@ -557,6 +557,21 @@ describe("App", () => {
     render(<QueueOperationalStatus dashboard={getQueuePreviewDashboard("blocked")} onOpenSystem={() => undefined} />);
     expect(screen.getByRole("status")).toHaveTextContent("63 roles need attention");
     expect(screen.getByRole("button", { name: "Open System" })).toBeEnabled();
+  });
+
+  it("keeps live syncing on the spinner until exact progress is supplied", () => {
+    const syncingDashboard = getQueuePreviewDashboard("progress");
+    const withoutExactProgress = { ...syncingDashboard, queueEvaluationProgress: undefined };
+
+    expect(deriveQueueOperationalState(withoutExactProgress)).toMatchObject({
+      kind: "evaluating",
+      count: 2,
+    });
+    expect(deriveQueueOperationalState(syncingDashboard)).toMatchObject({
+      kind: "progress",
+      completed: 3,
+      total: 5,
+    });
   });
 
   it("renders each Queue operational state with its truthful affordance", () => {
