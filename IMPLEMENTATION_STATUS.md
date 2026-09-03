@@ -1,13 +1,46 @@
 # Implementation status
 
-Date: 2026-09-02
-Stage: generic public-HTTPS path live-proven; Greenhouse and Lever live observations remain
+Date: 2026-09-03
+Stage: consumption-side direction integrated; primary browser contract implemented but release-blocked by the extension permission gate
 
-## Approved target not yet implemented
+## Current direction closeout
 
-The current evidence below describes the packaged personal proof. The approved product
-direction now requires these additional changes before the implementation matches the
-stable contract:
+The current HereForWork `main` includes the approved consumption-side direction through
+the browser safety series ending at `8b683e3`. Queue is gated on a canonical career-ops
+evaluation receipt and presents career-ops' native 1–5 result with decision evidence.
+Prepare reuses only exact, hash-bound HereForWork preparation bundles and refreshes
+missing, stale, or failed artifacts conservatively. Applied is terminal: after the user
+confirms a physical submission, only the canonical tracking write may be retried.
+
+The primary extension driver now has a durable role-scoped lease, exact per-field result
+cardinality, settled read-back verification, bounded retry/reconnect behavior, typed
+multi-step/iframe/modal dispositions, and a no-finalization guard. However, the shipped
+extension manifest still lacks the Chrome `scripting` permission required to install and
+remove that guard in the page's main world. The driver therefore fails closed with
+`finalization_guard_permission_required` before inspection. This is a temporary release
+blocker, not achieved browser functionality; the permission change and a fresh package
+validation remain outstanding.
+
+The Greenhouse and Lever evidence in `evidence/HFW-BROWSER-25` is an isolated,
+reversible public-form observation using synthetic values. It proves current page shape,
+native read-back, and untouched Submit controls, but it is not a native-host/extension
+end-to-end proof because the QA browser exposes WebDriver and the extension correctly
+rejects it. The review-only browser fallback remains unavailable: career-ops `apply` and
+its Playwright internals expose no supported public lease/result contract. Extension
+failures remain visible recovery or human handoff states.
+
+The approved career-ops PDF threshold target remains `3.5`; the effective upstream
+fallback is still `3.0` because no explicit setting is configured. HereForWork reads and
+reports that value and never rewrites career-ops. Existing scheduled tasks remain the
+authoritative executors until the versioned-result, shadow, canary, rollback, and
+explicit per-source cutover gates pass. Role-scoped retirement cleanup is also pending
+explicit authorization and must not be inferred from the terminal-state work.
+
+## Historical gap snapshot — before the 2026-09-03 closeout
+
+The following snapshot records the approved gaps as they were understood before the
+consumption-side closeout. It is retained for traceability; the current state is recorded
+above and in the evidence sections below.
 
 - Orchestrate career-ops `scan` and company-to-ATS `discover`, then run the full career-ops
   A–G evaluation for every live, unique, nonblocked role before Queue. The current proof
@@ -209,7 +242,7 @@ pre-certify semantic compatibility.
   `review_required` browser session instead of reopening the original URL and resetting
   the form.
 
-## Current validation
+## Current validation — 2026-09-03
 
 The current adapter persists bounded artifact identities, provenance labels, context
 hashes, canonical report identity, and compatibility fingerprints. It does not yet carry
@@ -219,16 +252,16 @@ block result. Therefore the implementation may not describe a CV as fully verifi
 proven truthful. Match scoring remains career-ops-owned and must be presented on its native
 1–5 scale without percentage or probability conversion.
 
-- React and extension TypeScript checks pass.
-- Thirty extension-focused Vitest tests and ten adapter tests pass, including hidden
-  multi-step controls, post-snapshot visibility changes, and JSON key-order-independent
-  context hashing.
-- Forty-one Rust core/native-host tests pass across all targets: 37 library tests and four
-  native-host tests.
-- Rust formatting and Clippy with warnings denied pass.
-- The all-sites extension and ad-hoc-signed Apple Silicon app build successfully.
-- The current package passes strict code-signature verification and contains the answer,
-  preparation, browser, and provider schemas plus the rebuilt extension.
+- React and extension TypeScript checks pass in the closeout validation.
+- The closeout validation covers the Queue/evaluation gate, artifact reuse, browser
+  lease/result/read-back contract, Applied terminal behavior, and discovery contracts.
+  The extension, adapter, discovery, and Rust/native-host suites pass at their current
+  source revisions; the browser evidence is recorded separately in
+  `evidence/HFW-BROWSER-25/README.md`.
+- Rust formatting and Clippy with warnings denied pass for the current source revision.
+- A fresh release package is still required after the extension permission gate is
+  resolved. The previously built ad-hoc-signed Apple Silicon app must not be described
+  as proving the current browser flow while the manifest lacks `scripting`.
 
 ## Extension evidence
 
@@ -255,6 +288,10 @@ proven truthful. Match scoring remains career-ops-owned and must be presented on
   mounted form; neither wait can introduce a finalization command.
 - Recovery attempts remain visible for audit, but only the newest browser session for a
   preparation exposes the user-confirmed outcome control.
+- The current extension package fails closed with
+  `finalization_guard_permission_required` because `packages/extension/manifest.json`
+  does not yet declare `scripting`. Adding and validating that narrowly scoped permission
+  is a release prerequisite; it does not enable submission or any arbitrary page command.
 
 ## Manual intervention checkpoints
 
@@ -294,14 +331,18 @@ their own scoped authority before transmitting personal data.
 - No Gmail state, career-ops profile source, credentials, or scheduled task was mutated.
   Canonical history changed only through the explicit Prepare action described above.
 - Real report/CV generation plus Ashby and generic KoreLabs inspect, draft, fill, verify,
-  persist, and release-to-review paths have been exercised. No application was submitted.
+  persist, and release-to-review paths have been exercised. Greenhouse and Lever have
+  isolated synthetic inspect/read-back observations only; neither is a native-host or
+  extension E2E proof. No application was submitted.
 - Developer ID notarization and stable extension distribution remain post-personal-proof.
 
 ## Remaining proof boundary
 
 The typed writable adapter runs only fixed career-ops entry points. The generic public-HTTPS
-path is live-proven with per-field fallback. The next checkpoints are observed Greenhouse
-and Lever variants, each ending at review without submission.
+path is live-proven with individual-field skip/handoff behavior, while the separate
+review-only browser fallback remains unavailable. The next browser checkpoint is a fresh
+package validation after the `scripting` permission gate; native-host Greenhouse and Lever
+E2E proofs remain separate, explicitly no-submit work.
 Scheduled workflows, Gmail, credentials, and career-ops profile facts remain outside
 automated test mutation. The required 14-day shadow, promotion evidence, and rollback
 exercise have not been completed, so no scheduling cutover may be inferred from the

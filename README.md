@@ -34,7 +34,11 @@ architecture with secondary System controls. The rebuilt package passes automate
 The real Ashby inspection, Codex preparation, career-ops answer persistence, and explicitly
 authorized fill/read-back/release paths now pass. Only verified Name and Email were filled;
 all other fields and the user-owned terminal action remained untouched. Greenhouse and
-Lever still require separate live no-finalization observations.
+Lever have isolated synthetic public-form inspect/read-back evidence with Submit untouched,
+but not native-host/extension E2E evidence because the QA browser exposes WebDriver. The
+current extension package also fails closed with `finalization_guard_permission_required`
+until its manifest declares the narrowly scoped Chrome `scripting` permission; a fresh
+package validation remains required.
 
 The first integration uses career-ops as the sole authority for verified profile data, native 1–5 match scoring, application artifacts and their provenance, grounded answers, and canonical tracking. HereForWork owns orchestration, the unified review queue, user-triggered preparation, notifications, retries, and the browser workflow. Scheduling is an end-state HereForWork responsibility; the existing scheduled tasks remain the authoritative executors until each source completes the staged, explicitly approved migration in [SCHEDULING_MIGRATION.md](SCHEDULING_MIGRATION.md).
 
