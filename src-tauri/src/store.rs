@@ -1652,7 +1652,11 @@ impl Store {
                 "SELECT c.id, c.session_id, c.command_type, c.payload_json, s.driver_lease_id
                    FROM browser_commands c
                    JOIN browser_sessions s ON s.id = c.session_id
+                   LEFT JOIN roles r ON r.id = s.role_id
                   WHERE c.status = 'pending' AND c.attempt < ?1
+                    AND (s.purpose != 'application'
+                      OR LOWER(TRIM(COALESCE(r.canonical_status, '')))
+                        NOT IN ('applied', 'discarded'))
                     AND (
                       (c.command_type = 'focus_review' AND s.status = 'review_required'
                         AND s.driver_lease_state = 'released')
@@ -1660,6 +1664,12 @@ impl Store {
                       (s.driver_lease_state IN ('held', 'none') AND s.id = (
                         SELECT active.id FROM browser_sessions active
                          WHERE active.purpose = 'application'
+                           AND NOT EXISTS (
+                             SELECT 1 FROM roles active_role
+                              WHERE active_role.id = active.role_id
+                                AND LOWER(TRIM(COALESCE(active_role.canonical_status, '')))
+                                  IN ('applied', 'discarded')
+                           )
                            AND active.status IN (
                              'waiting_for_extension', 'inspecting', 'drafting_answers',
                              'answering', 'filling', 'persisting_answers',
@@ -1672,6 +1682,12 @@ impl Store {
                         AND NOT EXISTS (
                           SELECT 1 FROM browser_sessions active
                            WHERE active.purpose = 'application'
+                             AND NOT EXISTS (
+                               SELECT 1 FROM roles active_role
+                                WHERE active_role.id = active.role_id
+                                  AND LOWER(TRIM(COALESCE(active_role.canonical_status, '')))
+                                    IN ('applied', 'discarded')
+                             )
                              AND active.status IN (
                                'waiting_for_extension', 'inspecting', 'drafting_answers',
                                'answering', 'filling', 'persisting_answers',
@@ -3108,10 +3124,18 @@ impl Store {
         let candidate = transaction
             .query_row(
                 "SELECT p.id, p.provider, p.role_id, r.company, r.title, r.location, r.application_url
-                   FROM preparation_jobs p
-                   JOIN roles r ON r.id = p.role_id
+                  FROM preparation_jobs p
+                  JOIN roles r ON r.id = p.role_id
                   WHERE p.status = 'queued'
-                    AND (SELECT COUNT(*) FROM preparation_jobs WHERE status = 'preparing') < ?1
+                    AND LOWER(TRIM(COALESCE(r.canonical_status, '')))
+                      NOT IN ('applied', 'discarded')
+                    AND (
+                      SELECT COUNT(*) FROM preparation_jobs active
+                      JOIN roles active_role ON active_role.id = active.role_id
+                      WHERE active.status = 'preparing'
+                        AND LOWER(TRIM(COALESCE(active_role.canonical_status, '')))
+                          NOT IN ('applied', 'discarded')
+                    ) < ?1
                   ORDER BY p.created_at, p.rowid LIMIT 1",
                 [MAX_ACTIVE_PREPARATIONS],
                 |row| {
@@ -3694,6 +3718,11 @@ impl Store {
         &mut self,
         role_id: &str,
     ) -> Result<AdapterEffectContext, StoreError> {
+        if self.canonical_role_is_applied(role_id)? {
+            return Err(StoreError::InvalidAdapterEffect(
+                "an Applied role cannot undo a previous dismissal".to_string(),
+            ));
+        }
         let parent = self
             .connection
             .query_row(
@@ -3842,33 +3871,44 @@ impl Store {
                 "applied effect returned a non-Applied status".to_string(),
             ));
         }
+        let confirmed_at = Utc::now();
+        let confirmed_at_text = confirmed_at.to_rfc3339();
+        let confirmation_date = confirmed_at.with_timezone(&Madrid).date_naive().to_string();
         let transaction = self.connection.transaction()?;
         let changed = transaction.execute(
             "UPDATE adapter_effects SET status = 'completed', tracker_id = ?1,
                     error_class = NULL, updated_at = ?2
               WHERE idempotency_key = ?3 AND role_id = ?4 AND status = 'pending'",
-            params![
-                tracker_id,
-                Utc::now().to_rfc3339(),
-                idempotency_key,
-                role_id
-            ],
+            params![tracker_id, confirmed_at_text, idempotency_key, role_id],
         )?;
         if changed != 1 {
-            let already_completed = transaction.query_row(
-                "SELECT COUNT(*)
+            let already_completed_at = transaction
+                .query_row(
+                    "SELECT e.updated_at
                    FROM adapter_effects e
                    JOIN roles r ON r.id = e.role_id
                    JOIN browser_sessions b ON b.role_id = r.id
                   WHERE e.idempotency_key = ?1 AND e.role_id = ?2
                     AND e.operation = 'application.applied.confirm'
                     AND e.status = 'completed' AND e.tracker_id = ?3
-                    AND r.canonical_status = 'Applied'
+                    AND LOWER(TRIM(COALESCE(r.canonical_status, ''))) = 'applied'
                     AND b.id = ?4 AND b.status = 'applied_recorded'",
-                params![idempotency_key, role_id, tracker_id, session_id],
-                |row| row.get::<_, i64>(0),
-            )? == 1;
-            if already_completed {
+                    params![idempotency_key, role_id, tracker_id, session_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?;
+            if let Some(completed_at) = already_completed_at {
+                let completed_date = DateTime::parse_from_rfc3339(&completed_at)
+                    .map(|value| value.with_timezone(&Madrid).date_naive().to_string())
+                    .unwrap_or(confirmation_date);
+                transaction.execute(
+                    "UPDATE roles SET canonical_status = 'Applied',
+                                      canonical_date = COALESCE(canonical_date, ?1)
+                      WHERE id = ?2
+                        AND LOWER(TRIM(COALESCE(canonical_status, ''))) = 'applied'",
+                    params![completed_date, role_id],
+                )?;
+                transaction.commit()?;
                 return Ok(());
             }
             return Err(StoreError::InvalidAdapterEffect(
@@ -3877,8 +3917,13 @@ impl Store {
         }
         transaction.execute(
             "UPDATE roles SET canonical_tracker_id = ?1, canonical_status = 'Applied',
-                    canonical_visibility_override = 0, updated_at = ?2 WHERE id = ?3",
-            params![tracker_id, Utc::now().to_rfc3339(), role_id],
+                    canonical_date = CASE
+                      WHEN LOWER(TRIM(COALESCE(canonical_status, ''))) = 'applied'
+                        THEN COALESCE(canonical_date, ?2)
+                      ELSE ?2 END,
+                    canonical_visibility_override = 0,
+                    updated_at = ?3 WHERE id = ?4",
+            params![tracker_id, confirmation_date, confirmed_at_text, role_id],
         )?;
         transaction.execute(
             "UPDATE evaluation_sync
@@ -3886,18 +3931,18 @@ impl Store {
                     current_receipt_key = NULL, input_hash = NULL,
                     lease_expires_at = NULL, updated_at = ?1
               WHERE role_id = ?2",
-            params![Utc::now().to_rfc3339(), role_id],
+            params![confirmed_at_text, role_id],
         )?;
         transaction.execute(
             "UPDATE browser_sessions SET status = 'applied_recorded', error_code = NULL,
                     updated_at = ?1 WHERE id = ?2
                     AND status IN ('review_required', 'submitted_tracking_pending')",
-            params![Utc::now().to_rfc3339(), session_id],
+            params![confirmed_at_text, session_id],
         )?;
         transaction.execute(
             "INSERT INTO activity(id, kind, message, occurred_at)
              VALUES (?1, 'application', 'The user confirmed submission; career-ops recorded the canonical Applied outcome.', ?2)",
-            params![Uuid::new_v4().to_string(), Utc::now().to_rfc3339()],
+            params![Uuid::new_v4().to_string(), confirmed_at_text],
         )?;
         transaction.commit()?;
         Ok(())
@@ -6769,6 +6814,47 @@ mod tests {
     }
 
     #[test]
+    fn applied_role_cannot_begin_undo_or_create_an_external_writer_effect() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+        import_evaluated(&mut store, DATASET);
+        let role_id = store.dashboard().unwrap().roles[0].id.clone();
+        let discard = store.begin_discard_effect(&role_id).unwrap();
+        store
+            .complete_discard_effect(&role_id, &discard.idempotency_key, 42, "Discarded")
+            .unwrap();
+        store
+            .connection
+            .execute(
+                "UPDATE roles SET canonical_status = ' Applied ' WHERE id = ?1",
+                [&role_id],
+            )
+            .unwrap();
+
+        let error = store.begin_undo_discard_effect(&role_id).unwrap_err();
+        assert!(error.to_string().contains("Applied role"));
+        let effects: i64 = store
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM adapter_effects
+                  WHERE role_id = ?1 AND operation = 'role.discard.undo'",
+                [&role_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(effects, 0);
+        let discard_state: String = store
+            .connection
+            .query_row(
+                "SELECT status FROM adapter_effects WHERE idempotency_key = ?1",
+                [&discard.idempotency_key],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(discard_state, "completed");
+    }
+
+    #[test]
     fn application_dismissal_accepts_failed_work_without_committed_artifacts_and_reuses_its_effect()
     {
         let directory = tempfile::tempdir().unwrap();
@@ -7387,6 +7473,87 @@ mod tests {
     }
 
     #[test]
+    fn terminal_roles_are_defensively_excluded_from_preparation_and_browser_claims() {
+        for terminal_status in [" Applied ", " discarded "] {
+            let directory = tempfile::tempdir().unwrap();
+            let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+            let session = queue_completed_application_session(&mut store);
+            let preparation_id = session.preparation_id.as_deref().unwrap();
+            let role_id = session.role_id.as_deref().unwrap();
+            store
+                .connection
+                .execute(
+                    "UPDATE preparation_jobs SET status = 'queued', step = 'queued', attempt = 0
+                      WHERE id = ?1",
+                    [preparation_id],
+                )
+                .unwrap();
+            store
+                .connection
+                .execute(
+                    "UPDATE roles SET canonical_status = ?1, preparation_state = 'queued'
+                      WHERE id = ?2",
+                    rusqlite::params![terminal_status, role_id],
+                )
+                .unwrap();
+
+            assert!(store.claim_preparation_work().unwrap().is_none());
+            assert!(
+                store
+                    .claim_browser_command(chrono::Utc::now(), chrono::Duration::seconds(30))
+                    .unwrap()
+                    .is_none()
+            );
+            let preparation: (String, i64) = store
+                .connection
+                .query_row(
+                    "SELECT status, attempt FROM preparation_jobs WHERE id = ?1",
+                    [preparation_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(preparation, ("queued".to_string(), 0));
+            let browser_command: (String, i64) = store
+                .connection
+                .query_row(
+                    "SELECT status, attempt FROM browser_commands WHERE session_id = ?1",
+                    [&session.id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(browser_command, ("pending".to_string(), 0));
+        }
+    }
+
+    #[test]
+    fn nonterminal_roles_remain_eligible_for_preparation_and_browser_claims() {
+        let preparation_directory = tempfile::tempdir().unwrap();
+        let mut preparation_store =
+            Store::open(preparation_directory.path().join("test.sqlite3")).unwrap();
+        import_evaluated(&mut preparation_store, DATASET);
+        let role_id = preparation_store.dashboard().unwrap().roles[0].id.clone();
+        preparation_store
+            .begin_preparation(&role_id, "codex")
+            .unwrap();
+        assert!(
+            preparation_store
+                .claim_preparation_work()
+                .unwrap()
+                .is_some()
+        );
+
+        let browser_directory = tempfile::tempdir().unwrap();
+        let mut browser_store = Store::open(browser_directory.path().join("test.sqlite3")).unwrap();
+        queue_completed_application_session(&mut browser_store);
+        assert!(
+            browser_store
+                .claim_browser_command(chrono::Utc::now(), chrono::Duration::seconds(30))
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
     fn discard_start_and_completion_both_refuse_applied() {
         let directory = tempfile::tempdir().unwrap();
         let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
@@ -7609,6 +7776,26 @@ mod tests {
             .complete_applied_effect(&session.id, &role_id, &retry.idempotency_key, 42, "Applied")
             .unwrap();
 
+        let (first_canonical_date, completed_at): (Option<String>, String) = store
+            .connection
+            .query_row(
+                "SELECT r.canonical_date, e.updated_at
+                   FROM roles r JOIN adapter_effects e ON e.role_id = r.id
+                  WHERE r.id = ?1 AND e.idempotency_key = ?2",
+                rusqlite::params![role_id, retry.idempotency_key],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        let expected_date = chrono::DateTime::parse_from_rfc3339(&completed_at)
+            .unwrap()
+            .with_timezone(&chrono_tz::Europe::Madrid)
+            .date_naive()
+            .to_string();
+        assert_eq!(
+            first_canonical_date.as_deref(),
+            Some(expected_date.as_str())
+        );
+
         let browser_commands_after: i64 = store
             .connection
             .query_row("SELECT COUNT(*) FROM browser_commands", [], |row| {
@@ -7625,6 +7812,13 @@ mod tests {
         assert_eq!(duplicate_role_id, role_id);
         assert_eq!(duplicate.idempotency_key, retry.idempotency_key);
         store
+            .connection
+            .execute(
+                "UPDATE roles SET canonical_date = NULL WHERE id = ?1",
+                [&role_id],
+            )
+            .unwrap();
+        store
             .complete_applied_effect(
                 &session.id,
                 &role_id,
@@ -7633,6 +7827,15 @@ mod tests {
                 "Applied",
             )
             .unwrap();
+        let repaired_date: Option<String> = store
+            .connection
+            .query_row(
+                "SELECT canonical_date FROM roles WHERE id = ?1",
+                [&role_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(repaired_date.as_deref(), Some(expected_date.as_str()));
         let completed_effects: i64 = store
             .connection
             .query_row(
