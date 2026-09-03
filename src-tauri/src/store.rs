@@ -3216,14 +3216,20 @@ impl Store {
             .query_row(
                 "SELECT p.id
                    FROM preparation_jobs p
+                   JOIN roles r ON r.id = p.role_id
                   WHERE p.status = 'completed'
+                    AND LOWER(TRIM(COALESCE(r.canonical_status, '')))
+                      NOT IN ('applied', 'discarded')
                     AND NOT EXISTS (
                       SELECT 1 FROM browser_sessions b WHERE b.preparation_id = p.id
                     )
                     AND NOT EXISTS (
                       SELECT 1 FROM preparation_jobs earlier
+                      JOIN roles earlier_role ON earlier_role.id = earlier.role_id
                        WHERE earlier.rowid < p.rowid
                          AND earlier.status IN ('queued', 'preparing')
+                         AND LOWER(TRIM(COALESCE(earlier_role.canonical_status, '')))
+                           NOT IN ('applied', 'discarded')
                     )
                   ORDER BY p.rowid LIMIT 1",
                 [],
@@ -6653,6 +6659,65 @@ mod tests {
         assert_ne!(third.id, first.id);
         assert_ne!(third.id, second.id);
         assert_eq!(third.provider, "codex");
+    }
+
+    #[test]
+    fn browser_handoff_skips_the_oldest_normalized_terminal_preparation() {
+        for terminal_status in [" Applied ", " dIsCaRdEd "] {
+            let directory = tempfile::tempdir().unwrap();
+            let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+            let first = completed_preparation(&mut store);
+            let second_dataset = DATASET
+                .replace("role-1", "role-2")
+                .replace("Northstar Tools", "Second Company")
+                .replace(
+                    "northstar-tools/frontend-engineer",
+                    "second-company/frontend-engineer",
+                )
+                .replace("https://example.test/jobs/1", "https://example.test/jobs/2");
+            import_evaluated(&mut store, &second_dataset);
+            let second_role_id = store
+                .dashboard()
+                .unwrap()
+                .roles
+                .into_iter()
+                .find(|role| role.id != first.role_id)
+                .unwrap()
+                .id;
+            let second = queue_and_claim(&mut store, &second_role_id, "codex");
+            store
+                .record_preparation_context(
+                    &second.id,
+                    &"d".repeat(64),
+                    "https://example.test/jobs/2",
+                )
+                .unwrap();
+            store
+                .complete_preparation(
+                    &second.id,
+                    &PreparationCompletion {
+                        tracker_id: 43,
+                        report_path: "reports/043-example.md",
+                        report_hash: &"e".repeat(64),
+                        cv_pdf_path: "output/043-example/cv.pdf",
+                        cv_pdf_hash: &"f".repeat(64),
+                        cv_source: "tailored_generated",
+                    },
+                )
+                .unwrap();
+            store
+                .connection
+                .execute(
+                    "UPDATE roles SET canonical_status = ?1 WHERE id = ?2",
+                    rusqlite::params![terminal_status, first.role_id],
+                )
+                .unwrap();
+
+            assert_eq!(
+                store.next_preparation_for_browser_handoff().unwrap(),
+                Some(second.id)
+            );
+        }
     }
 
     #[test]
