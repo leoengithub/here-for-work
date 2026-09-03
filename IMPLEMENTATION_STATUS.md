@@ -1,7 +1,7 @@
 # Implementation status
 
 Date: 2026-09-03
-Stage: consumption-side direction integrated; primary browser contract and Applied retirement integrated in source; fresh package validation pending
+Stage: consumption-side direction integrated; primary browser contract and Applied retirement integrated, packaged, and locally smoke-checked
 
 ## Current direction closeout
 
@@ -21,8 +21,9 @@ Before inspection and fill, the service worker installs it in the selected appli
 page `MAIN` world. Only verified `release_for_review` restores the original
 `submit`/`requestSubmit` descriptors and captured listeners, removes the guard, and releases
 the lease for human review. This permission adds no browser command, host access, or submission
-capability. A fresh package validation is still a release verification step; no current package
-build is claimed by this closeout.
+capability. The current Apple Silicon package includes the exact manifest and integrated source,
+passes strict code-signature verification, and completed a read-only Queue, Applications, and
+System launch/navigation smoke check without executing an application or form action.
 
 The Greenhouse and Lever evidence in `evidence/HFW-BROWSER-25` is an isolated,
 reversible public-form observation using synthetic values. It proves current page shape,
@@ -271,9 +272,10 @@ proven truthful. Match scoring remains career-ops-owned and must be presented on
   source revisions; the browser evidence is recorded separately in
   `evidence/HFW-BROWSER-25/README.md`.
 - Rust formatting and Clippy with warnings denied pass for the current source revision.
-- A fresh release package is still required after the latest source integrations. The
-  previously built ad-hoc-signed Apple Silicon app is historical package evidence and must
-  not be described as proving the current browser flow.
+- The integrated Apple Silicon app was rebuilt with ad-hoc signing, passed strict
+  code-signature verification, and was installed at `/Users/leo/Desktop/HereForWork.app`.
+  A read-only launch/navigation smoke check covered Queue, Applications, and System. This
+  verifies the package boundary and persisted UI state, not a live extension/native-host fill.
 
 ## Extension evidence
 
@@ -355,8 +357,9 @@ their own scoped authority before transmitting personal data.
 The typed writable adapter runs only fixed career-ops entry points. The generic public-HTTPS
 path is live-proven with individual-field skip/handoff behavior, while the separate
 review-only browser fallback remains unavailable because no public career-ops lease/result
-contract exists. The next browser checkpoint is fresh package validation for the integrated
-source; native-host Greenhouse and Lever E2E proofs remain separate, explicitly no-submit work.
+contract exists. Native-host Greenhouse and Lever E2E proofs remain separate, explicitly
+no-submit work; the current package smoke proves launch/navigation only and does not substitute
+for those live browser-path proofs.
 Scheduled workflows, Gmail, credentials, and career-ops profile facts remain outside
 automated test mutation. The required 14-day shadow, promotion evidence, and rollback
 exercise have not been completed, so no scheduling cutover may be inferred from the

@@ -30,9 +30,9 @@ not inspect or fill the page again.
 The recorded proof package also contains run and browser-command leases with bounded retries,
 pre-migration backup, restore preflight, redacted diagnostics, provider/native-host
 boundary tests, and the approved full-width Queue / Applications information
-architecture with secondary System controls. That package passed its recorded automated checks
-and code-signature verification; this document does not claim a fresh package build after the
-latest source integrations.
+architecture with secondary System controls. The current package was rebuilt after the latest
+source integrations, passed the full automated checks and strict code-signature verification,
+and was installed at `/Users/leo/Desktop/HereForWork.app` for the local personal proof.
 The real Ashby inspection, Codex preparation, career-ops answer persistence, and explicitly
 authorized fill/read-back/release paths now pass. Only verified Name and Email were filled;
 all other fields and the user-owned terminal action remained untouched. Greenhouse and
@@ -43,7 +43,8 @@ needed for the no-finalization guard. It is used only in the already selected ap
 tab: the guard is installed in the page's `MAIN` world before inspection/fill and restores
 the original `submit`/`requestSubmit` descriptors and listeners only after verified
 `release_for_review`. It adds no browser command, host access, or submission capability.
-Fresh package validation remains a release verification step and is not claimed here.
+The rebuilt package contains that exact manifest and passed a read-only launch and navigation
+smoke check through Queue, Applications, and System; no application or form action was executed.
 
 The first integration uses career-ops as the sole authority for verified profile data, native 1–5 match scoring, application artifacts and their provenance, grounded answers, and canonical tracking. HereForWork owns orchestration, the unified review queue, user-triggered preparation, notifications, retries, and the browser workflow. Scheduling is an end-state HereForWork responsibility; the existing scheduled tasks remain the authoritative executors until each source completes the staged, explicitly approved migration in [SCHEDULING_MIGRATION.md](SCHEDULING_MIGRATION.md).
 
