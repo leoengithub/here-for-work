@@ -72,9 +72,9 @@ Shows one current row per application: active preparation, browser work waiting 
 
 Selecting **Details** opens a right-side panel with a formatted preview of the career-ops Markdown report and links to the original report and career-ops CV. Form-question and answer logs do not appear in this surface.
 
-### System
+### Settings
 
-System is a secondary utility surface, not a primary-navigation destination. It contains the preparation-provider choice, background-check status and control, queue filters, source health, actionable run failures, browser pairing, provider checks, backup, export, and diagnostics. There is no Activity tab. The header exposes System through an accessible settings-icon button rather than a third text destination.
+Settings is a secondary utility surface, not a primary-navigation destination. It contains the preparation-provider choice, background-check status and control, queue filters, source health, actionable run failures, browser pairing, provider checks, backup, export, and diagnostics. There is no Activity tab. The header exposes Settings through an accessible settings-icon button rather than a third text destination. Queue never routes role attention to Settings: evaluating and waiting remain progress, while `preQueueRoles` with `state=needs_attention` appear in a separate Queue group with title, company, plain reason, and a typed recovery descriptor. The current backend has no role-scoped evaluation recovery command, so these rows are non-actionable until a safe contract exists.
 
 Queue retains a file-upload icon for explicit discovery-snapshot import. It opens the native file picker and imports the selected JSON; it is not labeled or presented as an automatic refresh.
 
@@ -212,7 +212,7 @@ Every public HTTPS application URL enters the generic path. Greenhouse, Lever, a
 ## Notifications
 
 - New viable roles: open the queue filtered to the originating run.
-- Actionable discovery failure: open System at the failed source.
+- Action-required discovery or evaluation work: keep the attention state in Queue with a concise reason; Settings remains the utility surface for configuration, diagnostics, and global maintenance.
 - Form ready for review: focus the prepared form in the selected ordinary Chrome profile.
 - Successful run with no viable roles: remain quiet.
 - Application receipts: no automatic matching in the MVP.
@@ -234,7 +234,7 @@ Every public HTTPS application URL enters the generic path. Greenhouse, Lever, a
 
 ```text
 +------------------------------------------------------------------------------+
-| HereForWork          Queue   Applications              System  Updated 10:42|
+| HereForWork          Queue   Applications                         Settings  |
 +------------------------------------------------------------------------------+
 | TODAY'S QUEUE                                                   12 READY     |
 |                                                                              |

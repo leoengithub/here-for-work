@@ -178,9 +178,9 @@ Every new component starts with a shadcn registry search. When the registry prov
 
 ### Navigation
 
-Primary navigation remains compact and familiar. Active state combines Quiet Ink, weight, and a Signal Lime marker. System stays a secondary utility action rather than a third primary destination and uses the established Hugeicons settings icon with an accessible label and 44-pixel target.
+Primary navigation remains compact and familiar. Active state combines Quiet Ink, weight, and a Signal Lime marker. Settings stays a secondary utility action rather than a third primary destination and uses the established Hugeicons settings icon with an accessible label and 44-pixel target.
 
-The production shell keeps this navigation in a fixed 3.5rem top bar. At narrow widths the descriptive brand line yields first, while Queue, Applications, and System remain visible and keyboard reachable.
+The production shell keeps this navigation in a fixed 3.5rem top bar. At narrow widths the descriptive brand line yields first, while Queue and Applications remain visible and keyboard reachable; Settings remains a labeled icon action.
 
 ### Dismissal Undo Notifications
 
@@ -193,6 +193,10 @@ Historical implementation note: the shadcn registry's Base UI `toast` and Sonner
 The compact queue role card is the signature working component. Cards remain a single vertical list, with a flat Clean Surface, one-pixel Cool Border, gentle radius, and no shadow, expansion, whole-card click, or nested card. The linked role title occupies the top line alone. Company, location, optional source-backed age, native career-ops 1–5 score, concise evidence, blockers or gaps, compensation context, and material uncertainty sit beneath it and wrap when required. The treatment stays compact but must preserve enough decision information to avoid rereading the listing. Only actions occupy the right edge: quiet ghost Dismiss first, then primary Prepare. ATS, internal source counts, and preparation state stay out of Queue. A score is never shown as a percentage or probability and is never recomputed by HereForWork. Narrow layouts reflow actions beneath the content without hiding decision-critical information.
 
 The shadcn Card registry primitive was inspected before this pattern was implemented. Its generic header/content/footer regions added unnecessary nested structure for a semantic `ul > li > article` comparison list, so the existing project-owned role-row component was refined in place instead. Interactive controls continue to use the shared shadcn Button primitive and design tokens.
+
+### Queue operational states
+
+Operational truth sits above the role list with `aria-live="polite"` and respects reduced motion. Evaluating uses the unchanged shadcn Spinner with a count and elapsed start time, without an ETA. Quantified completed/total work uses the unchanged shadcn Progress component. Waiting uses a clock and last successful run. Blocked or action-required work uses an alert icon, count, and concise explanation, then lists `preQueueRoles` with `state=needs_attention` in a separate attention group. Each row shows title, company, and a plain reason. There is currently no safe role-scoped recovery command, so rows do not invent buttons or route the user to Settings; a future action must come from a typed backend recovery descriptor. True idle uses the unchanged shadcn Empty pattern and manual import action.
 
 ## Do's and Don'ts
 

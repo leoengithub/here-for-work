@@ -348,7 +348,7 @@ describe("App", () => {
     expect(screen.getByRole("heading", { name: "Your review queue is ready for its first run." })).toBeInTheDocument();
     expect(screen.queryByRole("combobox", { name: "Preparation provider" })).not.toBeInTheDocument();
     expect(screen.getAllByRole("button", { name: "Import discovery snapshot" })).toHaveLength(2);
-    expect(screen.getByRole("button", { name: "System settings" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Settings" })).toBeEnabled();
   });
 
   it("routes typed discovery envelopes while preserving the legacy importer", async () => {
@@ -411,7 +411,10 @@ describe("App", () => {
     expect(screen.getByRole("heading", { name: "Other new roles" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Needs a decision" })).toBeInTheDocument();
     expect(screen.getByText("1 role needs attention")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Open System" })).toBeEnabled();
+    expect(screen.getByRole("heading", { name: "Needs attention" })).toBeInTheDocument();
+    expect(screen.getByText("Example Studio")).toBeInTheDocument();
+    expect(screen.getByText("The evaluation result is invalid or stale.")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Open System" })).not.toBeInTheDocument();
     expect(screen.getByLabelText("career-ops match score 4.6 out of 5")).toHaveTextContent("4.6/5");
     expect(screen.getByText("Legitimacy: Proceed with Caution · Risk: Medium")).toBeInTheDocument();
     expect(screen.getByText(/The role asks for production GraphQL ownership/)).toBeInTheDocument();
@@ -515,6 +518,7 @@ describe("App", () => {
           title: "Frontend Engineer",
           state: "syncing",
           reason: "evaluation_result_read_pending",
+          recovery: { scope: "none", action: null },
           attempt: 1,
           updatedAt: "2026-09-01T12:00:00Z",
         },
@@ -524,6 +528,7 @@ describe("App", () => {
           title: "Product Engineer",
           state: "needs_attention",
           reason: "evaluation_result_invalid_or_stale",
+          recovery: { scope: "none", action: null },
           attempt: 2,
           updatedAt: "2026-09-01T12:00:00Z",
         },
@@ -531,7 +536,7 @@ describe("App", () => {
     );
 
     expect(screen.getByRole("status")).toHaveTextContent(
-      "1 role is being evaluated. 1 needs attention in System.",
+      "1 role is being evaluated. 1 needs attention.",
     );
     expect(screen.queryByRole("article")).not.toBeInTheDocument();
     expect(screen.queryByRole("button")).not.toBeInTheDocument();
@@ -554,9 +559,9 @@ describe("App", () => {
     });
     expect(deriveQueueOperationalState(getQueuePreviewDashboard("idle"))).toMatchObject({ kind: "idle" });
 
-    render(<QueueOperationalStatus dashboard={getQueuePreviewDashboard("blocked")} onOpenSystem={() => undefined} />);
+    render(<QueueOperationalStatus dashboard={getQueuePreviewDashboard("blocked")} />);
     expect(screen.getByRole("status")).toHaveTextContent("63 roles need attention");
-    expect(screen.getByRole("button", { name: "Open System" })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "Open System" })).not.toBeInTheDocument();
   });
 
   it("keeps live syncing on the spinner until exact progress is supplied", () => {
@@ -576,29 +581,29 @@ describe("App", () => {
 
   it("renders each Queue operational state with its truthful affordance", () => {
     const { rerender } = render(
-      <QueueOperationalStatus dashboard={getQueuePreviewDashboard("evaluating")} onOpenSystem={() => undefined} />,
+      <QueueOperationalStatus dashboard={getQueuePreviewDashboard("evaluating")} />,
     );
     expect(screen.getByRole("status")).toHaveTextContent("4 roles are being evaluated");
     expect(screen.getByRole("status")).toHaveTextContent("Started");
     expect(screen.queryByText(/ETA/i)).not.toBeInTheDocument();
 
-    rerender(<QueueOperationalStatus dashboard={getQueuePreviewDashboard("progress")} onOpenSystem={() => undefined} />);
+    rerender(<QueueOperationalStatus dashboard={getQueuePreviewDashboard("progress")} />);
     expect(screen.getByRole("progressbar", { name: "Evaluation progress: 3 of 5 complete" })).toHaveAttribute("aria-valuenow", "60");
     expect(screen.getByRole("status")).toHaveTextContent("3 of 5 complete");
 
-    rerender(<QueueOperationalStatus dashboard={getQueuePreviewDashboard("waiting")} onOpenSystem={() => undefined} />);
+    rerender(<QueueOperationalStatus dashboard={getQueuePreviewDashboard("waiting")} />);
     expect(screen.getByRole("status")).toHaveTextContent("Last successful run");
 
-    rerender(<QueueOperationalStatus dashboard={getQueuePreviewDashboard("idle")} onOpenSystem={() => undefined} />);
+    rerender(<QueueOperationalStatus dashboard={getQueuePreviewDashboard("idle")} />);
     expect(screen.queryByRole("status")).not.toBeInTheDocument();
   });
 
-  it("keeps queue filters in System instead of primary navigation", async () => {
+  it("keeps queue filters in Settings instead of primary navigation", async () => {
     render(<App />);
     await screen.findByRole("heading", { name: "Review queue" });
 
     expect(screen.queryByText("Background checks")).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "System settings" }));
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
 
     expect(screen.getByRole("heading", { name: "Queue filters" })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "queue" })).toHaveAttribute("aria-selected", "false");

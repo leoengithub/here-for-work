@@ -1,4 +1,4 @@
-import type { BrowserSessionSummary, BrowserSetup, DashboardState, PreparationSummary, QueueEvaluationSummary, RoleSummary } from "../types";
+import type { BrowserSessionSummary, BrowserSetup, DashboardState, PreQueueRecoveryDescriptor, PreparationSummary, QueueEvaluationSummary, RoleSummary } from "../types";
 
 const now = "2026-09-01T12:00:00Z";
 
@@ -148,6 +148,7 @@ export const queuePreviewDashboard: DashboardState = {
       title: "Frontend Engineer",
       state: "syncing",
       reason: "evaluation_result_read_pending",
+      recovery: { scope: "none", action: null },
       attempt: 1,
       updatedAt: now,
     },
@@ -157,6 +158,7 @@ export const queuePreviewDashboard: DashboardState = {
       title: "UI Engineer",
       state: "needs_attention",
       reason: "evaluation_result_invalid_or_stale",
+      recovery: { scope: "none", action: null },
       attempt: 2,
       updatedAt: now,
     },
@@ -173,6 +175,9 @@ const preQueueFixture = (count: number, state: "awaiting_evaluation" | "syncing"
     title: state === "needs_attention" ? "Frontend Engineer" : "Platform Engineer",
     state,
     reason,
+    recovery: (state === "needs_attention" && reason === "canonical_history_unavailable"
+      ? { scope: "global_reconcile", action: "reconcile_application_history" }
+      : { scope: "none", action: null }) satisfies PreQueueRecoveryDescriptor,
     attempt: state === "needs_attention" ? 2 : 1,
     updatedAt: "2026-09-03T08:00:00Z",
   }))

@@ -51,8 +51,14 @@ export interface PreQueueRoleSummary {
   title: string;
   state: "awaiting_evaluation" | "needs_attention" | "syncing";
   reason: string;
+  recovery: PreQueueRecoveryDescriptor;
   attempt: number;
   updatedAt: string;
+}
+
+export interface PreQueueRecoveryDescriptor {
+  scope: "global_reconcile" | "repair_career_ops" | "none";
+  action: "reconcile_application_history" | "repair_career_ops" | null;
 }
 
 export interface ActivityEntry {

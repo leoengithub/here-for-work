@@ -113,6 +113,42 @@ pub struct DashboardState {
     pub discovery_cursors: Vec<DiscoveryCursor>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PreQueueRecoveryScope {
+    GlobalReconcile,
+    RepairCareerOps,
+    None,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PreQueueRecovery {
+    pub scope: PreQueueRecoveryScope,
+    pub action: Option<String>,
+}
+
+impl PreQueueRecovery {
+    pub fn for_reason(reason: &str) -> Self {
+        let (scope, action) = match reason {
+            "canonical_history_unavailable"
+            | "canonical_match_missing_or_ambiguous"
+            | "evaluation_compatibility_changed" => (
+                PreQueueRecoveryScope::GlobalReconcile,
+                Some("reconcile_application_history".to_string()),
+            ),
+            "canonical_status_not_evaluated"
+            | "evaluation_result_capability_unavailable"
+            | "canonical_evaluation_missing_executor_unavailable" => (
+                PreQueueRecoveryScope::RepairCareerOps,
+                Some("repair_career_ops".to_string()),
+            ),
+            _ => (PreQueueRecoveryScope::None, None),
+        };
+        Self { scope, action }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PreQueueRoleSummary {
@@ -121,6 +157,7 @@ pub struct PreQueueRoleSummary {
     pub title: String,
     pub state: String,
     pub reason: String,
+    pub recovery: PreQueueRecovery,
     pub attempt: i64,
     pub updated_at: String,
 }

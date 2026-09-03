@@ -261,9 +261,53 @@ export function PreQueueStatus({ roles }: { roles: DashboardState["preQueueRoles
     parts.push(`${evaluatingCount} ${evaluatingCount === 1 ? "role is" : "roles are"} being evaluated`);
   }
   if (attentionCount > 0) {
-    parts.push(`${attentionCount} ${attentionCount === 1 ? "needs" : "need"} attention in System`);
+    parts.push(`${attentionCount} ${attentionCount === 1 ? "needs" : "need"} attention`);
   }
   return <p className="pre-queue-status" role="status">{parts.join(". ")}.</p>;
+}
+
+const preQueueReasonCopy: Record<string, string> = {
+  canonical_history_unavailable: "Canonical history could not be read.",
+  canonical_match_missing_or_ambiguous: "The canonical history match is missing or ambiguous.",
+  canonical_status_not_evaluated: "The canonical status is not Evaluated.",
+  evaluation_result_invalid_or_stale: "The evaluation result is invalid or stale.",
+  evaluation_receipt_pointer_unreadable: "The evaluation report pointer could not be read.",
+  evaluation_result_capability_unavailable: "The evaluation reader is unavailable.",
+  canonical_evaluation_missing_executor_unavailable: "No evaluation executor is available.",
+};
+
+export function formatPreQueueReason(reason: string): string {
+  const knownReason = preQueueReasonCopy[reason];
+  if (knownReason) return knownReason;
+  const plainReason = reason.replaceAll("_", " ").trim();
+  return plainReason ? `${plainReason[0].toUpperCase()}${plainReason.slice(1)}.` : "This role needs attention.";
+}
+
+function PreQueueAttentionGroup({ roles }: { roles: DashboardState["preQueueRoles"] }) {
+  const attentionRoles = roles.filter((role) => role.state === "needs_attention");
+  if (attentionRoles.length === 0) return null;
+  return (
+    <section className="queue-group queue-group--attention" aria-labelledby="needs-attention-heading">
+      <div className="queue-group__heading">
+        <h3 id="needs-attention-heading">Needs attention</h3>
+        <span aria-label={`${attentionRoles.length} roles`}>{attentionRoles.length}</span>
+      </div>
+      <ul className="pre-queue-role-list" aria-label="Roles needing attention">
+        {attentionRoles.map((role) => (
+          <li className="pre-queue-role-list__item" key={role.roleId}>
+            <article className="pre-queue-role" aria-labelledby={`pre-queue-role-${role.roleId}-title`}>
+              <div>
+                <h4 id={`pre-queue-role-${role.roleId}-title`}>{role.title}</h4>
+                <p className="pre-queue-role__company">{role.company}</p>
+              </div>
+              <p className="pre-queue-role__reason">{formatPreQueueReason(role.reason)}</p>
+              <p className="pre-queue-role__availability">No role-scoped recovery is available yet.</p>
+            </article>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
 }
 
 export type QueueOperationalState =
@@ -318,10 +362,8 @@ export function deriveQueueOperationalState(dashboard: DashboardState): QueueOpe
 
 export function QueueOperationalStatus({
   dashboard,
-  onOpenSystem,
 }: {
   dashboard: DashboardState;
-  onOpenSystem?: () => void;
 }) {
   const state = deriveQueueOperationalState(dashboard);
   if (state.kind === "idle") return null;
@@ -344,9 +386,6 @@ export function QueueOperationalStatus({
           <strong>{heading}</strong>
           <p>{explanation}</p>
         </div>
-        {onOpenSystem ? (
-          <Button variant="outline" type="button" onClick={onOpenSystem}>Open System</Button>
-        ) : null}
       </div>
     );
   }
@@ -577,7 +616,7 @@ export function BrowserSessions({
   if (sessions.length === 0) {
     return (
       <p className="browser-session-empty">
-        No browser session yet. Pair the extension, open an HTTPS application form, then run the connection check from System.
+        No browser session yet. Pair the extension, open an HTTPS application form, then run the connection check from Settings.
       </p>
     );
   }
@@ -818,11 +857,11 @@ function SystemPanel({
     maintenanceCopy = `Latest backup is ${restorePreflight.integrity}, schema ${restorePreflight.schemaVersion}, with ${restorePreflight.roleCount} roles and ${restorePreflight.runCount} runs.`;
   }
   return (
-    <section className="system-panel" aria-labelledby="system-title">
+    <section className="system-panel" aria-labelledby="settings-title">
       <p className="eyebrow">Local integrations</p>
       <div className="system-panel__heading">
         <div>
-          <h2 id="system-title">System status</h2>
+          <h2 id="settings-title">Settings</h2>
           <p>HereForWork checks local tools without storing subscription credentials.</p>
         </div>
         <Button variant="outline" type="button" onClick={onRefresh} disabled={busy}>
@@ -1770,9 +1809,8 @@ export function App() {
   }
 
   const queueOperationalState = deriveQueueOperationalState(dashboard);
-  const emptyQueueContent = queueOperationalState.kind !== "idle"
-    ? <QueueOperationalStatus dashboard={dashboard} onOpenSystem={() => setView("system")} />
-    : <EmptyQueue onImport={() => fileInputRef.current?.click()} />;
+  const attentionRoles = dashboard.preQueueRoles.filter((role) => role.state === "needs_attention");
+  const emptyQueueContent = <EmptyQueue onImport={() => fileInputRef.current?.click()} />;
 
   let mainContent: ReactNode;
   if (view === "system") {
@@ -2145,14 +2183,13 @@ export function App() {
             />
           </div>
 
-          {dashboard.roles.length > 0 ? (
-            <QueueOperationalStatus dashboard={dashboard} onOpenSystem={() => setView("system")} />
-          ) : null}
+          {queueOperationalState.kind !== "idle" ? <QueueOperationalStatus dashboard={dashboard} /> : null}
 
-          {dashboard.roles.length === 0 ? (
-            emptyQueueContent
+          {dashboard.roles.length === 0 && attentionRoles.length === 0 ? (
+            queueOperationalState.kind === "idle" ? emptyQueueContent : null
           ) : (
             <div className="queue-groups">
+              <PreQueueAttentionGroup roles={dashboard.preQueueRoles} />
               {groupOrder.map((group) => {
                 const roles = dashboard.roles.filter((role) => role.queueGroup === group);
                 if (roles.length === 0) return null;
@@ -2217,8 +2254,8 @@ export function App() {
             variant="outline"
             size="icon"
             type="button"
-            aria-label="System settings"
-            title="System settings"
+            aria-label="Settings"
+            title="Settings"
             aria-pressed={view === "system"}
             onClick={() => {
               setView("system");

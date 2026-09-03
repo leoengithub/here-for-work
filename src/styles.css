@@ -776,6 +776,52 @@ h3 {
   min-width: 0;
 }
 
+.pre-queue-role-list {
+  display: grid;
+  gap: 0.65rem;
+  padding: 0;
+  margin: 0;
+  list-style: none;
+}
+
+.pre-queue-role {
+  display: grid;
+  grid-template-columns: minmax(12rem, 0.8fr) minmax(15rem, 1.4fr) minmax(12rem, 0.8fr);
+  align-items: start;
+  gap: 0.75rem 1.25rem;
+  padding: 0.9rem 1rem;
+  border: 1px solid color-mix(in oklch, var(--danger) 30%, var(--line));
+  border-radius: 0.875rem;
+  background: var(--surface);
+}
+
+.pre-queue-role h4,
+.pre-queue-role p {
+  margin: 0;
+}
+
+.pre-queue-role h4 {
+  font-size: 0.82rem;
+  line-height: 1.35;
+}
+
+.pre-queue-role__company,
+.pre-queue-role__availability {
+  margin-top: 0.2rem;
+  color: var(--text-muted);
+  font-size: 0.74rem;
+  line-height: 1.45;
+}
+
+.pre-queue-role__reason {
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
+.pre-queue-role__availability {
+  color: color-mix(in oklch, var(--text) 68%, var(--text-muted));
+}
+
 .role-card {
   width: 100%;
   display: grid;
@@ -959,10 +1005,6 @@ a.role-card__title:hover {
 
 .queue-operational-status--blocked > svg {
   color: var(--danger);
-}
-
-.queue-operational-status--blocked [data-slot="button"] {
-  flex: 0 0 auto;
 }
 
 .queue-operational-status--progress {
@@ -1534,9 +1576,6 @@ a.role-card__title:hover {
     flex-wrap: wrap;
   }
 
-  .queue-operational-status--blocked [data-slot="button"] {
-    margin-left: 1.85rem;
-  }
 }
 
 @media (max-width: 460px) {
@@ -1561,6 +1600,10 @@ a.role-card__title:hover {
   .preparation-list__identity,
   .application-state {
     grid-column: 1 / -1;
+  }
+
+  .pre-queue-role {
+    grid-template-columns: 1fr;
   }
 }
 

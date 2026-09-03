@@ -17,7 +17,7 @@ use crate::domain::{
     DiscoveryRunDiagnostic, DiscoveryRunEvidenceDiagnostic, DiscoveryRunFinding,
     DiscoveryRunFindingDiagnostic, DiscoveryRunImportResult, DiscoveryRunMatchScore,
     EvaluationResultRead, EvaluationSyncRole, HistoryRecord, ImportResult, LeasedRun,
-    OutcomeNotification, PreQueueRoleSummary, PreparationCleanupWork,
+    OutcomeNotification, PreQueueRecovery, PreQueueRoleSummary, PreparationCleanupWork,
     PreparationEvaluationIdentity, PreparationSummary, PreparationWork, QueueEvaluationSummary,
     QueueFilters, QueueGroup, ReconcileResult, RestorePreflight, RoleSummary, RunSummary,
     ScheduledRun, SourceScheduleSummary,
@@ -5154,12 +5154,14 @@ impl Store {
         )?;
         let pre_queue_roles = pre_queue_statement
             .query_map([], |row| {
+                let reason = row.get::<_, String>(4)?;
                 Ok(PreQueueRoleSummary {
                     role_id: row.get(0)?,
                     company: row.get(1)?,
                     title: row.get(2)?,
                     state: row.get(3)?,
-                    reason: row.get(4)?,
+                    recovery: PreQueueRecovery::for_reason(&reason),
+                    reason,
                     attempt: row.get(5)?,
                     updated_at: row.get(6)?,
                 })
@@ -7640,6 +7642,10 @@ mod tests {
         assert!(dashboard.roles.is_empty());
         assert_eq!(dashboard.pre_queue_roles.len(), 1);
         assert_eq!(dashboard.pre_queue_roles[0].state, "awaiting_evaluation");
+        assert_eq!(
+            dashboard.pre_queue_roles[0].recovery.scope,
+            crate::domain::PreQueueRecoveryScope::None
+        );
         assert_eq!(dashboard.handled_count, 0);
         let error = store
             .begin_preparation(&dashboard.pre_queue_roles[0].role_id, "codex")
@@ -7927,6 +7933,10 @@ mod tests {
         let held = store.dashboard().unwrap();
         assert!(held.roles.is_empty());
         assert_eq!(held.pre_queue_roles[0].reason, "source_identity_changed");
+        assert_eq!(
+            held.pre_queue_roles[0].recovery.scope,
+            crate::domain::PreQueueRecoveryScope::None
+        );
 
         allow_all_test_roles(&mut store);
         assert_eq!(store.dashboard().unwrap().roles.len(), 1);
@@ -7941,6 +7951,10 @@ mod tests {
         assert_eq!(
             invalidated.pre_queue_roles[0].reason,
             "evaluation_compatibility_changed"
+        );
+        assert_eq!(
+            invalidated.pre_queue_roles[0].recovery.scope,
+            crate::domain::PreQueueRecoveryScope::GlobalReconcile
         );
     }
 
