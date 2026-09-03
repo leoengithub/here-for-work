@@ -12,10 +12,10 @@ use std::sync::{Arc, Mutex};
 use adapter::{AdapterConfig, CanonicalRoleInput, PreparationRoleInput, discover_executable};
 use domain::{
     BrowserSessionSummary, BrowserSetup, CareerOpsCapabilityId, CareerOpsCapabilityStatus,
-    CareerOpsCheckResult, ChromeProfile, CvFallbackSetting, DashboardState, EvaluationSyncResult,
-    HistoryRecord, ImportResult, IntegrationHealth, MaintenanceResult, OutcomeNotification,
-    PreparationDetail, PreparationWork, PrepareRoleOutcome, QueueFilters, ReconcileResult,
-    RestorePreflight, ScheduledRun,
+    CareerOpsCheckResult, ChromeProfile, CvFallbackSetting, DashboardState, DiscoveryCursor,
+    DiscoveryRunImportResult, EvaluationSyncResult, HistoryRecord, ImportResult, IntegrationHealth,
+    MaintenanceResult, OutcomeNotification, PreparationDetail, PreparationWork, PrepareRoleOutcome,
+    QueueFilters, ReconcileResult, RestorePreflight, ScheduledRun,
 };
 use sha2::Digest;
 use store::{PreparationCompletion, Store};
@@ -91,6 +91,49 @@ fn import_dataset(
             .show();
     }
     Ok(result)
+}
+
+#[tauri::command]
+fn import_discovery_run(
+    payload: String,
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<DiscoveryRunImportResult, String> {
+    let mut store = state
+        .store
+        .lock()
+        .map_err(|_| "Operational store lock was poisoned".to_string())?;
+    let result = store
+        .import_discovery_run(&payload)
+        .map_err(|error| error.to_string())?;
+    drop(store);
+    if result.imported > 0 || result.updated > 0 {
+        let sync = sync_evaluations_internal(&state)?;
+        if sync.promoted > 0 {
+            let _ = app
+                .notification()
+                .builder()
+                .title("New roles to review")
+                .body(format!(
+                    "{} evaluated role(s) are ready in HereForWork.",
+                    sync.promoted
+                ))
+                .show();
+        }
+    }
+    Ok(result)
+}
+
+#[tauri::command]
+fn get_discovery_cursors(
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<DiscoveryCursor>, String> {
+    state
+        .store
+        .lock()
+        .map_err(|_| "Operational store lock was poisoned".to_string())?
+        .discovery_cursors()
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -2415,6 +2458,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_dashboard,
             import_dataset,
+            import_discovery_run,
+            get_discovery_cursors,
             set_background_enabled,
             save_queue_filters,
             get_cv_fallback_setting,

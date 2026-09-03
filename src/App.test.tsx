@@ -342,6 +342,43 @@ describe("App", () => {
     expect(screen.getByRole("button", { name: "System settings" })).toBeEnabled();
   });
 
+  it("routes typed discovery envelopes while preserving the legacy importer", async () => {
+    const invoke = vi.fn(async (command: string) => {
+      if (command === "get_dashboard") return applicationsPreviewDashboard;
+      if (command === "get_cv_fallback_setting") return { path: null, sha256: null };
+      if (command === "take_in_app_outcome_notifications") return [];
+      if (command === "get_browser_setup") return applicationsPreviewBrowserSetup;
+      if (command === "get_browser_sessions") return applicationsPreviewSessions;
+      if (command === "import_discovery_run") return {
+        imported: 0, updated: 0, unchanged: 0, replayed: false, recorded: true, cursorAdvanced: false,
+      };
+      if (command === "import_dataset") return { imported: 0, updated: 0, unchanged: 0 };
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    (window as typeof window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = { invoke };
+    render(<App />);
+    await screen.findByRole("heading", { name: "Review queue" });
+    const input = document.querySelector<HTMLInputElement>('input[type="file"]')!;
+
+    fireEvent.change(input, {
+      target: { files: [new File(['{"contract":"hereforwork.discovery-run"}'], "run.json", { type: "application/json" })] },
+    });
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith(
+      "import_discovery_run",
+      { payload: '{"contract":"hereforwork.discovery-run"}' },
+      undefined,
+    ));
+
+    fireEvent.change(input, {
+      target: { files: [new File(['{"schemaVersion":1}'], "snapshot.json", { type: "application/json" })] },
+    });
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith(
+      "import_dataset",
+      { payload: '{"schemaVersion":1}' },
+      undefined,
+    ));
+  });
+
   it("keeps primary navigation focused on queue and applications", async () => {
     render(<App />);
     await screen.findByRole("heading", { name: "Review queue" });

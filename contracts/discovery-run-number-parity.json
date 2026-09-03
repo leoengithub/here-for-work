@@ -1,0 +1,13 @@
+[
+  { "value": 1.0, "expected": "3ff0000000000000" },
+  { "value": 1e0, "expected": "3ff0000000000000" },
+  { "value": -0.0, "expected": "0000000000000000" },
+  { "value": 1, "expected": "3ff0000000000000" },
+  { "value": 5, "expected": "4014000000000000" },
+  { "value": 4.5, "expected": "4012000000000000" },
+  { "value": 4.25e0, "expected": "4011000000000000" },
+  { "value": 3.6495739800251394, "expected": "400d3253d7c45302" },
+  { "value": 1.2e-7, "expected": "3e801b2b29a4692b" },
+  { "value": 1.2e20, "expected": "441a055690d9db80" },
+  { "value": 1.2e21, "expected": "445043561a882930" }
+]

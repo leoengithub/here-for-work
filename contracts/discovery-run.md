@@ -1,6 +1,7 @@
 # Discovery-run contract
 
-Status: version 1 contract; producer and automatic-ingestion work remain separate
+Status: version 1 contract; manual typed ingestion is implemented, producer/exporter
+and automatic-ingestion work remain separate
 
 The discovery-run envelope is the durable handoff from an authoritative scheduled
 discovery workflow or career-ops exporter into HereForWork. Its schema is
@@ -22,11 +23,10 @@ a separate envelope identified by both:
 {"contract":"hereforwork.discovery-run","schemaVersion":1}
 ```
 
-An optional extension to the old schema-v1 object would not be safely backward
-compatible: the current importer denies unknown fields, so an exporter adding run or
-integrity fields would be rejected while still claiming to emit the same version. A
-separate contract lets existing manual snapshots and the current importer keep working
-unchanged while a later Refresh-ingestion task adds explicit dual-format routing.
+The dual-format manual Refresh routing is implemented: legacy schema-v1 payloads continue
+to use the legacy importer, while `hereforwork.discovery-run` payloads use the typed
+importer. Producer handoff/export remains pending, as does scheduled-task envelope
+emission.
 
 The contract-level version belongs to the named contract. A future breaking change to
 the discovery-run envelope increments its `schemaVersion`; it never changes the meaning
@@ -55,8 +55,8 @@ of the legacy dataset's version 1.
   cross-run/cross-source reconciliation; it does not run a second deduplication engine.
 
 Replaying the same `(sourceId, runId)` and digest is a no-op. Reusing that attempt identity
-with a different digest is a conflict that must be quarantined and surfaced; the newer
-payload must not silently overwrite the original attempt. A retry instead publishes a new
+with a different digest is a conflict that must be rejected with a bounded typed error; the
+newer payload must not silently overwrite the original attempt or create a conflict row. A retry instead publishes a new
 `runId` with the same `(sourceId, windowId)` and the prior `runId` in `supersedesRunId`.
 The referenced attempt must exist for that same source and window, and one attempt may not
 supersede itself. Its `coverage.windowStart`, `coverage.windowEnd`, and `coverage.timezone`
@@ -64,7 +64,17 @@ must exactly match the referenced attempt; changing coverage creates a new `wind
 instead. A completed retry supersedes the earlier partial or failed attempt for coverage
 advancement without deleting its diagnostic evidence. Repeated findings across attempts
 or later windows reconcile by `(sourceId, findingId)` and then by the explicit
-deduplication identifiers.
+deduplication identifiers. The referenced attempt must also be the latest recorded attempt
+for that source/window; a completed attempt cannot be superseded, and an older partial or
+failed attempt cannot be bypassed by a later retry. This keeps retry lineage single and
+auditable without a second conflict store. Once an attempt exists for a window, another
+attempt without `supersedesRunId` is rejected.
+
+Completed runs persist the stable `(sourceId, findingId)` mapping. A later run may change
+`sourceRoleId` only when the stable finding keeps the same `normalizedKey`; the old source
+occurrence is retired so it cannot create a duplicate canonical role. Reusing a
+`findingId` for a different normalized identity, or assigning one source-role identity to
+another finding, fails closed without mutation.
 
 ## Evidence and provenance
 
@@ -83,7 +93,8 @@ keeping the sensitive record in its authoritative system.
 Every discovery-run finding carries exactly one `matchScore` state:
 
 - `scored` requires `scale: "career_ops_1_to_5"`, a numeric value from 1 through 5,
-  `authority: "career-ops"`, `sourceVersion`, and `scoredAt`.
+  `authority: "career-ops"`, `sourceVersion`, and `scoredAt`. The complete finite
+  IEEE-754 binary64 value is preserved; the consumer never rounds it.
 - `not_scored` carries no numeric value. It requires a reason, the same fixed authority,
   `sourceVersion`, and `checkedAt`.
 
@@ -154,13 +165,31 @@ separate scheduling migration gates and explicit user approval are satisfied.
 2. Sort findings by `findingId`, each finding's evidence by `evidenceId`, and issues by
    `issueId`, using ascending UTF-8 byte order.
 3. Recursively serialize object keys in ascending UTF-8 byte order with no
-   insignificant whitespace. Array order is otherwise preserved and JSON scalar values
-   use normal JSON serialization.
+   insignificant whitespace. Array order is otherwise preserved. Every finite JSON number
+   is replaced only in the digest view by the reserved tagged node
+   `{ "$hfwCanonicalNumberV1": "hhhhhhhhhhhhhhhh" }`, where the value is exactly 16
+   lowercase hexadecimal digits for normalized IEEE-754 binary64 bits. Signed zero uses
+   positive-zero bits (`0000000000000000`); non-finite numbers are rejected. This tagged
+   object shape is distinct from an ordinary JSON string, and contract schemas reject the
+   reserved property in producer payload objects.
 4. Hash those UTF-8 bytes with SHA-256.
 
 The digest covers every other top-level field, including run/source identity, coverage,
 status, findings, evidence, scores, and issues. Unknown fields fail validation. A digest
-mismatch quarantines the artifact; it is never treated as a partial success.
+mismatch rejects the artifact before any database mutation; it is never treated as a
+partial success.
+
+All executable minimum and maximum string bounds in this contract are UTF-8 byte counts.
+This is intentionally independent of JavaScript UTF-16 code units and Rust Unicode scalar
+values, so astral characters such as emoji consume four bounded bytes in both runtimes.
+
+For bounded diagnosis, HereForWork persists typed run metadata, issues, finding IDs, and
+evidence IDs/kinds/timestamps (plus safe public evidence URLs and content hashes). It does
+not persist evidence summaries or source paths in this diagnostic projection. The recent
+dashboard read and redacted diagnostics export expose these records, including actionable
+`partial` and `failed` issues. The read-only `get_discovery_cursors` operation exposes the
+latest successful coverage per source for determining the next window; failed, partial, or
+out-of-order runs never advance it.
 
 ## Atomic file handoff
 
@@ -180,16 +209,27 @@ attempt.
 ## Gradual ingestion migration
 
 1. Keep the existing schema-v1 selected-file importer as the compatibility path.
-2. Add discovery-run parsing to the user-triggered manual Refresh path. This is ingestion
-   only; the scheduled tasks still execute and emit results. Preserve `not_scored` only as
-   a staged diagnostic state; do not publish that finding to Queue.
+2. The user-triggered manual Refresh path accepts discovery-run parsing alongside the
+   legacy importer. This is ingestion only; the scheduled tasks still execute and emit
+   results. Preserve `not_scored` only as a staged diagnostic state; do not publish that
+   finding to Queue.
 3. Consume the same artifacts in read-only shadow mode, comparing every window and
-   preserving partial, failed, replay, conflict, and zero-result evidence.
+   preserving partial, failed, and zero-result evidence. Replay is a no-op and a digest
+   conflict is returned as an error; neither creates a separate conflict audit row.
 4. Consider optional automatic file consumption only after the shadow evidence is
    accepted. Automatic consumption still does not transfer source execution authority.
 5. Change a source's executor only through the per-source canary, single-mutator handoff,
    rollback proof, and explicit approval in `SCHEDULING_MIGRATION.md`.
 
-This task defines the producer/consumer contract only. It does not implement the
-career-ops exporter, wire the Rust importer to the new envelope, mutate scheduled tasks,
-or enable automatic sync.
+The desktop manual Refresh path now accepts this envelope through the dedicated
+`import_discovery_run` operation. It records `(source.sourceId, runId, digest)` in
+HereForWork-owned state, treats an exact replay as a no-op, rejects a reused run ID
+with a different digest without mutation, and advances a source-specific successful-coverage cursor only
+for a completed run after transactional reconciliation. Partial and failed runs remain
+diagnostic records and never advance the cursor. This operation is ingestion only: it
+does not execute a source, mutate Gmail, write career-ops, alter scheduled tasks, or
+submit an application.
+
+The producer/exporter, automatic file consumption, and executor cutover remain separate
+work. Producers must emit immutable, digest-sealed envelopes with stable source/window/
+run/finding identities; Markdown reports or source-side scan history are not substitutes.

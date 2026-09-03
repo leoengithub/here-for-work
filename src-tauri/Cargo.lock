@@ -1496,6 +1496,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "chrono-tz",
+ "libc",
  "rusqlite",
  "serde",
  "serde_json",

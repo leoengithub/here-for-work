@@ -65,6 +65,8 @@ export const applicationsPreviewDashboard: DashboardState = {
   actionRequiredRunCount: 0,
   sources: [],
   recentRuns: [],
+  discoveryRuns: [],
+  discoveryCursors: [],
 };
 
 function queueRole(

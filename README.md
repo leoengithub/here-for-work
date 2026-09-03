@@ -80,9 +80,14 @@ Read [PRODUCT.md](PRODUCT.md) before making product or interface decisions.
 Read [MVP_SHAPE.md](MVP_SHAPE.md) before proposing technical architecture or implementation.
 
 Discovery producers use the versioned [discovery-run contract](contracts/discovery-run.md).
-The existing schema-v1 snapshot remains supported by the current manual importer while
-manual Refresh, shadow consumption, and optional automatic sync are introduced in that
-order. Typed ingestion does not transfer scheduled-task authority.
+The existing schema-v1 snapshot remains supported by the legacy selected-file importer;
+the dedicated `import_discovery_run` operation accepts digest-sealed version-1 envelopes,
+records replay identity, and advances source-specific coverage only after a completed
+transaction. Typed ingestion does not transfer scheduled-task authority. Manual typed
+Refresh is implemented; producer/exporter output, shadow consumption, and optional
+automatic sync remain separately gated migration work. Typed run diagnostics and per-source
+import cursors are exposed in dashboard state and redacted diagnostics; `findingId` remains
+the stable source identity alongside the existing canonical reconciliation keys.
 
 ## Local validation
 

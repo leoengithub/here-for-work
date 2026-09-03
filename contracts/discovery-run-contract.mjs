@@ -33,21 +33,27 @@ function exactKeys(value, allowed, required, path) {
   if (missing) fail(`${path} is missing ${missing}.`);
 }
 
+function utf8ByteLength(value) {
+  return new TextEncoder().encode(value).length;
+}
+
 function text(value, path, { min = 1, max = 4000 } = {}) {
-  if (typeof value !== "string" || value.length < min || value.length > max) {
-    fail(`${path} must be a string between ${min} and ${max} characters.`);
+  if (typeof value !== "string"
+      || utf8ByteLength(value) < min
+      || utf8ByteLength(value) > max) {
+    fail(`${path} must be a string between ${min} and ${max} UTF-8 bytes.`);
   }
 }
 
 function legacyText(value, path, min = 1) {
-  if (typeof value !== "string" || value.length < min) {
-    fail(`${path} must be a string of at least ${min} characters.`);
+  if (typeof value !== "string" || utf8ByteLength(value) < min) {
+    fail(`${path} must be a string of at least ${min} UTF-8 bytes.`);
   }
 }
 
 function dateTime(value, path) {
   text(value, path, { max: 100 });
-  const match = /^(\d{4}-\d{2}-\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|[+-](\d{2}):(\d{2}))$/.exec(value);
+  const match = /^(\d{4}-\d{2}-\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,9})?(?:Z|[+-](\d{2}):(\d{2}))$/.exec(value);
   if (!match) {
     fail(`${path} must be an ISO date-time with a timezone.`);
   }
@@ -118,8 +124,8 @@ function validateMatchScore(value, path) {
     const keys = ["status", "scale", "value", "authority", "sourceVersion", "scoredAt"];
     exactKeys(value, keys, keys, path);
     if (value.scale !== "career_ops_1_to_5") fail(`${path}.scale must be career_ops_1_to_5.`);
-    if (!Number.isFinite(value.value) || value.value < 1 || value.value > 5) {
-      fail(`${path}.value must be on the native 1–5 scale.`);
+    if (!isNativeCareerOpsScore(value.value)) {
+      fail(`${path}.value must be a finite native career-ops score from 1 to 5.`);
     }
     if (value.authority !== "career-ops") fail(`${path}.authority must be career-ops.`);
     text(value.sourceVersion, `${path}.sourceVersion`, { max: 200 });
@@ -140,6 +146,10 @@ function validateMatchScore(value, path) {
   fail(`${path}.status must be scored or not_scored.`);
 }
 
+export function isNativeCareerOpsScore(value) {
+  return Number.isFinite(value) && value >= 1 && value <= 5;
+}
+
 function validateFinding(value, path, runSource) {
   object(value, path);
   const required = [
@@ -154,7 +164,7 @@ function validateFinding(value, path, runSource) {
   }
   identifier(value.findingId, `${path}.findingId`, { max: 200 });
   identifier(value.sourceId, `${path}.sourceId`, { max: 100 });
-  if (value.normalizedKey.length < 3) fail(`${path}.normalizedKey must be at least 3 characters.`);
+  if (utf8ByteLength(value.normalizedKey) < 3) fail(`${path}.normalizedKey must be at least 3 UTF-8 bytes.`);
   if (value.sourceId !== runSource.sourceId) fail(`${path}.sourceId must match the run sourceId.`);
   if (value.source !== runSource.displayName) fail(`${path}.source must match the run displayName.`);
   dateTime(value.discoveredAt, `${path}.discoveredAt`);
@@ -188,6 +198,14 @@ function utf8Compare(left, right) {
 }
 
 function canonicalJson(value) {
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) fail("canonical JSON numbers must be finite.");
+    const buffer = new ArrayBuffer(8);
+    const view = new DataView(buffer);
+    view.setFloat64(0, Object.is(value, -0) ? 0 : value, false);
+    const bits = `${view.getUint32(0).toString(16).padStart(8, "0")}${view.getUint32(4).toString(16).padStart(8, "0")}`;
+    return `{"$hfwCanonicalNumberV1":"${bits}"}`;
+  }
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
   if (!value || typeof value !== "object") return JSON.stringify(value);
   return `{${Object.keys(value).sort(utf8Compare).map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(",")}}`;

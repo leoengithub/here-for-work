@@ -109,6 +109,8 @@ pub struct DashboardState {
     pub action_required_run_count: i64,
     pub sources: Vec<SourceScheduleSummary>,
     pub recent_runs: Vec<RunSummary>,
+    pub discovery_runs: Vec<DiscoveryRunDiagnostic>,
+    pub discovery_cursors: Vec<DiscoveryCursor>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -447,6 +449,182 @@ pub struct ImportResult {
     pub imported: usize,
     pub updated: usize,
     pub unchanged: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscoveryRunImportResult {
+    pub imported: usize,
+    pub updated: usize,
+    pub unchanged: usize,
+    pub replayed: bool,
+    pub recorded: bool,
+    pub cursor_advanced: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscoveryRunDiagnostic {
+    pub source_id: String,
+    pub source_display_name: String,
+    pub producer: String,
+    pub producer_version: String,
+    pub run_id: String,
+    pub window_id: String,
+    pub supersedes_run_id: Option<String>,
+    pub coverage_start: String,
+    pub coverage_end: String,
+    pub timezone: String,
+    pub generated_at: String,
+    pub status: String,
+    pub digest: String,
+    pub finding_count: usize,
+    pub imported_at: String,
+    pub cursor_advanced: bool,
+    pub issues: Vec<DiscoveryRunIssue>,
+    pub findings: Vec<DiscoveryRunFindingDiagnostic>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscoveryRunFindingDiagnostic {
+    pub finding_id: String,
+    pub source_role_id: String,
+    pub evidence: Vec<DiscoveryRunEvidenceDiagnostic>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscoveryRunEvidenceDiagnostic {
+    pub evidence_id: String,
+    pub kind: String,
+    pub observed_at: String,
+    pub url: Option<String>,
+    pub content_sha256: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscoveryCursor {
+    pub source_id: String,
+    pub window_id: String,
+    pub run_id: String,
+    pub coverage_end: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DiscoveryRun {
+    pub contract: String,
+    pub schema_version: u32,
+    pub window_id: String,
+    pub run_id: String,
+    #[serde(default)]
+    pub supersedes_run_id: Option<String>,
+    pub source: DiscoveryRunSource,
+    pub coverage: DiscoveryRunCoverage,
+    pub generated_at: String,
+    pub status: String,
+    pub findings: Vec<DiscoveryRunFinding>,
+    pub issues: Vec<DiscoveryRunIssue>,
+    pub integrity: DiscoveryRunIntegrity,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DiscoveryRunSource {
+    pub source_id: String,
+    pub display_name: String,
+    pub producer: String,
+    pub producer_version: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DiscoveryRunCoverage {
+    pub window_start: String,
+    pub window_end: String,
+    pub timezone: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DiscoveryRunFinding {
+    pub finding_id: String,
+    pub source_id: String,
+    pub source: String,
+    pub source_role_id: String,
+    pub company: String,
+    pub title: String,
+    pub location: String,
+    pub discovered_at: String,
+    #[serde(default)]
+    pub posted_at: Option<String>,
+    pub application_url: Option<String>,
+    pub normalized_key: String,
+    pub queue_group: QueueGroup,
+    pub eligibility_summary: String,
+    pub uncertainty: Option<String>,
+    #[serde(default)]
+    pub legitimacy: Option<DiscoveryLegitimacy>,
+    pub evidence: Vec<DiscoveryRunEvidence>,
+    pub match_score: DiscoveryRunMatchScore,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DiscoveryRunEvidence {
+    pub evidence_id: String,
+    pub kind: String,
+    pub reference: String,
+    #[serde(default)]
+    pub url: Option<String>,
+    pub observed_at: String,
+    #[serde(default)]
+    pub summary: Option<String>,
+    #[serde(default)]
+    pub content_sha256: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+pub enum DiscoveryRunMatchScore {
+    Scored {
+        scale: String,
+        value: f64,
+        authority: String,
+        #[serde(rename = "sourceVersion")]
+        source_version: String,
+        #[serde(rename = "scoredAt")]
+        scored_at: String,
+    },
+    NotScored {
+        reason: String,
+        authority: String,
+        #[serde(rename = "sourceVersion")]
+        source_version: String,
+        #[serde(rename = "checkedAt")]
+        checked_at: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DiscoveryRunIssue {
+    pub issue_id: String,
+    pub code: String,
+    pub message: String,
+    pub retryable: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DiscoveryRunIntegrity {
+    pub algorithm: String,
+    pub canonicalization: String,
+    pub coverage: String,
+    pub digest: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

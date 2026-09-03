@@ -1,6 +1,9 @@
+use std::collections::HashSet;
+use std::ffi::CString;
 use std::path::{Path, PathBuf};
+use std::ptr;
 
-use chrono::{DateTime, Duration, NaiveTime, TimeZone, Utc};
+use chrono::{DateTime, Duration, NaiveDate, NaiveTime, TimeZone, Utc};
 use chrono_tz::Europe::Madrid;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
 use sha2::{Digest, Sha256};
@@ -10,20 +13,28 @@ use uuid::Uuid;
 use crate::domain::{
     ActivityEntry, AdapterEffectContext, AdapterRoleContext, BrowserAnswerCommitWork,
     BrowserAnswerWork, BrowserCommand, BrowserInspection, BrowserSessionSummary, CvFallbackSetting,
-    DashboardState, DiscoveryDataset, DiscoveryFinding, EvaluationResultRead, EvaluationSyncRole,
-    HistoryRecord, ImportResult, LeasedRun, OutcomeNotification, PreQueueRoleSummary,
-    PreparationCleanupWork, PreparationEvaluationIdentity, PreparationSummary, PreparationWork,
-    QueueEvaluationSummary, QueueFilters, QueueGroup, ReconcileResult, RestorePreflight,
-    RoleSummary, RunSummary, ScheduledRun, SourceScheduleSummary,
+    DashboardState, DiscoveryCursor, DiscoveryDataset, DiscoveryFinding, DiscoveryRun,
+    DiscoveryRunDiagnostic, DiscoveryRunEvidenceDiagnostic, DiscoveryRunFinding,
+    DiscoveryRunFindingDiagnostic, DiscoveryRunImportResult, DiscoveryRunMatchScore,
+    EvaluationResultRead, EvaluationSyncRole, HistoryRecord, ImportResult, LeasedRun,
+    OutcomeNotification, PreQueueRoleSummary, PreparationCleanupWork,
+    PreparationEvaluationIdentity, PreparationSummary, PreparationWork, QueueEvaluationSummary,
+    QueueFilters, QueueGroup, ReconcileResult, RestorePreflight, RoleSummary, RunSummary,
+    ScheduledRun, SourceScheduleSummary,
 };
 
-const SCHEMA_VERSION: i64 = 20;
+const SCHEMA_VERSION: i64 = 22;
 const MAX_RUN_ATTEMPTS: i64 = 3;
 const MAX_BROWSER_COMMAND_ATTEMPTS: i64 = 3;
 const MAX_EVALUATION_SYNC_ATTEMPTS: i64 = 3;
 const MAX_ACTIVE_PREPARATIONS: i64 = 2;
 const EVALUATION_LEASE_SECONDS: i64 = 120;
 const RUN_STEPS: [&str; 3] = ["discover", "reconcile", "notify"];
+const MAX_DISCOVERY_RUN_BYTES: usize = 2_000_000;
+const MAX_DISCOVERY_FINDINGS: usize = 1_000;
+const MAX_DISCOVERY_EVIDENCE_PER_FINDING: usize = 32;
+const MAX_DISCOVERY_ISSUES: usize = 100;
+const MAX_DISCOVERY_DIAGNOSTICS_BYTES: usize = 500_000;
 
 #[derive(Debug, Error)]
 pub enum StoreError {
@@ -35,6 +46,8 @@ pub enum StoreError {
     Io(#[from] std::io::Error),
     #[error("unsupported dataset schema version {0}")]
     UnsupportedDataset(u32),
+    #[error("invalid discovery run: {0}")]
+    InvalidDiscoveryRun(String),
     #[error("invalid queue group in operational store: {0}")]
     InvalidQueueGroup(String),
     #[error("unknown discovery source: {0}")]
@@ -703,6 +716,79 @@ impl Store {
             transaction.commit()?;
             version = 20;
         }
+        if version < 21 {
+            self.connection.execute_batch(
+                "BEGIN IMMEDIATE;
+                 CREATE TABLE IF NOT EXISTS discovery_runs (
+                   source_id TEXT NOT NULL,
+                   run_id TEXT NOT NULL,
+                   window_id TEXT NOT NULL,
+                   supersedes_run_id TEXT,
+                   coverage_start TEXT NOT NULL,
+                   coverage_end TEXT NOT NULL,
+                   timezone TEXT NOT NULL,
+                   generated_at TEXT NOT NULL,
+                   status TEXT NOT NULL,
+                   digest TEXT NOT NULL,
+                   finding_count INTEGER NOT NULL,
+                   imported_at TEXT NOT NULL,
+                   PRIMARY KEY (source_id, run_id)
+                 );
+                 CREATE TABLE IF NOT EXISTS discovery_cursors (
+                   source_id TEXT PRIMARY KEY,
+                   window_id TEXT NOT NULL,
+                   run_id TEXT NOT NULL,
+                   coverage_end TEXT NOT NULL,
+                   updated_at TEXT NOT NULL
+                 );
+                 UPDATE schema_meta SET version = 21;
+                 COMMIT;",
+            )?;
+            version = 21;
+        }
+        if version < 22 {
+            self.connection.execute_batch("BEGIN IMMEDIATE;")?;
+            let has_diagnostics_column: i64 = self.connection.query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('discovery_runs')
+                  WHERE name = 'diagnostics_json'",
+                [],
+                |row| row.get(0),
+            )?;
+            if has_diagnostics_column == 0 {
+                self.connection.execute(
+                    "ALTER TABLE discovery_runs ADD COLUMN diagnostics_json TEXT NOT NULL DEFAULT '{}'",
+                    [],
+                )?;
+            }
+            let has_cursor_column: i64 = self.connection.query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('discovery_runs')
+                  WHERE name = 'cursor_advanced'",
+                [],
+                |row| row.get(0),
+            )?;
+            if has_cursor_column == 0 {
+                self.connection.execute(
+                    "ALTER TABLE discovery_runs ADD COLUMN cursor_advanced INTEGER NOT NULL DEFAULT 0",
+                    [],
+                )?;
+            }
+            self.connection.execute_batch(
+                "CREATE TABLE IF NOT EXISTS discovery_findings (
+                   source_id TEXT NOT NULL,
+                   finding_id TEXT NOT NULL,
+                   source_role_id TEXT NOT NULL,
+                   normalized_key TEXT NOT NULL,
+                   last_run_id TEXT NOT NULL,
+                   payload_hash TEXT NOT NULL,
+                   PRIMARY KEY (source_id, finding_id),
+                   UNIQUE (source_id, source_role_id)
+                 );",
+            )?;
+            self.connection
+                .execute("UPDATE schema_meta SET version = 22", [])?;
+            self.connection.execute_batch("COMMIT;")?;
+            version = 22;
+        }
         if version != SCHEMA_VERSION {
             return Err(StoreError::Database(rusqlite::Error::InvalidQuery));
         }
@@ -719,76 +805,11 @@ impl Store {
         let mut result = ImportResult::default();
 
         for finding in &dataset.findings {
-            let existing_role_id = transaction
-                .query_row(
-                    "SELECT id FROM roles WHERE normalized_key = ?1",
-                    [&finding.normalized_key],
-                    |row| row.get::<_, String>(0),
-                )
-                .optional()?;
-            let role_id = existing_role_id.unwrap_or_else(|| Uuid::new_v4().to_string());
-            let payload_hash = hash_finding(finding);
-            let existing_hash = transaction
-                .query_row(
-                    "SELECT payload_hash FROM source_occurrences WHERE source_id = ?1 AND source_role_id = ?2",
-                    params![finding.source_id, finding.source_role_id],
-                    |row| row.get::<_, String>(0),
-                )
-                .optional()?;
-
-            match existing_hash.as_deref() {
-                None => result.imported += 1,
-                Some(hash) if hash == payload_hash => result.unchanged += 1,
-                Some(_) => result.updated += 1,
-            }
-
-            upsert_role(&transaction, &role_id, finding)?;
-            transaction.execute(
-                "INSERT INTO source_occurrences (
-                   id, role_id, source_id, source, source_role_id, payload_hash, discovered_at, posted_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-                 ON CONFLICT(source_id, source_role_id) DO UPDATE SET
-                   role_id = excluded.role_id,
-                   source = excluded.source,
-                   payload_hash = excluded.payload_hash,
-                   discovered_at = excluded.discovered_at,
-                   posted_at = excluded.posted_at",
-                params![
-                    Uuid::new_v4().to_string(),
-                    role_id,
-                    finding.source_id,
-                    finding.source,
-                    finding.source_role_id,
-                    payload_hash,
-                    finding.discovered_at,
-                    finding.posted_at,
-                ],
-            )?;
-            transaction.execute(
-                "INSERT OR IGNORE INTO evaluation_sync(
-                   role_id, state, reason, created_at, updated_at
-                 ) VALUES (?1, 'awaiting_evaluation', 'evaluation_receipt_required', ?2, ?2)",
-                params![role_id, Utc::now().to_rfc3339()],
-            )?;
-            if existing_hash.as_deref() != Some(payload_hash.as_str()) {
-                transaction.execute(
-                    "UPDATE evaluation_sync
-                        SET state = CASE
-                              WHEN (SELECT canonical_status FROM roles WHERE id = ?1)
-                                   IN ('Applied', 'Discarded') THEN 'terminal'
-                              ELSE 'awaiting_evaluation'
-                            END,
-                            reason = CASE
-                              WHEN (SELECT canonical_status FROM roles WHERE id = ?1)
-                                   IN ('Applied', 'Discarded') THEN 'canonical_terminal'
-                              ELSE 'source_identity_changed'
-                            END,
-                            input_hash = NULL, current_receipt_key = NULL,
-                            lease_expires_at = NULL, updated_at = ?2
-                      WHERE role_id = ?1",
-                    params![role_id, Utc::now().to_rfc3339()],
-                )?;
-            }
+            let finding_result =
+                reconcile_discovery_finding(&transaction, finding, &Utc::now().to_rfc3339())?;
+            result.imported += finding_result.imported;
+            result.updated += finding_result.updated;
+            result.unchanged += finding_result.unchanged;
         }
 
         transaction.execute(
@@ -805,6 +826,263 @@ impl Store {
                     result.imported, result.updated, result.unchanged
                 ),
                 Utc::now().to_rfc3339(),
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(result)
+    }
+
+    /// Ingest one immutable, digest-sealed discovery-run artifact.
+    ///
+    /// This path deliberately does not execute a source. It records the typed
+    /// producer attempt, reconciles findings only for completed runs, and keeps
+    /// a source-specific successful-coverage cursor separate from the legacy
+    /// snapshot importer and scheduler authority.
+    pub fn import_discovery_run(
+        &mut self,
+        payload: &str,
+    ) -> Result<DiscoveryRunImportResult, StoreError> {
+        if payload.len() > MAX_DISCOVERY_RUN_BYTES {
+            return Err(StoreError::InvalidDiscoveryRun(
+                "discovery run exceeds the maximum payload size".to_string(),
+            ));
+        }
+        let raw: serde_json::Value = serde_json::from_str(payload)?;
+        validate_discovery_run_raw_bounds(&raw)?;
+        let run: DiscoveryRun = serde_json::from_value(raw.clone())?;
+        validate_discovery_run(&run)?;
+        let digest = discovery_run_digest_value(&raw)?;
+        if run.integrity.digest != digest {
+            return Err(StoreError::InvalidDiscoveryRun(
+                "integrity.digest does not match the canonical payload".to_string(),
+            ));
+        }
+
+        let transaction = self.connection.transaction()?;
+        let source_exists = transaction.query_row(
+            "SELECT COUNT(*) > 0 FROM source_schedules WHERE source_id = ?1",
+            [&run.source.source_id],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if !source_exists {
+            return Err(StoreError::UnknownSource(run.source.source_id.clone()));
+        }
+
+        let existing = transaction
+            .query_row(
+                "SELECT digest FROM discovery_runs WHERE source_id = ?1 AND run_id = ?2",
+                params![run.source.source_id, run.run_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        if let Some(existing_digest) = existing {
+            if existing_digest == digest {
+                transaction.commit()?;
+                return Ok(DiscoveryRunImportResult {
+                    replayed: true,
+                    ..Default::default()
+                });
+            }
+            return Err(StoreError::InvalidDiscoveryRun(
+                "run identity was reused with a different digest".to_string(),
+            ));
+        }
+
+        let previous_cursor = transaction
+            .query_row(
+                "SELECT coverage_end FROM discovery_cursors WHERE source_id = ?1",
+                [&run.source.source_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        let coverage_end = DateTime::parse_from_rfc3339(&run.coverage.window_end)
+            .map_err(|_| StoreError::InvalidDiscoveryRun("invalid coverage end".to_string()))?
+            .with_timezone(&Utc);
+        let coverage_is_newer = previous_cursor
+            .as_deref()
+            .map(|value| {
+                DateTime::parse_from_rfc3339(value)
+                    .map(|cursor| coverage_end > cursor.with_timezone(&Utc))
+                    .unwrap_or(false)
+            })
+            .unwrap_or(true);
+
+        if let Some(supersedes_run_id) = &run.supersedes_run_id {
+            let superseded = transaction
+                .query_row(
+                    "SELECT window_id, coverage_start, coverage_end, timezone, status
+                       FROM discovery_runs
+                      WHERE source_id = ?1 AND run_id = ?2",
+                    params![run.source.source_id, supersedes_run_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, String>(3)?,
+                            row.get::<_, String>(4)?,
+                        ))
+                    },
+                )
+                .optional()?;
+            let Some((window_id, coverage_start, coverage_end, timezone, status)) = superseded
+            else {
+                return Err(StoreError::InvalidDiscoveryRun(
+                    "supersedesRunId does not reference a known attempt for this source"
+                        .to_string(),
+                ));
+            };
+            if window_id != run.window_id
+                || coverage_start != run.coverage.window_start
+                || coverage_end != run.coverage.window_end
+                || timezone != run.coverage.timezone
+            {
+                return Err(StoreError::InvalidDiscoveryRun(
+                    "retry coverage does not exactly match the superseded attempt".to_string(),
+                ));
+            }
+            if status == "completed" {
+                return Err(StoreError::InvalidDiscoveryRun(
+                    "supersedesRunId must reference the latest partial or failed attempt"
+                        .to_string(),
+                ));
+            }
+            let latest_attempt: String = transaction.query_row(
+                "SELECT run_id FROM discovery_runs
+                  WHERE source_id = ?1 AND window_id = ?2
+                    AND coverage_start = ?3 AND coverage_end = ?4 AND timezone = ?5
+                  ORDER BY imported_at DESC, rowid DESC LIMIT 1",
+                params![
+                    run.source.source_id,
+                    run.window_id,
+                    run.coverage.window_start,
+                    run.coverage.window_end,
+                    run.coverage.timezone,
+                ],
+                |row| row.get(0),
+            )?;
+            if latest_attempt != *supersedes_run_id {
+                return Err(StoreError::InvalidDiscoveryRun(
+                    "supersedesRunId must reference the latest attempt for the window".to_string(),
+                ));
+            }
+        } else {
+            let existing_attempt: Option<String> = transaction
+                .query_row(
+                    "SELECT run_id FROM discovery_runs
+                      WHERE source_id = ?1 AND window_id = ?2
+                        AND coverage_start = ?3 AND coverage_end = ?4 AND timezone = ?5
+                      LIMIT 1",
+                    params![
+                        run.source.source_id,
+                        run.window_id,
+                        run.coverage.window_start,
+                        run.coverage.window_end,
+                        run.coverage.timezone,
+                    ],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if existing_attempt.is_some() {
+                return Err(StoreError::InvalidDiscoveryRun(
+                    "a repeated attempt for this window must set supersedesRunId".to_string(),
+                ));
+            }
+        }
+
+        if run.status == "completed" {
+            validate_discovery_finding_identities(&transaction, &run)?;
+        }
+
+        let now = Utc::now().to_rfc3339();
+        let initial_diagnostics = discovery_run_diagnostics(&run, &now, false)?;
+        transaction.execute(
+            "INSERT INTO discovery_runs(
+               source_id, run_id, window_id, supersedes_run_id, coverage_start,
+               coverage_end, timezone, generated_at, status, digest, finding_count,
+               imported_at, diagnostics_json, cursor_advanced
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+            params![
+                run.source.source_id,
+                run.run_id,
+                run.window_id,
+                run.supersedes_run_id,
+                run.coverage.window_start,
+                run.coverage.window_end,
+                run.coverage.timezone,
+                run.generated_at,
+                run.status,
+                digest,
+                run.findings.len() as i64,
+                now,
+                initial_diagnostics,
+                false,
+            ],
+        )?;
+
+        let mut result = DiscoveryRunImportResult {
+            recorded: true,
+            ..Default::default()
+        };
+        if run.status == "completed" && coverage_is_newer {
+            for finding in &run.findings {
+                let legacy = discovery_run_finding_to_legacy(finding);
+                let finding_result = reconcile_typed_discovery_finding(
+                    &transaction,
+                    finding,
+                    &legacy,
+                    &run.run_id,
+                    &now,
+                )?;
+                result.imported += finding_result.imported;
+                result.updated += finding_result.updated;
+                result.unchanged += finding_result.unchanged;
+            }
+
+            transaction.execute(
+                "INSERT INTO discovery_cursors(
+                       source_id, window_id, run_id, coverage_end, updated_at
+                     ) VALUES (?1, ?2, ?3, ?4, ?5)
+                     ON CONFLICT(source_id) DO UPDATE SET
+                       window_id = excluded.window_id,
+                       run_id = excluded.run_id,
+                       coverage_end = excluded.coverage_end,
+                       updated_at = excluded.updated_at",
+                params![
+                    run.source.source_id,
+                    run.window_id,
+                    run.run_id,
+                    run.coverage.window_end,
+                    now,
+                ],
+            )?;
+            result.cursor_advanced = true;
+            let diagnostics = discovery_run_diagnostics(&run, &now, true)?;
+            transaction.execute(
+                "UPDATE discovery_runs SET diagnostics_json = ?1, cursor_advanced = 1
+                  WHERE source_id = ?2 AND run_id = ?3",
+                params![diagnostics, run.source.source_id, run.run_id],
+            )?;
+        }
+
+        transaction.execute(
+            "INSERT INTO activity(id, kind, message, occurred_at)
+             VALUES (?1, 'import', ?2, ?3)",
+            params![
+                Uuid::new_v4().to_string(),
+                format!(
+                    "Discovery run {} recorded: {} new, {} updated, {} unchanged{}.",
+                    run.run_id,
+                    result.imported,
+                    result.updated,
+                    result.unchanged,
+                    if result.cursor_advanced {
+                        ", cursor advanced"
+                    } else {
+                        ""
+                    }
+                ),
+                now,
             ],
         )?;
         transaction.commit()?;
@@ -2713,6 +2991,8 @@ impl Store {
                 }))
             })?
             .collect::<Result<Vec<_>, _>>()?;
+        let discovery_runs = self.discovery_run_diagnostics()?;
+        let discovery_cursors = self.discovery_cursors()?;
         Ok(serde_json::json!({
             "operationalSchemaVersion": SCHEMA_VERSION,
             "counts": {
@@ -2727,6 +3007,8 @@ impl Store {
             },
             "preparationStatuses": preparation_statuses,
             "sources": sources,
+            "discoveryRuns": discovery_runs,
+            "discoveryCursors": discovery_cursors,
             "redaction": {
                 "roleDetails": "omitted",
                 "applicationUrls": "omitted",
@@ -4936,6 +5218,8 @@ impl Store {
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
+        let discovery_runs = self.discovery_run_diagnostics()?;
+        let discovery_cursors = self.discovery_cursors()?;
 
         Ok(DashboardState {
             roles,
@@ -4957,7 +5241,49 @@ impl Store {
             action_required_run_count,
             sources,
             recent_runs,
+            discovery_runs,
+            discovery_cursors,
         })
+    }
+
+    pub fn discovery_cursors(&self) -> Result<Vec<DiscoveryCursor>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT source_id, window_id, run_id, coverage_end, updated_at
+               FROM discovery_cursors ORDER BY source_id",
+        )?;
+        statement
+            .query_map([], |row| {
+                Ok(DiscoveryCursor {
+                    source_id: row.get(0)?,
+                    window_id: row.get(1)?,
+                    run_id: row.get(2)?,
+                    coverage_end: row.get(3)?,
+                    updated_at: row.get(4)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
+    }
+
+    pub fn discovery_run_diagnostics(&self) -> Result<Vec<DiscoveryRunDiagnostic>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT diagnostics_json FROM discovery_runs
+               WHERE diagnostics_json != '{}'
+               ORDER BY imported_at DESC LIMIT 30",
+        )?;
+        statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .map(|value| {
+                let value = value?;
+                if value.len() > MAX_DISCOVERY_DIAGNOSTICS_BYTES {
+                    return Err(StoreError::InvalidDiscoveryRun(
+                        "stored discovery diagnostics exceed the maximum size".to_string(),
+                    ));
+                }
+                serde_json::from_str(&value)
+                    .map_err(|error| StoreError::InvalidDiscoveryRun(error.to_string()))
+            })
+            .collect()
     }
 }
 
@@ -5100,6 +5426,723 @@ fn insert_run_steps(
         )?;
     }
     Ok(())
+}
+
+fn discovery_run_finding_to_legacy(finding: &DiscoveryRunFinding) -> DiscoveryFinding {
+    DiscoveryFinding {
+        source_id: finding.source_id.clone(),
+        source: finding.source.clone(),
+        source_role_id: finding.source_role_id.clone(),
+        company: finding.company.clone(),
+        title: finding.title.clone(),
+        location: finding.location.clone(),
+        discovered_at: finding.discovered_at.clone(),
+        posted_at: finding.posted_at.clone(),
+        application_url: finding.application_url.clone(),
+        normalized_key: finding.normalized_key.clone(),
+        queue_group: finding.queue_group.clone(),
+        eligibility_summary: finding.eligibility_summary.clone(),
+        uncertainty: finding.uncertainty.clone(),
+        legitimacy: finding.legitimacy.clone(),
+    }
+}
+
+fn valid_identifier_with_bounds(value: &str, minimum: usize, maximum: usize) -> bool {
+    value.chars().count() >= minimum
+        && value.chars().count() <= maximum
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-'))
+}
+
+fn valid_text(value: &str, minimum: usize, maximum: usize) -> bool {
+    let length = value.len();
+    (minimum..=maximum).contains(&length)
+}
+
+fn valid_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+}
+
+fn valid_https(value: Option<&str>) -> bool {
+    value
+        .map(|value| {
+            valid_text(value, 1, 2_000)
+                && url::Url::parse(value)
+                    .map(|parsed| parsed.scheme() == "https" && parsed.host_str().is_some())
+                    .unwrap_or(false)
+        })
+        .unwrap_or(true)
+}
+
+fn valid_datetime(value: &str) -> bool {
+    // Keep this deliberately narrower than chrono's RFC3339 parser. It mirrors
+    // the executable contract: ASCII extended ISO date-time, uppercase T/Z,
+    // an optional 1-9 digit fraction, and an explicit timezone.
+    if value.len() > 100 || !value.is_ascii() {
+        return false;
+    }
+    let bytes = value.as_bytes();
+    if bytes.len() < 20
+        || bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || bytes[10] != b'T'
+        || bytes[13] != b':'
+        || bytes[16] != b':'
+        || !bytes[..4].iter().all(u8::is_ascii_digit)
+        || !bytes[5..7].iter().all(u8::is_ascii_digit)
+        || !bytes[8..10].iter().all(u8::is_ascii_digit)
+        || !bytes[11..13].iter().all(u8::is_ascii_digit)
+        || !bytes[14..16].iter().all(u8::is_ascii_digit)
+        || !bytes[17..19].iter().all(u8::is_ascii_digit)
+    {
+        return false;
+    }
+    if NaiveDate::parse_from_str(&value[..10], "%Y-%m-%d").is_err() {
+        return false;
+    }
+    let hours = value[11..13].parse::<u32>().ok();
+    let minutes = value[14..16].parse::<u32>().ok();
+    let seconds = value[17..19].parse::<u32>().ok();
+    let (Some(hours), Some(minutes), Some(seconds)) = (hours, minutes, seconds) else {
+        return false;
+    };
+    if NaiveTime::from_hms_opt(hours, minutes, seconds).is_none() {
+        return false;
+    }
+
+    let mut timezone_start = 19;
+    if bytes.get(timezone_start) == Some(&b'.') {
+        timezone_start += 1;
+        let fraction_start = timezone_start;
+        while bytes
+            .get(timezone_start)
+            .is_some_and(|byte| byte.is_ascii_digit())
+        {
+            timezone_start += 1;
+        }
+        if !(1..=9).contains(&(timezone_start - fraction_start)) {
+            return false;
+        }
+    }
+    let timezone = &bytes[timezone_start..];
+    let valid_timezone = timezone == b"Z"
+        || (timezone.len() == 6
+            && matches!(timezone[0], b'+' | b'-')
+            && timezone[3] == b':'
+            && timezone[1..3].iter().all(|byte| byte.is_ascii_digit())
+            && timezone[4..6].iter().all(|byte| byte.is_ascii_digit()));
+    if !valid_timezone {
+        return false;
+    }
+    if timezone != b"Z" {
+        let offset_hours = (timezone[1] - b'0') as u32 * 10 + (timezone[2] - b'0') as u32;
+        let offset_minutes = (timezone[4] - b'0') as u32 * 10 + (timezone[5] - b'0') as u32;
+        if offset_hours > 23 || offset_minutes > 59 {
+            return false;
+        }
+    }
+    DateTime::parse_from_rfc3339(value).is_ok()
+}
+
+fn valid_date_or_datetime(value: &str) -> bool {
+    (value.len() == 10 && NaiveDate::parse_from_str(value, "%Y-%m-%d").is_ok())
+        || valid_datetime(value)
+}
+
+fn validate_discovery_run_raw_bounds(raw: &serde_json::Value) -> Result<(), StoreError> {
+    let object = raw.as_object().ok_or_else(|| {
+        StoreError::InvalidDiscoveryRun("run must serialize as an object".to_string())
+    })?;
+    let findings = object
+        .get("findings")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| StoreError::InvalidDiscoveryRun("findings must be an array".to_string()))?;
+    if findings.len() > MAX_DISCOVERY_FINDINGS {
+        return Err(StoreError::InvalidDiscoveryRun(
+            "discovery run exceeds the bounded findings, evidence, or issue limits".to_string(),
+        ));
+    }
+    let issues = object
+        .get("issues")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| StoreError::InvalidDiscoveryRun("issues must be an array".to_string()))?;
+    if issues.len() > MAX_DISCOVERY_ISSUES {
+        return Err(StoreError::InvalidDiscoveryRun(
+            "discovery run exceeds the bounded findings, evidence, or issue limits".to_string(),
+        ));
+    }
+    for finding in findings {
+        if let Some(evidence) = finding
+            .as_object()
+            .and_then(|value| value.get("evidence"))
+            .and_then(serde_json::Value::as_array)
+        {
+            if evidence.len() > MAX_DISCOVERY_EVIDENCE_PER_FINDING {
+                return Err(StoreError::InvalidDiscoveryRun(
+                    "discovery run exceeds the bounded findings, evidence, or issue limits"
+                        .to_string(),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_discovery_run(run: &DiscoveryRun) -> Result<(), StoreError> {
+    if run.findings.len() > MAX_DISCOVERY_FINDINGS
+        || run.issues.len() > MAX_DISCOVERY_ISSUES
+        || run
+            .findings
+            .iter()
+            .any(|finding| finding.evidence.len() > MAX_DISCOVERY_EVIDENCE_PER_FINDING)
+    {
+        return Err(StoreError::InvalidDiscoveryRun(
+            "discovery run exceeds the bounded findings, evidence, or issue limits".to_string(),
+        ));
+    }
+    if run.contract != "hereforwork.discovery-run" || run.schema_version != 1 {
+        return Err(StoreError::InvalidDiscoveryRun(
+            "unsupported contract or schemaVersion".to_string(),
+        ));
+    }
+    if !valid_identifier_with_bounds(&run.window_id, 8, 128)
+        || !valid_identifier_with_bounds(&run.run_id, 8, 128)
+    {
+        return Err(StoreError::InvalidDiscoveryRun(
+            "windowId and runId must be valid identifiers".to_string(),
+        ));
+    }
+    if run
+        .supersedes_run_id
+        .as_deref()
+        .is_some_and(|value| !valid_identifier_with_bounds(value, 8, 128) || value == run.run_id)
+    {
+        return Err(StoreError::InvalidDiscoveryRun(
+            "supersedesRunId must be a different valid identifier".to_string(),
+        ));
+    }
+    if !valid_identifier_with_bounds(&run.source.source_id, 1, 100)
+        || !valid_text(&run.source.display_name, 1, 200)
+        || !valid_text(&run.source.producer, 1, 100)
+        || !valid_text(&run.source.producer_version, 1, 200)
+        || !valid_text(&run.coverage.timezone, 1, 100)
+    {
+        return Err(StoreError::InvalidDiscoveryRun(
+            "source and coverage metadata must not be empty".to_string(),
+        ));
+    }
+    if !valid_identifier_with_bounds(&run.source.source_id, 1, 100)
+        || !valid_datetime(&run.coverage.window_start)
+        || !valid_datetime(&run.coverage.window_end)
+        || !valid_datetime(&run.generated_at)
+    {
+        return Err(StoreError::InvalidDiscoveryRun(
+            "sourceId and coverage timestamps are invalid".to_string(),
+        ));
+    }
+    let start = DateTime::parse_from_rfc3339(&run.coverage.window_start)
+        .map_err(|_| StoreError::InvalidDiscoveryRun("invalid windowStart".to_string()))?;
+    let end = DateTime::parse_from_rfc3339(&run.coverage.window_end)
+        .map_err(|_| StoreError::InvalidDiscoveryRun("invalid windowEnd".to_string()))?;
+    let generated = DateTime::parse_from_rfc3339(&run.generated_at)
+        .map_err(|_| StoreError::InvalidDiscoveryRun("invalid generatedAt".to_string()))?;
+    if start > end || generated < end {
+        return Err(StoreError::InvalidDiscoveryRun(
+            "coverage timestamps are not chronologically valid".to_string(),
+        ));
+    }
+    if !matches!(run.status.as_str(), "completed" | "partial" | "failed")
+        || (run.status != "completed" && run.issues.is_empty())
+        || (run.status == "failed" && !run.findings.is_empty())
+    {
+        return Err(StoreError::InvalidDiscoveryRun(
+            "status, issues, and findings do not satisfy the contract".to_string(),
+        ));
+    }
+    if run.integrity.algorithm != "sha256"
+        || run.integrity.canonicalization != "hfw-discovery-run-v1"
+        || run.integrity.coverage != "all_top_level_fields_except_integrity"
+        || !valid_sha256(&run.integrity.digest)
+    {
+        return Err(StoreError::InvalidDiscoveryRun(
+            "integrity metadata is invalid".to_string(),
+        ));
+    }
+
+    let mut finding_ids = HashSet::new();
+    let mut source_role_ids = HashSet::new();
+    for finding in &run.findings {
+        if !finding_ids.insert(finding.finding_id.clone())
+            || !source_role_ids.insert(finding.source_role_id.clone())
+            || !valid_identifier_with_bounds(&finding.finding_id, 1, 200)
+            || !valid_identifier_with_bounds(&finding.source_id, 1, 100)
+            || finding.source_id != run.source.source_id
+            || finding.source != run.source.display_name
+            || !valid_text(&finding.source, 1, 200)
+            || !valid_text(&finding.company, 1, 500)
+            || !valid_text(&finding.title, 1, 500)
+            || !valid_text(&finding.location, 1, 500)
+            || !valid_text(&finding.source_role_id, 1, 500)
+            || !valid_text(&finding.normalized_key, 3, 500)
+            || !valid_text(&finding.eligibility_summary, 1, 2000)
+            || finding
+                .uncertainty
+                .as_deref()
+                .is_some_and(|value| !valid_text(value, 1, 2000))
+            || !valid_datetime(&finding.discovered_at)
+            || finding
+                .posted_at
+                .as_deref()
+                .is_some_and(|value| !valid_date_or_datetime(value))
+            || !valid_https(finding.application_url.as_deref())
+        {
+            return Err(StoreError::InvalidDiscoveryRun(
+                "finding identity, source, or required field is invalid".to_string(),
+            ));
+        }
+        let mut evidence_ids = HashSet::new();
+        if finding.evidence.is_empty() {
+            return Err(StoreError::InvalidDiscoveryRun(
+                "every finding requires evidence".to_string(),
+            ));
+        }
+        for evidence in &finding.evidence {
+            if !evidence_ids.insert(evidence.evidence_id.clone())
+                || !valid_identifier_with_bounds(&evidence.evidence_id, 1, 200)
+                || !matches!(
+                    evidence.kind.as_str(),
+                    "source_listing" | "company_page" | "authorization" | "legitimacy" | "other"
+                )
+                || !valid_text(&evidence.reference, 1, 2000)
+                || !valid_datetime(&evidence.observed_at)
+                || !valid_https(evidence.url.as_deref())
+                || evidence
+                    .summary
+                    .as_deref()
+                    .is_some_and(|value| !valid_text(value, 1, 4000))
+                || evidence
+                    .content_sha256
+                    .as_deref()
+                    .is_some_and(|value| !valid_sha256(value))
+            {
+                return Err(StoreError::InvalidDiscoveryRun(
+                    "finding evidence is invalid or duplicated".to_string(),
+                ));
+            }
+        }
+        match &finding.match_score {
+            DiscoveryRunMatchScore::Scored {
+                scale,
+                value,
+                authority,
+                source_version,
+                scored_at,
+            } if scale == "career_ops_1_to_5"
+                && value.is_finite()
+                && (1.0..=5.0).contains(value)
+                && authority == "career-ops"
+                && valid_text(source_version, 1, 200)
+                && valid_datetime(scored_at) => {}
+            DiscoveryRunMatchScore::NotScored {
+                reason,
+                authority,
+                source_version,
+                checked_at,
+            } if matches!(
+                reason.as_str(),
+                "not_evaluated" | "unavailable" | "deferred" | "insufficient_evidence"
+            ) && authority == "career-ops"
+                && valid_text(source_version, 1, 200)
+                && valid_datetime(checked_at) => {}
+            _ => {
+                return Err(StoreError::InvalidDiscoveryRun(
+                    "finding matchScore is invalid".to_string(),
+                ));
+            }
+        }
+    }
+    let mut issue_ids = HashSet::new();
+    for issue in &run.issues {
+        if !issue_ids.insert(issue.issue_id.clone())
+            || !valid_identifier_with_bounds(&issue.issue_id, 1, 200)
+            || !valid_text(&issue.code, 1, 200)
+            || !valid_text(&issue.message, 1, 2000)
+        {
+            return Err(StoreError::InvalidDiscoveryRun(
+                "run issue is invalid or duplicated".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn canonical_json(value: &serde_json::Value) -> Result<String, StoreError> {
+    match value {
+        serde_json::Value::Array(items) => Ok(format!(
+            "[{}]",
+            items
+                .iter()
+                .map(canonical_json)
+                .collect::<Result<Vec<_>, _>>()?
+                .join(",")
+        )),
+        serde_json::Value::Object(object) => {
+            let mut keys = object.keys().collect::<Vec<_>>();
+            keys.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+            Ok(format!(
+                "{{{}}}",
+                keys.into_iter()
+                    .map(|key| {
+                        canonical_json(&object[key]).map(|value| {
+                            format!(
+                                "{}:{}",
+                                serde_json::to_string(key).expect("JSON key serialization"),
+                                value
+                            )
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?
+                    .join(",")
+            ))
+        }
+        serde_json::Value::Number(number) => canonical_json_number(number),
+        _ => Ok(serde_json::to_string(value).expect("JSON scalar serialization")),
+    }
+}
+
+fn canonical_json_number(number: &serde_json::Number) -> Result<String, StoreError> {
+    let lexical = number.to_string();
+    let c_lexical = CString::new(lexical.as_bytes()).map_err(|_| {
+        StoreError::InvalidDiscoveryRun("canonical JSON number is not finite".to_string())
+    })?;
+    let mut end = ptr::null_mut();
+    // serde_json and Rust's f64 parser can round a boundary decimal differently
+    // from V8. libc::strtod is used here solely as the cross-runtime decimal-to-
+    // binary64 conversion; it is required to consume the complete JSON number.
+    let value = unsafe { libc::strtod(c_lexical.as_ptr(), &mut end) };
+    let consumed = if end.is_null() {
+        None
+    } else {
+        Some(unsafe { end.offset_from(c_lexical.as_ptr()) as usize })
+    };
+    if consumed != Some(lexical.len()) || !value.is_finite() {
+        return Err(StoreError::InvalidDiscoveryRun(
+            "canonical JSON number is not finite".to_string(),
+        ));
+    }
+    if value == 0.0 {
+        return Ok("{\"$hfwCanonicalNumberV1\":\"0000000000000000\"}".to_string());
+    }
+    Ok(format!(
+        "{{\"$hfwCanonicalNumberV1\":\"{:016x}\"}}",
+        value.to_bits()
+    ))
+}
+
+fn discovery_run_digest_value(raw: &serde_json::Value) -> Result<String, StoreError> {
+    let mut value = raw.clone();
+    let object = value.as_object_mut().ok_or_else(|| {
+        StoreError::InvalidDiscoveryRun("run must serialize as an object".to_string())
+    })?;
+    object.remove("integrity");
+    if let Some(findings) = object
+        .get_mut("findings")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        findings.sort_by(|left, right| {
+            left.get("findingId")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .as_bytes()
+                .cmp(
+                    right
+                        .get("findingId")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default()
+                        .as_bytes(),
+                )
+        });
+        for finding in findings {
+            if let Some(evidence) = finding
+                .get_mut("evidence")
+                .and_then(serde_json::Value::as_array_mut)
+            {
+                evidence.sort_by(|left, right| {
+                    left.get("evidenceId")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default()
+                        .as_bytes()
+                        .cmp(
+                            right
+                                .get("evidenceId")
+                                .and_then(serde_json::Value::as_str)
+                                .unwrap_or_default()
+                                .as_bytes(),
+                        )
+                });
+            }
+        }
+    }
+    if let Some(issues) = object
+        .get_mut("issues")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        issues.sort_by(|left, right| {
+            left.get("issueId")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .as_bytes()
+                .cmp(
+                    right
+                        .get("issueId")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default()
+                        .as_bytes(),
+                )
+        });
+    }
+    Ok(format!(
+        "{:x}",
+        Sha256::digest(canonical_json(&value)?.as_bytes())
+    ))
+}
+
+fn discovery_run_diagnostics(
+    run: &DiscoveryRun,
+    imported_at: &str,
+    cursor_advanced: bool,
+) -> Result<String, StoreError> {
+    let diagnostics = DiscoveryRunDiagnostic {
+        source_id: run.source.source_id.clone(),
+        source_display_name: run.source.display_name.clone(),
+        producer: run.source.producer.clone(),
+        producer_version: run.source.producer_version.clone(),
+        run_id: run.run_id.clone(),
+        window_id: run.window_id.clone(),
+        supersedes_run_id: run.supersedes_run_id.clone(),
+        coverage_start: run.coverage.window_start.clone(),
+        coverage_end: run.coverage.window_end.clone(),
+        timezone: run.coverage.timezone.clone(),
+        generated_at: run.generated_at.clone(),
+        status: run.status.clone(),
+        digest: run.integrity.digest.clone(),
+        finding_count: run.findings.len(),
+        imported_at: imported_at.to_string(),
+        cursor_advanced,
+        issues: run.issues.clone(),
+        findings: run
+            .findings
+            .iter()
+            .map(|finding| DiscoveryRunFindingDiagnostic {
+                finding_id: finding.finding_id.clone(),
+                source_role_id: finding.source_role_id.clone(),
+                evidence: finding
+                    .evidence
+                    .iter()
+                    .map(|evidence| DiscoveryRunEvidenceDiagnostic {
+                        evidence_id: evidence.evidence_id.clone(),
+                        kind: evidence.kind.clone(),
+                        observed_at: evidence.observed_at.clone(),
+                        url: evidence.url.clone(),
+                        content_sha256: evidence.content_sha256.clone(),
+                    })
+                    .collect(),
+            })
+            .collect(),
+    };
+    let serialized = serde_json::to_string(&diagnostics)
+        .map_err(|error| StoreError::InvalidDiscoveryRun(error.to_string()))?;
+    if serialized.len() > MAX_DISCOVERY_DIAGNOSTICS_BYTES {
+        return Err(StoreError::InvalidDiscoveryRun(
+            "discovery run diagnostics exceed the maximum size".to_string(),
+        ));
+    }
+    Ok(serialized)
+}
+
+fn validate_discovery_finding_identities(
+    transaction: &Transaction<'_>,
+    run: &DiscoveryRun,
+) -> Result<(), StoreError> {
+    for finding in &run.findings {
+        let prior = transaction
+            .query_row(
+                "SELECT source_role_id, normalized_key
+                   FROM discovery_findings
+                  WHERE source_id = ?1 AND finding_id = ?2",
+                params![run.source.source_id, finding.finding_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?;
+        if let Some((_, normalized_key)) = prior {
+            if normalized_key != finding.normalized_key {
+                return Err(StoreError::InvalidDiscoveryRun(
+                    "findingId was reused for a different normalized identity".to_string(),
+                ));
+            }
+        }
+        let claimed_by = transaction
+            .query_row(
+                "SELECT finding_id FROM discovery_findings
+                  WHERE source_id = ?1 AND source_role_id = ?2 AND finding_id != ?3",
+                params![
+                    run.source.source_id,
+                    finding.source_role_id,
+                    finding.finding_id
+                ],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        if claimed_by.is_some() {
+            return Err(StoreError::InvalidDiscoveryRun(
+                "sourceRoleId is already claimed by a different findingId".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn reconcile_typed_discovery_finding(
+    transaction: &Transaction<'_>,
+    finding: &DiscoveryRunFinding,
+    legacy: &DiscoveryFinding,
+    run_id: &str,
+    now: &str,
+) -> Result<ImportResult, StoreError> {
+    let previous_source_role = transaction
+        .query_row(
+            "SELECT source_role_id FROM discovery_findings
+               WHERE source_id = ?1 AND finding_id = ?2",
+            params![finding.source_id, finding.finding_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    let mut result = reconcile_discovery_finding(transaction, legacy, now)?;
+    if previous_source_role.as_deref() != Some(finding.source_role_id.as_str()) {
+        if let Some(previous_source_role) = previous_source_role {
+            let references: i64 = transaction.query_row(
+                "SELECT COUNT(*) FROM discovery_findings
+                  WHERE source_id = ?1 AND source_role_id = ?2 AND finding_id != ?3",
+                params![finding.source_id, previous_source_role, finding.finding_id],
+                |row| row.get(0),
+            )?;
+            if references == 0 {
+                transaction.execute(
+                    "DELETE FROM source_occurrences
+                      WHERE source_id = ?1 AND source_role_id = ?2",
+                    params![finding.source_id, previous_source_role],
+                )?;
+            }
+            result = ImportResult {
+                imported: 0,
+                updated: 1,
+                unchanged: 0,
+            };
+        }
+    }
+    transaction.execute(
+        "INSERT INTO discovery_findings(
+           source_id, finding_id, source_role_id, normalized_key, last_run_id, payload_hash
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(source_id, finding_id) DO UPDATE SET
+           source_role_id = excluded.source_role_id,
+           normalized_key = excluded.normalized_key,
+           last_run_id = excluded.last_run_id,
+           payload_hash = excluded.payload_hash",
+        params![
+            finding.source_id,
+            finding.finding_id,
+            finding.source_role_id,
+            finding.normalized_key,
+            run_id,
+            hash_finding(legacy),
+        ],
+    )?;
+    Ok(result)
+}
+
+fn reconcile_discovery_finding(
+    transaction: &Transaction<'_>,
+    finding: &DiscoveryFinding,
+    now: &str,
+) -> Result<ImportResult, StoreError> {
+    let existing_role_id = transaction
+        .query_row(
+            "SELECT id FROM roles WHERE normalized_key = ?1",
+            [&finding.normalized_key],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    let role_id = existing_role_id.unwrap_or_else(|| Uuid::new_v4().to_string());
+    let payload_hash = hash_finding(finding);
+    let existing_hash = transaction
+        .query_row(
+            "SELECT payload_hash FROM source_occurrences
+               WHERE source_id = ?1 AND source_role_id = ?2",
+            params![finding.source_id, finding.source_role_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    let mut result = ImportResult::default();
+    match existing_hash.as_deref() {
+        None => result.imported = 1,
+        Some(hash) if hash == payload_hash => result.unchanged = 1,
+        Some(_) => result.updated = 1,
+    }
+
+    upsert_role(transaction, &role_id, finding)?;
+    transaction.execute(
+        "INSERT INTO source_occurrences(
+           id, role_id, source_id, source, source_role_id, payload_hash,
+           discovered_at, posted_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+         ON CONFLICT(source_id, source_role_id) DO UPDATE SET
+           role_id = excluded.role_id,
+           source = excluded.source,
+           payload_hash = excluded.payload_hash,
+           discovered_at = excluded.discovered_at,
+           posted_at = excluded.posted_at",
+        params![
+            Uuid::new_v4().to_string(),
+            role_id,
+            finding.source_id,
+            finding.source,
+            finding.source_role_id,
+            payload_hash,
+            finding.discovered_at,
+            finding.posted_at,
+        ],
+    )?;
+    transaction.execute(
+        "INSERT OR IGNORE INTO evaluation_sync(
+           role_id, state, reason, created_at, updated_at
+         ) VALUES (?1, 'awaiting_evaluation', 'evaluation_receipt_required', ?2, ?2)",
+        params![role_id, now],
+    )?;
+    if existing_hash.as_deref() != Some(payload_hash.as_str()) {
+        transaction.execute(
+            "UPDATE evaluation_sync
+                SET state = CASE
+                      WHEN (SELECT canonical_status FROM roles WHERE id = ?1)
+                           IN ('Applied', 'Discarded') THEN 'terminal'
+                      ELSE 'awaiting_evaluation'
+                    END,
+                    reason = CASE
+                      WHEN (SELECT canonical_status FROM roles WHERE id = ?1)
+                           IN ('Applied', 'Discarded') THEN 'canonical_terminal'
+                      ELSE 'source_identity_changed'
+                    END,
+                    input_hash = NULL, current_receipt_key = NULL,
+                    lease_expires_at = NULL, updated_at = ?2
+              WHERE role_id = ?1",
+            params![role_id, now],
+        )?;
+    }
+    Ok(result)
 }
 
 fn upsert_role(
@@ -5857,14 +6900,16 @@ fn missed_nominal_times(
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_EVALUATION_SYNC_ATTEMPTS, PreparationCompletion, QueueFilters, Store,
-        hash_browser_readback,
+        MAX_DISCOVERY_FINDINGS, MAX_DISCOVERY_RUN_BYTES, MAX_EVALUATION_SYNC_ATTEMPTS,
+        PreparationCompletion, QueueFilters, Store, hash_browser_readback, valid_datetime,
+        valid_text, validate_discovery_run_raw_bounds,
     };
     use crate::domain::{
         BrowserSessionSummary, EvaluationResultRead, HistoryRecord, ImportResult, PreparationWork,
         QueueGroup,
     };
-    use sha2::Digest;
+    use serde_json::Value;
+    use sha2::{Digest, Sha256};
 
     const DATASET: &str = r#"{
       "schemaVersion": 1,
@@ -5963,6 +7008,26 @@ mod tests {
         result
     }
 
+    fn sealed_discovery_run(mut value: Value) -> String {
+        value["integrity"]["digest"] = Value::String(String::new());
+        let mut run = value;
+        let digest = super::discovery_run_digest_value(&run).unwrap();
+        run.as_object_mut().unwrap().insert(
+            "integrity".to_string(),
+            serde_json::json!({
+                "algorithm": "sha256",
+                "canonicalization": "hfw-discovery-run-v1",
+                "coverage": "all_top_level_fields_except_integrity",
+                "digest": digest,
+            }),
+        );
+        serde_json::to_string(&run).unwrap()
+    }
+
+    fn discovery_fixture() -> Value {
+        serde_json::from_str(include_str!("../../examples/discovery-run.example.json")).unwrap()
+    }
+
     fn queue_and_claim(store: &mut Store, role_id: &str, provider: &str) -> PreparationWork {
         let queued = store.begin_preparation(role_id, provider).unwrap();
         let claimed = store.claim_preparation_work().unwrap().unwrap();
@@ -6022,6 +7087,546 @@ mod tests {
         let roles = store.dashboard().unwrap().roles;
         assert_eq!(roles.len(), 1);
         assert_eq!(roles[0].posted_at.as_deref(), Some("2026-08-28"));
+    }
+
+    #[test]
+    fn discovery_run_first_import_and_replay_are_idempotent() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+        let fixture_digest = super::discovery_run_digest_value(&discovery_fixture()).unwrap();
+        assert_eq!(
+            fixture_digest,
+            "68aecb6b79fd151e18edc3e062e287cba33e9374cd545035b945fff93bd4e054"
+        );
+        let mut fixture = discovery_fixture();
+        fixture.as_object_mut().unwrap().remove("supersedesRunId");
+        let payload = sealed_discovery_run(fixture);
+
+        let first = store.import_discovery_run(&payload).unwrap();
+        assert_eq!(first.imported, 2);
+        assert!(first.recorded);
+        assert!(first.cursor_advanced);
+        assert!(!first.replayed);
+        let replay = store.import_discovery_run(&payload).unwrap();
+        assert_eq!(
+            replay,
+            crate::domain::DiscoveryRunImportResult {
+                replayed: true,
+                ..Default::default()
+            }
+        );
+        assert_eq!(
+            store
+                .connection
+                .query_row("SELECT COUNT(*) FROM discovery_runs", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            store
+                .connection
+                .query_row("SELECT COUNT(*) FROM discovery_cursors", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            store
+                .connection
+                .query_row("SELECT COUNT(*) FROM roles", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        assert_eq!(store.integrity_check().unwrap(), "ok");
+        let replay_roles = store
+            .connection
+            .query_row("SELECT COUNT(*) FROM roles", [], |row| row.get::<_, i64>(0))
+            .unwrap();
+        assert_eq!(replay_roles, 2);
+    }
+
+    #[test]
+    fn discovery_run_digest_conflict_fails_closed() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+        let mut fixture = discovery_fixture();
+        fixture.as_object_mut().unwrap().remove("supersedesRunId");
+        let payload = sealed_discovery_run(fixture.clone());
+        store.import_discovery_run(&payload).unwrap();
+
+        fixture["findings"][0]["title"] = Value::String("Changed title".to_string());
+        let conflict = sealed_discovery_run(fixture);
+        let error = store.import_discovery_run(&conflict).unwrap_err();
+        assert!(error.to_string().contains("different digest"));
+        assert_eq!(
+            store
+                .connection
+                .query_row("SELECT COUNT(*) FROM discovery_runs", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            store
+                .connection
+                .query_row("SELECT COUNT(*) FROM discovery_cursors", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn discovery_run_accepts_any_finite_native_score_in_range() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+        let mut fixture = discovery_fixture();
+        fixture.as_object_mut().unwrap().remove("supersedesRunId");
+        fixture["findings"][0]["matchScore"]["value"] =
+            Value::Number(serde_json::Number::from_f64(3.6495739800251394).unwrap());
+        fixture["findings"][1]["matchScore"] = fixture["findings"][0]["matchScore"].clone();
+        fixture["findings"][1]["matchScore"]["value"] =
+            Value::Number(serde_json::Number::from_f64(4.25).unwrap());
+        let payload = sealed_discovery_run(fixture);
+        let result = store.import_discovery_run(&payload).unwrap();
+        assert_eq!(result.imported, 2);
+    }
+
+    #[test]
+    fn discovery_run_requires_finding_source_to_match_run_display_name() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+        let mut fixture = discovery_fixture();
+        fixture.as_object_mut().unwrap().remove("supersedesRunId");
+        fixture["findings"][0]["source"] = Value::String("Untrusted source label".to_string());
+        let error = store
+            .import_discovery_run(&sealed_discovery_run(fixture))
+            .unwrap_err();
+        assert!(error.to_string().contains("finding identity"));
+        assert_eq!(store.discovery_run_diagnostics().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn discovery_run_timestamps_match_strict_contract_shape() {
+        for value in [
+            "2026-09-01 13:00:00+02:00",
+            "2026-09-01t13:00:00+02:00",
+            "2026-09-01T13:00:00z",
+            "2026-09-01T13:00:60+02:00",
+            "2026-09-01T13:00:00.1234567890+02:00",
+        ] {
+            assert!(
+                !valid_datetime(value),
+                "accepted invalid timestamp: {value}"
+            );
+        }
+        assert!(!valid_datetime(&"2026-09-01T13:00:00+02:00".repeat(6)));
+        for value in [
+            "2026-09-01T13:00:00+02:00",
+            "2026-09-01T13:00:00.123456789+02:00",
+            "2026-09-01T11:00:00Z",
+        ] {
+            assert!(valid_datetime(value), "rejected valid timestamp: {value}");
+        }
+        let overlong = format!("2026-09-01T13:00:00.{}+02:00", "1".repeat(76));
+        assert!(!valid_datetime(&overlong));
+    }
+
+    #[test]
+    fn canonical_json_number_formatting_matches_shared_parity_fixtures() {
+        let fixtures: Vec<serde_json::Value> = serde_json::from_str(include_str!(
+            "../../contracts/discovery-run-number-parity.json"
+        ))
+        .unwrap();
+        for fixture in fixtures {
+            let value = serde_json::json!({ "value": fixture["value"] });
+            let expected = format!(
+                "{{\"value\":{{\"$hfwCanonicalNumberV1\":\"{}\"}}}}",
+                fixture["expected"].as_str().unwrap()
+            );
+            assert_eq!(super::canonical_json(&value).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn career_ops_score_digest_parity_covers_randomized_valid_f64_values() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../contracts/discovery-run-score-precision.json"
+        ))
+        .unwrap();
+        let mut state = fixture["seed"].as_u64().unwrap() as u32;
+        let mut aggregate = Sha256::new();
+        for _ in 0..fixture["count"].as_u64().unwrap() {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let candidate = 1.0 + (state as f64 / 4_294_967_296.0) * 4.0;
+            assert!((1.0..=5.0).contains(&candidate));
+            let value = serde_json::json!({ "value": candidate });
+            let digest = format!(
+                "{:x}",
+                Sha256::digest(super::canonical_json(&value).unwrap().as_bytes())
+            );
+            aggregate.update(digest.as_bytes());
+        }
+        assert_eq!(
+            format!("{:x}", aggregate.finalize()),
+            fixture["aggregateSha256"].as_str().unwrap()
+        );
+    }
+
+    #[test]
+    fn discovery_run_text_limits_count_utf8_bytes_for_emoji() {
+        assert!(valid_text(&"😀".repeat(50), 1, 200));
+        assert!(!valid_text(&"😀".repeat(51), 1, 200));
+    }
+
+    #[test]
+    fn stable_finding_identity_reconciles_a_source_role_change() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+        let mut first = discovery_fixture();
+        first.as_object_mut().unwrap().remove("supersedesRunId");
+        store
+            .import_discovery_run(&sealed_discovery_run(first))
+            .unwrap();
+
+        let mut next = discovery_fixture();
+        next.as_object_mut().unwrap().remove("supersedesRunId");
+        next["runId"] = Value::String("01990df0-4d80-7ab0-b4f1-7d83a11b2c99".to_string());
+        next["windowId"] = Value::String("01990de0-5790-74ea-9cee-0ec9cc19dc99".to_string());
+        next["coverage"]["windowStart"] = Value::String("2026-09-01T13:00:00+02:00".to_string());
+        next["coverage"]["windowEnd"] = Value::String("2026-09-01T14:00:00+02:00".to_string());
+        next["generatedAt"] = Value::String("2026-09-01T14:05:00+02:00".to_string());
+        next["findings"][0]["sourceRoleId"] = Value::String("example-001-reissued".to_string());
+        let result = store
+            .import_discovery_run(&sealed_discovery_run(next))
+            .unwrap();
+        assert_eq!(result.updated, 1);
+        assert_eq!(
+            store
+                .connection
+                .query_row(
+                    "SELECT COUNT(*) FROM source_occurrences
+                      WHERE source_id = 'eu-job-radar' AND source_role_id = 'example-001'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            store
+                .connection
+                .query_row(
+                    "SELECT COUNT(*) FROM discovery_findings
+                      WHERE source_id = 'eu-job-radar' AND finding_id = 'eu-job-radar:example-001'
+                        AND source_role_id = 'example-001-reissued'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn stable_finding_identity_conflict_fails_closed() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+        let mut first = discovery_fixture();
+        first.as_object_mut().unwrap().remove("supersedesRunId");
+        store
+            .import_discovery_run(&sealed_discovery_run(first))
+            .unwrap();
+
+        let mut conflict = discovery_fixture();
+        conflict.as_object_mut().unwrap().remove("supersedesRunId");
+        conflict["runId"] = Value::String("01990df0-4d80-7ab0-b4f1-7d83a11b2c99".to_string());
+        conflict["windowId"] = Value::String("01990de0-5790-74ea-9cee-0ec9cc19dc99".to_string());
+        conflict["coverage"]["windowStart"] =
+            Value::String("2026-09-01T13:00:00+02:00".to_string());
+        conflict["coverage"]["windowEnd"] = Value::String("2026-09-01T14:00:00+02:00".to_string());
+        conflict["generatedAt"] = Value::String("2026-09-01T14:05:00+02:00".to_string());
+        conflict["findings"][0]["normalizedKey"] = Value::String("different-identity".to_string());
+        let error = store
+            .import_discovery_run(&sealed_discovery_run(conflict))
+            .unwrap_err();
+        assert!(error.to_string().contains("findingId"));
+        assert_eq!(
+            store
+                .connection
+                .query_row("SELECT COUNT(*) FROM discovery_findings", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+    }
+
+    #[test]
+    fn failed_discovery_run_records_diagnostics_without_advancing_cursor() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+        let mut fixture = discovery_fixture();
+        let object = fixture.as_object_mut().unwrap();
+        object.remove("supersedesRunId");
+        object.insert("status".to_string(), Value::String("partial".to_string()));
+        object.insert(
+            "issues".to_string(),
+            serde_json::json!([{
+                "issueId": "source-timeout",
+                "code": "source_timeout",
+                "message": "Synthetic source timeout",
+                "retryable": true
+            }]),
+        );
+        object.insert("findings".to_string(), Value::Array(Vec::new()));
+        let payload = sealed_discovery_run(fixture);
+
+        let result = store.import_discovery_run(&payload).unwrap();
+        assert!(result.recorded);
+        assert!(!result.cursor_advanced);
+        assert_eq!(
+            store
+                .connection
+                .query_row("SELECT COUNT(*) FROM discovery_cursors", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            store
+                .connection
+                .query_row("SELECT status FROM discovery_runs", [], |row| row
+                    .get::<_, String>(0))
+                .unwrap(),
+            "partial"
+        );
+        let diagnostics = store.discovery_run_diagnostics().unwrap();
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].status, "partial");
+        assert_eq!(diagnostics[0].issues[0].code, "source_timeout");
+        assert!(diagnostics[0].findings.is_empty());
+        assert!(store.discovery_cursors().unwrap().is_empty());
+        let dashboard = store.dashboard().unwrap();
+        assert_eq!(dashboard.discovery_runs.len(), 1);
+        assert_eq!(dashboard.discovery_runs[0].issues[0].code, "source_timeout");
+        let redacted = store.redacted_diagnostics().unwrap();
+        assert_eq!(redacted["discoveryRuns"][0]["status"], "partial");
+        assert_eq!(redacted["discoveryCursors"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn invalid_retry_coverage_rolls_back_and_preserves_cursor() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+        let mut first = discovery_fixture();
+        first.as_object_mut().unwrap().remove("supersedesRunId");
+        let first_run = sealed_discovery_run(first);
+        store.import_discovery_run(&first_run).unwrap();
+
+        let mut retry = discovery_fixture();
+        retry["runId"] = Value::String("01990df0-4d80-7ab0-b4f1-7d83a11b2c99".to_string());
+        retry["coverage"]["windowEnd"] = Value::String("2026-09-01T14:00:00+02:00".to_string());
+        retry["generatedAt"] = Value::String("2026-09-01T14:05:00+02:00".to_string());
+        retry["supersedesRunId"] =
+            Value::String("01990df0-4d80-7ab0-b4f1-7d83a11b2c00".to_string());
+        let error = store
+            .import_discovery_run(&sealed_discovery_run(retry))
+            .unwrap_err();
+        assert!(error.to_string().contains("coverage"));
+        assert_eq!(
+            store
+                .connection
+                .query_row("SELECT COUNT(*) FROM discovery_runs", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            store
+                .connection
+                .query_row("SELECT coverage_end FROM discovery_cursors", [], |row| {
+                    row.get::<_, String>(0)
+                })
+                .unwrap(),
+            "2026-09-01T13:00:00+02:00"
+        );
+    }
+
+    #[test]
+    fn older_completed_run_is_recorded_without_reconciling_or_rewinding_cursor() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+        let mut newer = discovery_fixture();
+        newer.as_object_mut().unwrap().remove("supersedesRunId");
+        newer["runId"] = Value::String("01990df0-4d80-7ab0-b4f1-7d83a11b2c99".to_string());
+        newer["windowId"] = Value::String("01990de0-5790-74ea-9cee-0ec9cc19dc99".to_string());
+        newer["coverage"]["windowStart"] = Value::String("2026-09-01T13:00:00+02:00".to_string());
+        newer["coverage"]["windowEnd"] = Value::String("2026-09-01T14:00:00+02:00".to_string());
+        newer["generatedAt"] = Value::String("2026-09-01T14:05:00+02:00".to_string());
+        store
+            .import_discovery_run(&sealed_discovery_run(newer))
+            .unwrap();
+        let before = store
+            .connection
+            .query_row(
+                "SELECT r.title, o.source_role_id FROM source_occurrences o
+                  JOIN roles r ON r.id = o.role_id
+                  WHERE o.source_id = 'eu-job-radar' AND o.source_role_id = 'example-001'",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .unwrap();
+
+        let mut older = discovery_fixture();
+        older.as_object_mut().unwrap().remove("supersedesRunId");
+        older["runId"] = Value::String("01990df0-4d80-7ab0-b4f1-7d83a11b2c88".to_string());
+        older["findings"][0]["title"] = Value::String("Should not overwrite".to_string());
+        older["findings"][0]["sourceRoleId"] = Value::String("older-id".to_string());
+        let result = store
+            .import_discovery_run(&sealed_discovery_run(older))
+            .unwrap();
+        assert!(result.recorded);
+        assert!(!result.cursor_advanced);
+        assert_eq!(result.imported + result.updated + result.unchanged, 0);
+        let after = store
+            .connection
+            .query_row(
+                "SELECT r.title, o.source_role_id FROM source_occurrences o
+                  JOIN roles r ON r.id = o.role_id
+                  WHERE o.source_id = 'eu-job-radar' AND o.source_role_id = 'example-001'",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .unwrap();
+        assert_eq!(before, after);
+        assert_eq!(
+            store.discovery_cursors().unwrap()[0].coverage_end,
+            "2026-09-01T14:00:00+02:00"
+        );
+    }
+
+    #[test]
+    fn retry_lineage_allows_one_partial_retry_and_rejects_completed_or_old_attempts() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+        let mut partial = discovery_fixture();
+        partial.as_object_mut().unwrap().remove("supersedesRunId");
+        partial["status"] = Value::String("partial".to_string());
+        partial["findings"] = Value::Array(Vec::new());
+        partial["issues"] = serde_json::json!([{
+            "issueId": "timeout", "code": "timeout", "message": "temporary", "retryable": true
+        }]);
+        let partial_run_id = partial["runId"].as_str().unwrap().to_string();
+        store
+            .import_discovery_run(&sealed_discovery_run(partial))
+            .unwrap();
+
+        let mut completed = discovery_fixture();
+        completed["runId"] = Value::String("01990df0-4d80-7ab0-b4f1-7d83a11b2c99".to_string());
+        completed["supersedesRunId"] = Value::String(partial_run_id.clone());
+        store
+            .import_discovery_run(&sealed_discovery_run(completed))
+            .unwrap();
+
+        let mut invalid = discovery_fixture();
+        invalid["runId"] = Value::String("01990df0-4d80-7ab0-b4f1-7d83a11b2c88".to_string());
+        invalid["supersedesRunId"] = Value::String(partial_run_id);
+        let error = store
+            .import_discovery_run(&sealed_discovery_run(invalid))
+            .unwrap_err();
+        assert!(error.to_string().contains("latest attempt"));
+        let mut bypass = discovery_fixture();
+        bypass.as_object_mut().unwrap().remove("supersedesRunId");
+        bypass["runId"] = Value::String("01990df0-4d80-7ab0-b4f1-7d83a11b2c77".to_string());
+        let error = store
+            .import_discovery_run(&sealed_discovery_run(bypass))
+            .unwrap_err();
+        assert!(error.to_string().contains("must set supersedesRunId"));
+        assert_eq!(store.discovery_run_diagnostics().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn discovery_run_input_and_collection_limits_fail_before_mutation() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+        let error = store
+            .import_discovery_run(&"{".repeat(MAX_DISCOVERY_RUN_BYTES + 1))
+            .unwrap_err();
+        assert!(error.to_string().contains("maximum payload size"));
+
+        let mut fixture = discovery_fixture();
+        fixture["findings"] = Value::Array(
+            std::iter::repeat_n(fixture["findings"][0].clone(), MAX_DISCOVERY_FINDINGS + 1)
+                .collect(),
+        );
+        let error = store
+            .import_discovery_run(&sealed_discovery_run(fixture))
+            .unwrap_err();
+        assert!(error.to_string().contains("bounded findings"));
+        assert_eq!(store.discovery_run_diagnostics().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn raw_cardinality_is_checked_before_typed_deserialization() {
+        let mut fixture = discovery_fixture();
+        fixture["findings"] = Value::Array(vec![Value::Null; MAX_DISCOVERY_FINDINGS + 1]);
+        let error = validate_discovery_run_raw_bounds(&fixture).unwrap_err();
+        assert!(error.to_string().contains("bounded findings"));
+
+        let mut evidence_fixture = discovery_fixture();
+        evidence_fixture["findings"][0]["evidence"] = Value::Array(vec![
+            Value::Null;
+            super::MAX_DISCOVERY_EVIDENCE_PER_FINDING
+                + 1
+        ]);
+        let error = validate_discovery_run_raw_bounds(&evidence_fixture).unwrap_err();
+        assert!(error.to_string().contains("bounded findings"));
+
+        let mut issue_fixture = discovery_fixture();
+        issue_fixture["issues"] = Value::Array(vec![Value::Null; super::MAX_DISCOVERY_ISSUES + 1]);
+        let error = validate_discovery_run_raw_bounds(&issue_fixture).unwrap_err();
+        assert!(error.to_string().contains("bounded findings"));
+    }
+
+    #[test]
+    fn failed_import_transaction_rolls_back_without_advancing_cursor() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+        store
+            .connection
+            .execute_batch(
+                "CREATE TRIGGER fail_discovery_activity
+                   BEFORE INSERT ON activity
+                   WHEN NEW.kind = 'import'
+                   BEGIN
+                     SELECT RAISE(ABORT, 'forced import failure');
+                   END;",
+            )
+            .unwrap();
+        let mut fixture = discovery_fixture();
+        fixture.as_object_mut().unwrap().remove("supersedesRunId");
+        let error = store
+            .import_discovery_run(&sealed_discovery_run(fixture))
+            .unwrap_err();
+        assert!(error.to_string().contains("forced import failure"));
+        assert_eq!(
+            store
+                .connection
+                .query_row("SELECT COUNT(*) FROM discovery_runs", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            store
+                .connection
+                .query_row("SELECT COUNT(*) FROM discovery_cursors", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(store.integrity_check().unwrap(), "ok");
     }
 
     #[test]
@@ -8247,7 +9852,7 @@ mod tests {
                 "Applied".to_string(),
                 "terminal".to_string(),
                 "canonical_terminal".to_string(),
-                20
+                22
             )
         );
     }

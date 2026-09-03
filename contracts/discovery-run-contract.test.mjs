@@ -1,15 +1,19 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { test } from "node:test";
 
 import {
+  canonicalizeDiscoveryRun,
   computeDiscoveryRunDigest,
+  isNativeCareerOpsScore,
   parseDiscoveryArtifact,
   validateDiscoveryRun,
 } from "./discovery-run-contract.mjs";
 
 const legacyFixture = JSON.parse(await readFile(new URL("../examples/discovery-dataset.example.json", import.meta.url)));
 const runFixture = JSON.parse(await readFile(new URL("../examples/discovery-run.example.json", import.meta.url)));
+const numberParityFixtures = JSON.parse(await readFile(new URL("./discovery-run-number-parity.json", import.meta.url)));
 
 function clone(value) {
   return structuredClone(value);
@@ -67,6 +71,48 @@ test("integrity is deterministic across object, finding, evidence, and issue ord
   reordered.issues.reverse();
 
   assert.equal(computeDiscoveryRunDigest(reordered), baseline.integrity.digest);
+});
+
+test("canonical JSON number formatting is shared with the Rust importer", () => {
+  for (const fixture of numberParityFixtures) {
+    assert.equal(
+      canonicalizeDiscoveryRun({ value: fixture.value }),
+      `{"value":{"$hfwCanonicalNumberV1":"${fixture.expected}"}}`,
+    );
+  }
+  assert.throws(() => canonicalizeDiscoveryRun({ value: Number.NaN }), /finite/);
+});
+
+test("career-ops score digest parity covers randomized valid f64 values", async () => {
+  const precision = JSON.parse(await readFile(new URL("./discovery-run-score-precision.json", import.meta.url)));
+  const rejected = clone(runFixture);
+  rejected.findings[0].matchScore.value = precision.adversarial;
+  assert.doesNotThrow(() => validateDiscoveryRun(seal(rejected)));
+  assert.equal(isNativeCareerOpsScore(4.25), true);
+  let state = precision.seed >>> 0;
+  const aggregate = createHash("sha256");
+  for (let index = 0; index < precision.count; index += 1) {
+    state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+    const candidate = 1 + (state / 0x100000000) * 4;
+    assert.equal(isNativeCareerOpsScore(candidate), true);
+    const digest = createHash("sha256")
+      .update(canonicalizeDiscoveryRun({ value: candidate }), "utf8")
+      .digest("hex");
+    aggregate.update(digest, "ascii");
+  }
+  assert.equal(aggregate.digest("hex"), precision.aggregateSha256);
+});
+
+test("text bounds use UTF-8 bytes across astral Unicode", () => {
+  const valid = clone(runFixture);
+  valid.source.displayName = "😀".repeat(50);
+  valid.findings.forEach((finding) => { finding.source = valid.source.displayName; });
+  assert.doesNotThrow(() => validateDiscoveryRun(seal(valid)));
+
+  const tooLong = clone(valid);
+  tooLong.source.displayName = "😀".repeat(51);
+  tooLong.findings.forEach((finding) => { finding.source = tooLong.source.displayName; });
+  assert.throws(() => validateDiscoveryRun(seal(tooLong)), /UTF-8 bytes/);
 });
 
 test("integrity fails closed when covered content changes", () => {
@@ -144,6 +190,24 @@ test("calendar-impossible timestamps and premature generation are rejected", () 
   const generatedBeforeCoverage = clone(runFixture);
   generatedBeforeCoverage.generatedAt = "2026-09-01T12:59:59+02:00";
   assert.throws(() => validateDiscoveryRun(seal(generatedBeforeCoverage)), /must not be before/);
+});
+
+test("timestamps use the strict uppercase timezone contract", () => {
+  for (const value of [
+    "2026-09-01 13:00:00+02:00",
+    "2026-09-01t13:00:00+02:00",
+    "2026-09-01T13:00:00z",
+    "2026-09-01T13:00:60+02:00",
+    "2026-09-01T13:00:00.1234567890+02:00",
+    `2026-09-01T13:00:00.${"1".repeat(76)}+02:00`,
+  ]) {
+    const invalid = clone(runFixture);
+    invalid.generatedAt = value;
+    assert.throws(() => validateDiscoveryRun(seal(invalid)), /ISO date-time|real ISO|string between/);
+  }
+  const valid = clone(runFixture);
+  valid.generatedAt = "2026-09-01T13:00:00.123456789+02:00";
+  assert.doesNotThrow(() => validateDiscoveryRun(seal(valid)));
 });
 
 test("partial and failed runs remain explicit and non-successful", () => {

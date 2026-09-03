@@ -77,6 +77,8 @@ export interface DashboardState {
   actionRequiredRunCount: number;
   sources: SourceScheduleSummary[];
   recentRuns: RunSummary[];
+  discoveryRuns: DiscoveryRunDiagnostic[];
+  discoveryCursors: DiscoveryCursor[];
 }
 
 export interface QueueFilters {
@@ -166,6 +168,49 @@ export interface RunSummary {
   status: "queued" | "running" | "retryable" | "action_required" | "permanent" | "completed" | "cancelled";
   attempt: number;
   errorClass: string | null;
+  updatedAt: string;
+}
+
+export interface DiscoveryRunEvidenceDiagnostic {
+  evidenceId: string;
+  kind: string;
+  observedAt: string;
+  url: string | null;
+  contentSha256: string | null;
+}
+
+export interface DiscoveryRunFindingDiagnostic {
+  findingId: string;
+  sourceRoleId: string;
+  evidence: DiscoveryRunEvidenceDiagnostic[];
+}
+
+export interface DiscoveryRunDiagnostic {
+  sourceId: string;
+  sourceDisplayName: string;
+  producer: string;
+  producerVersion: string;
+  runId: string;
+  windowId: string;
+  supersedesRunId: string | null;
+  coverageStart: string;
+  coverageEnd: string;
+  timezone: string;
+  generatedAt: string;
+  status: "completed" | "partial" | "failed";
+  digest: string;
+  findingCount: number;
+  importedAt: string;
+  cursorAdvanced: boolean;
+  issues: Array<{ issueId: string; code: string; message: string; retryable: boolean }>;
+  findings: DiscoveryRunFindingDiagnostic[];
+}
+
+export interface DiscoveryCursor {
+  sourceId: string;
+  windowId: string;
+  runId: string;
+  coverageEnd: string;
   updatedAt: string;
 }
 
@@ -273,6 +318,12 @@ export interface ImportResult {
   imported: number;
   updated: number;
   unchanged: number;
+}
+
+export interface DiscoveryRunImportResult extends ImportResult {
+  replayed: boolean;
+  recorded: boolean;
+  cursorAdvanced: boolean;
 }
 import type { HereForWorkDiscoveryDataset } from "./generated/discovery-dataset";
 import type { HereForWorkDiscoveryRun } from "./generated/discovery-run";

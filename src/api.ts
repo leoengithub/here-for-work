@@ -1,6 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   DashboardState,
+  DiscoveryCursor,
+  DiscoveryRunImportResult,
   ImportResult,
   IntegrationHealth,
   ReconcileResult,
@@ -55,6 +57,8 @@ const browserFallback: DashboardState = {
   actionRequiredRunCount: 0,
   sources: [],
   recentRuns: [],
+  discoveryRuns: [],
+  discoveryCursors: [],
 };
 
 export async function getDashboard(): Promise<DashboardState> {
@@ -232,6 +236,16 @@ export async function preflightLatestBackup(): Promise<RestorePreflight> {
 export async function importDataset(payload: string): Promise<ImportResult> {
   if (!isTauri()) throw new Error("Dataset import is available in the desktop app.");
   return invoke<ImportResult>("import_dataset", { payload });
+}
+
+export async function importDiscoveryRun(payload: string): Promise<DiscoveryRunImportResult> {
+  if (!isTauri()) throw new Error("Discovery-run import is available in the desktop app.");
+  return invoke<DiscoveryRunImportResult>("import_discovery_run", { payload });
+}
+
+export async function getDiscoveryCursors(): Promise<DiscoveryCursor[]> {
+  if (!isTauri()) throw new Error("Discovery cursors are available in the desktop app.");
+  return invoke<DiscoveryCursor[]>("get_discovery_cursors");
 }
 
 export async function setBackgroundEnabled(enabled: boolean): Promise<DashboardState> {

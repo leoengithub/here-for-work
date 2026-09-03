@@ -55,6 +55,7 @@ import {
   getBrowserSetup,
   getBrowserSessions,
   importDataset,
+  importDiscoveryRun,
   preflightLatestBackup,
   prepareRole,
   reconcileApplicationHistory,
@@ -953,7 +954,7 @@ function SystemPanel({
           </div>
         ))}
       </dl>
-      {dashboard.recentRuns.length > 0 ? (
+      {dashboard.recentRuns.length > 0 || dashboard.discoveryRuns.length > 0 ? (
         <Collapsible className="run-details">
           <CollapsibleTrigger className="run-details__trigger">Recent run state</CollapsibleTrigger>
           <CollapsibleContent>
@@ -963,6 +964,14 @@ function SystemPanel({
                   <span>{run.sourceId}</span>
                   <span>{run.kind.replaceAll("_", " ")}</span>
                   <strong>{run.status.replaceAll("_", " ")}</strong>
+                </li>
+              ))}
+              {dashboard.discoveryRuns.map((run) => (
+                <li key={`discovery-${run.runId}`} data-discovery-run-id={run.runId}>
+                  <span>{run.sourceDisplayName}</span>
+                  <span>discovery run</span>
+                  <strong>{run.status.replaceAll("_", " ")}</strong>
+                  {run.issues[0] ? <span>{run.issues[0].code}: {run.issues[0].message}</span> : null}
                 </li>
               ))}
             </ol>
@@ -1219,7 +1228,20 @@ export function App() {
     setError(null);
     try {
       const payload = await file.text();
-      await importDataset(payload);
+      let contract: unknown = null;
+      try {
+        const candidate: unknown = JSON.parse(payload);
+        if (candidate && typeof candidate === "object" && "contract" in candidate) {
+          contract = candidate.contract;
+        }
+      } catch {
+        // The legacy importer remains the source of the detailed parse error.
+      }
+      if (contract === "hereforwork.discovery-run") {
+        await importDiscoveryRun(payload);
+      } else {
+        await importDataset(payload);
+      }
       const next = await getDashboard();
       setDashboard(next);
     } catch (reason) {

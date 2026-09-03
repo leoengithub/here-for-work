@@ -101,6 +101,6 @@
     "algorithm": "sha256",
     "canonicalization": "hfw-discovery-run-v1",
     "coverage": "all_top_level_fields_except_integrity",
-    "digest": "864e6cb7309642a64ea93dcc7b95b9a829b45caca6f9783d512c557b921fa5ad"
+    "digest": "68aecb6b79fd151e18edc3e062e287cba33e9374cd545035b945fff93bd4e054"
   }
 }
