@@ -52,7 +52,8 @@ executor's mutating path until the other executor's equivalent path is confirmed
 
 - HereForWork consumes the versioned typed results produced by the authoritative scheduled
   task. The contract is defined in `contracts/discovery-run.md` and
-  `contracts/discovery-run.schema.json`.
+  `contracts/discovery-run.schema.json`; the supported repository producer/sealer and
+  exact source instructions are in `contracts/discovery-run-producer.md`.
 - Begin with user-triggered manual Refresh while the existing selected-file schema-v1
   importer remains available. Then shadow-consume the same immutable run files. Optional
   automatic file consumption is considered only after the shadow evidence is accepted;
@@ -140,7 +141,9 @@ state; retain it for diagnosis and a later promotion decision.
 
 ## Deferred implementation work
 
-The typed discovery-run result contract is now defined in `contracts/discovery-run.md`.
-This decision still does not implement its career-ops exporter or HereForWork ingestion,
-the Gmail-effect receipt schema, adapter changes, task controls, or migration UI. Those
-require separately scoped work.
+The typed discovery-run result contract and a local structured-draft producer/sealer are
+implemented. This decision still does not implement automatic inbox consumption, the
+career-ops exporter itself, the Gmail-effect receipt schema, adapter changes, task
+controls, or migration UI. Each existing scheduled task still needs an explicit,
+executor-verified update to construct its source-specific draft and invoke the producer;
+that update does not authorize a scheduler cutover.

@@ -1,7 +1,7 @@
 # Discovery-run contract
 
-Status: version 1 contract; manual typed ingestion is implemented, producer/exporter
-and automatic-ingestion work remain separate
+Status: version 1 contract; manual typed ingestion and the repository producer/sealer are
+implemented, while automatic-ingestion work remains separate
 
 The discovery-run envelope is the durable handoff from an authoritative scheduled
 discovery workflow or career-ops exporter into HereForWork. Its schema is
@@ -25,8 +25,9 @@ a separate envelope identified by both:
 
 The dual-format manual Refresh routing is implemented: legacy schema-v1 payloads continue
 to use the legacy importer, while `hereforwork.discovery-run` payloads use the typed
-importer. Producer handoff/export remains pending, as does scheduled-task envelope
-emission.
+importer. Repository producer handoff/export is implemented by
+[`discovery-run-producer.md`](discovery-run-producer.md). Scheduled-task envelope
+emission still requires the explicit executor-side update described there.
 
 The contract-level version belongs to the named contract. A future breaking change to
 the discovery-run envelope increments its `schemaVersion`; it never changes the meaning
@@ -232,6 +233,8 @@ submit an application.
 
 The last global legacy boundary observed was `2026-09-01T11:53:14+02:00`; later
 Markdown/TSV artifacts without deterministic run/finding IDs and digest are not imported
-into the personal database. The producer/exporter, automatic file consumption, and executor cutover remain separate
-work. Producers must emit immutable, digest-sealed envelopes with stable source/window/
-run/finding identities; Markdown reports or source-side scan history are not substitutes.
+into the personal database. Automatic file consumption and executor cutover remain
+separate work. Producers must emit immutable, digest-sealed envelopes with stable
+source/window/finding identities; Markdown reports or source-side scan history are not
+substitutes. The repository producer and source-specific executor instructions are
+documented in [`discovery-run-producer.md`](discovery-run-producer.md).

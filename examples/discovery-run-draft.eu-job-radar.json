@@ -1,0 +1,19 @@
+{
+  "windowId": "eu-job-radar:window:20260903T070000Z",
+  "runId": "eu-job-radar:run:20260903T110002Z",
+  "source": {
+    "sourceId": "eu-job-radar",
+    "displayName": "EU Job Radar",
+    "producer": "career-ops-exporter",
+    "producerVersion": "replace-with-source-revision"
+  },
+  "coverage": {
+    "windowStart": "2026-09-03T09:00:00+02:00",
+    "windowEnd": "2026-09-03T13:00:00+02:00",
+    "timezone": "Europe/Madrid"
+  },
+  "generatedAt": "2026-09-03T13:00:02+02:00",
+  "status": "completed",
+  "findings": [],
+  "issues": []
+}

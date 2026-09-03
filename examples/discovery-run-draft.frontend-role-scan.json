@@ -1,0 +1,19 @@
+{
+  "windowId": "frontend-role-scan:window:20260903T040000Z",
+  "runId": "frontend-role-scan:run:20260903T080002Z",
+  "source": {
+    "sourceId": "frontend-role-scan",
+    "displayName": "Frontend Role Scan",
+    "producer": "career-ops-exporter",
+    "producerVersion": "replace-with-source-revision"
+  },
+  "coverage": {
+    "windowStart": "2026-09-03T06:00:00+02:00",
+    "windowEnd": "2026-09-03T10:00:00+02:00",
+    "timezone": "Europe/Madrid"
+  },
+  "generatedAt": "2026-09-03T10:00:02+02:00",
+  "status": "completed",
+  "findings": [],
+  "issues": []
+}

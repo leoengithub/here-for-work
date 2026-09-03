@@ -82,6 +82,11 @@ Read [PRODUCT.md](PRODUCT.md) before making product or interface decisions.
 Read [MVP_SHAPE.md](MVP_SHAPE.md) before proposing technical architecture or implementation.
 
 Discovery producers use the versioned [discovery-run contract](contracts/discovery-run.md).
+The supported structured-draft sealer is documented in
+[discovery-run-producer.md](contracts/discovery-run-producer.md); it writes immutable
+files under `inbox/discovery-runs` by default (or an explicitly supplied output path).
+The producer accepts JSON only, preserves career-ops' native score/evaluation provenance,
+and leaves existing scheduled-task authority unchanged.
 The existing schema-v1 snapshot remains supported by the legacy selected-file importer;
 the dedicated `import_discovery_run` operation accepts digest-sealed version-1 envelopes,
 records durable `(sourceId, runId, digest)` replay identity, source/finding identity,
