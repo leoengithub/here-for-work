@@ -7840,6 +7840,27 @@ mod tests {
     }
 
     #[test]
+    fn canonical_history_unavailability_does_not_poison_a_role_without_a_receipt() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+        store.import_dataset(DATASET).unwrap();
+        let role = store.evaluation_sync_roles().unwrap().remove(0);
+        let input_hash = format!("history-recovered:{}", role.source_identity_hash);
+
+        store
+            .mark_evaluation_sync_unavailable(&role.role_id, "canonical_history_unavailable")
+            .unwrap();
+        assert!(store.dashboard().unwrap().roles.is_empty());
+        assert!(store.claim_evaluation_sync(&role.role_id, &input_hash).unwrap());
+
+        let evaluation = test_evaluation(&role, "Research first", "High Confidence", "High");
+        store
+            .complete_evaluation_sync(&role, &input_hash, &evaluation)
+            .unwrap();
+        assert_eq!(store.dashboard().unwrap().roles.len(), 1);
+    }
+
+    #[test]
     fn transient_read_failures_retry_the_same_input_with_a_bounded_attempt_budget() {
         let directory = tempfile::tempdir().unwrap();
         let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();

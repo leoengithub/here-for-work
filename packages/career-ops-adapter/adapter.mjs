@@ -55,6 +55,9 @@ const ARTIFACT_INSPECTION_MARKERS = Object.freeze({
 const SEMVER_RE = /^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$/;
 const GIT_SHA_RE = /^[0-9a-f]{40}$/;
 const GIT_EXECUTABLE = process.platform === "win32" ? "git" : "/usr/bin/git";
+// Tracker history is capped at 5,000 records. Keep subprocess output bounded,
+// while leaving enough room for the largest supported complete history snapshot.
+const MAX_SCRIPT_OUTPUT_BYTES = 16 * 1024 * 1024;
 const root = process.env.HFW_CAREER_OPS_ROOT;
 const trackerDb = process.env.HFW_CAREER_OPS_INDEX;
 const stagingRoot = process.env.HFW_CAREER_OPS_STAGING;
@@ -527,18 +530,52 @@ async function runCareerOpsScript(scriptName, args, extraEnv = {}) {
     const stderr = [];
     let stdoutBytes = 0;
     let stderrBytes = 0;
+    let stdoutOversize = false;
+    let stderrOversize = false;
+    let terminatedForOversize = false;
+    const terminateForOversize = () => {
+      if (terminatedForOversize) return;
+      terminatedForOversize = true;
+      child.kill();
+    };
     child.stdout.on("data", (chunk) => {
-      if (stdoutBytes < 65_536) stdout.push(chunk.subarray(0, 65_536 - stdoutBytes));
+      if (stdoutBytes < MAX_SCRIPT_OUTPUT_BYTES) {
+        const remaining = MAX_SCRIPT_OUTPUT_BYTES - stdoutBytes;
+        stdout.push(chunk.subarray(0, remaining));
+      }
       stdoutBytes += chunk.length;
+      if (stdoutBytes > MAX_SCRIPT_OUTPUT_BYTES) {
+        stdoutOversize = true;
+        terminateForOversize();
+      }
     });
     child.stderr.on("data", (chunk) => {
-      if (stderrBytes < 65_536) stderr.push(chunk.subarray(0, 65_536 - stderrBytes));
+      if (stderrBytes < MAX_SCRIPT_OUTPUT_BYTES) {
+        const remaining = MAX_SCRIPT_OUTPUT_BYTES - stderrBytes;
+        stderr.push(chunk.subarray(0, remaining));
+      }
       stderrBytes += chunk.length;
+      if (stderrBytes > MAX_SCRIPT_OUTPUT_BYTES) {
+        stderrOversize = true;
+        terminateForOversize();
+      }
     });
     child.on("error", reject);
     child.on("close", (code) => {
       const output = Buffer.concat(stdout).toString("utf8");
       const diagnostics = Buffer.concat(stderr).toString("utf8").trim();
+      if (stdoutOversize || stderrOversize) {
+        const streams = [stdoutOversize ? "stdout" : null, stderrOversize ? "stderr" : null]
+          .filter(Boolean)
+          .join(" and ");
+        const error = new Error(
+          `career-ops ${scriptName} ${streams} exceeded the ${MAX_SCRIPT_OUTPUT_BYTES}-byte output limit; complete output was not accepted.`,
+        );
+        error.code = "CAREER_OPS_OUTPUT_TOO_LARGE";
+        error.diagnostics = `${streams}_oversize: received more than ${MAX_SCRIPT_OUTPUT_BYTES} bytes`;
+        reject(error);
+        return;
+      }
       if (code !== 0) {
         const error = new Error(`career-ops ${scriptName} exited with status ${code}.`);
         error.exitCode = code;
@@ -2450,6 +2487,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
           stage: typeof error?.stage === "string" ? error.stage : null,
           retryPolicy: typeof error?.retryPolicy === "string" ? error.retryPolicy : null,
           diagnosticId: typeof error?.diagnosticId === "string" ? error.diagnosticId : null,
+          diagnostics: typeof error?.diagnostics === "string" ? error.diagnostics : null,
           message: error instanceof Error ? error.message : String(error),
         },
       })}\n`);

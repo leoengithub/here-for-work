@@ -26,6 +26,54 @@ test("structured compensation preferences reject prose, conversion, and invalid 
   assert.equal(compensationApplicationAnswer(source(`${valid}    unexpected: 1\n`)), null);
 });
 
+test("history snapshots accept the complete bounded maximum-sized output", async () => {
+  const fixtureRoot = await mkdtemp(join(tmpdir(), "hfw-history-output-"));
+  const records = Array.from({ length: 5000 }, (_, index) => ({
+    id: index + 1,
+    date: "2026-09-03",
+    company: `Company ${index + 1}`,
+    role: "Frontend Engineer",
+    score: "4.2/5",
+    status: "Evaluated",
+    pdf: "yes",
+    report: `[${String(index + 1).padStart(3, "0")}](/reports/${index + 1}.md)`,
+    notes: "bounded history fixture ".repeat(12),
+  }));
+  await writeFile(join(fixtureRoot, "tracker.mjs"), `process.stdout.write(${JSON.stringify(JSON.stringify(records))});\n`);
+
+  const response = await request(
+    { id: "history-large", protocolVersion: 1, operation: "history.snapshot", input: { limit: 5000 } },
+    {
+      HFW_CAREER_OPS_ROOT: fixtureRoot,
+      HFW_CAREER_OPS_INDEX: join(fixtureRoot, "applications.db"),
+      HFW_CAREER_OPS_STAGING: join(fixtureRoot, "staging"),
+    },
+  );
+
+  assert.equal(response.ok, true);
+  assert.equal(response.result.records.length, 5000);
+  assert.equal(response.result.records.at(-1).id, 5000);
+});
+
+test("history snapshots fail closed with an explicit diagnostic when output exceeds the bound", async () => {
+  const fixtureRoot = await mkdtemp(join(tmpdir(), "hfw-history-oversize-"));
+  await writeFile(join(fixtureRoot, "tracker.mjs"), "process.stdout.write('[' + ' '.repeat(16 * 1024 * 1024 + 1) + ']');\n");
+
+  const response = await request(
+    { id: "history-oversize", protocolVersion: 1, operation: "history.snapshot", input: { limit: 5000 } },
+    {
+      HFW_CAREER_OPS_ROOT: fixtureRoot,
+      HFW_CAREER_OPS_INDEX: join(fixtureRoot, "applications.db"),
+      HFW_CAREER_OPS_STAGING: join(fixtureRoot, "staging"),
+    },
+  );
+
+  assert.equal(response.ok, false);
+  assert.equal(response.error.code, "CAREER_OPS_OUTPUT_TOO_LARGE");
+  assert.equal(response.error.diagnostics, "stdout_oversize: received more than 16777216 bytes");
+  assert.match(response.error.message, /stdout exceeded the 16777216-byte output limit/);
+});
+
 function request(payload, env = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [adapter], {
