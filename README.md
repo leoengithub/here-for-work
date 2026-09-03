@@ -9,17 +9,18 @@ HereForWork is a local-first, review-before-submit job-search companion. It is i
 Personal-proof implementation. The stack and implementation direction are recorded in
 [STACK_SELECTION.md](STACK_SELECTION.md) and [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md).
 
-The last recorded Apple Silicon proof package is built at:
+The current source uses schema-v22 SQLite migrations. The last recorded Apple Silicon
+proof package is at:
 
 ```text
 src-tauri/target/release/bundle/macos/HereForWork.app
 ```
 
-It includes the local React/Tauri queue, schema-v15 SQLite migrations, real private proof
-import, canonical-history reconciliation, scheduling/catch-up records, Codex and Claude
-CLI conformance, provider-neutral report/CV preparation, grounded live-form answers,
-login launch, notifications, backup/export, a native messaging host, and an unpacked
-all-sites extension with generic form support plus Ashby/Greenhouse/Lever detection. The extension is paired with the selected ordinary
+That earlier package includes the local React/Tauri queue, real private proof import,
+canonical-history reconciliation, scheduling/catch-up records, Codex and Claude CLI
+conformance, provider-neutral report/CV preparation, grounded live-form answers, login
+launch, notifications, backup/export, a native messaging host, and an unpacked all-sites
+extension with generic form support plus Ashby/Greenhouse/Lever detection. The extension is paired with the selected ordinary
 Chrome profile on this Mac; a new installation still requires that one manual step.
 
 The browser flow does not release an inspected form for manual review until verified
@@ -30,9 +31,10 @@ not inspect or fill the page again.
 The recorded proof package also contains run and browser-command leases with bounded retries,
 pre-migration backup, restore preflight, redacted diagnostics, provider/native-host
 boundary tests, and the approved full-width Queue / Applications information
-architecture with secondary System controls. The current package was rebuilt after the latest
-source integrations, passed the full automated checks and strict code-signature verification,
-and was installed at `/Users/leo/Desktop/HereForWork.app` for the local personal proof.
+architecture with secondary System controls. That previously recorded package predates the
+current typed incremental-import documentation update; no app rebuild or push is claimed
+here for these changes. It was installed at `/Users/leo/Desktop/HereForWork.app` for the
+local personal proof.
 The real Ashby inspection, Codex preparation, career-ops answer persistence, and explicitly
 authorized fill/read-back/release paths now pass. Only verified Name and Email were filled;
 all other fields and the user-owned terminal action remained untouched. Greenhouse and
@@ -43,15 +45,16 @@ needed for the no-finalization guard. It is used only in the already selected ap
 tab: the guard is installed in the page's `MAIN` world before inspection/fill and restores
 the original `submit`/`requestSubmit` descriptors and listeners only after verified
 `release_for_review`. It adds no browser command, host access, or submission capability.
-The rebuilt package contains that exact manifest and passed a read-only launch and navigation
-smoke check through Queue, Applications, and System; no application or form action was executed.
+That previously recorded package contains the exact manifest and passed a read-only launch
+and navigation smoke check through Queue, Applications, and System; no application or form
+action was executed.
 
 The first integration uses career-ops as the sole authority for verified profile data, native 1–5 match scoring, application artifacts and their provenance, grounded answers, and canonical tracking. HereForWork owns orchestration, the unified review queue, user-triggered preparation, notifications, retries, and the browser workflow. Scheduling is an end-state HereForWork responsibility; the existing scheduled tasks remain the authoritative executors until each source completes the staged, explicitly approved migration in [SCHEDULING_MIGRATION.md](SCHEDULING_MIGRATION.md).
 
 ## Product boundaries
 
 - Scheduled runs reuse career-ops discovery: `scan` finds roles through configured portals/APIs and broad agentic search, while `discover` expands a company into ATS portal sources. career-ops owns source-local normalization and deduplication. HereForWork orchestrates runs and retries, makes typed ingestion replay-idempotent, and reconciles identity across runs and sources without creating another discovery, deduplication, evaluation, or scoring engine.
-- Every live, unique, nonblocked role receives the full career-ops A–G evaluation before Queue. Each valid evaluation writes a complete report; career-ops may also generate CV/PDF artifacts according to its supported `auto_pdf_score_threshold`. HereForWork reads and validates the effective value instead of substituting one; the latest audit found the upstream default fallback `3.0` active because no explicit threshold key was configured, even though the approved product target remains `3.5`.
+- Every live, unique, nonblocked role receives the full career-ops A–G evaluation before Queue. Each valid evaluation writes a complete report; career-ops may also generate CV/PDF artifacts according to its supported `auto_pdf_score_threshold`. HereForWork reads and validates the effective value instead of substituting one. The upstream fallback is `3.0` when that key is absent; this personal career-ops configuration is explicitly set to the approved `3.5`, and the capabilities check reports it as `configured`.
 - **Prepare application** validates and reuses current report/CV artifacts. It generates or refreshes only missing, failed, or stale work, including the CV/PDF for a below-threshold role the user explicitly chooses to prepare.
 - Application answers are drafted only after the live form has been inspected.
 - Every viable role remains available without an arbitrary daily cap.
@@ -60,7 +63,7 @@ The first integration uses career-ops as the sole authority for verified profile
 - Queue, Applications, and System remain available in a fixed 56-pixel header. Dismiss records canonical Discarded state immediately, then offers a session-only 30-second Undo in a fixed stack of up to three independent notices; notices pause while hovered or keyboard focused and never return after restart.
 - Preparation failures and released forms use durable, deduped outcome notifications. Visible windows show actionable in-app notices; hidden windows receive informational macOS notifications. Fully quitting never replays an undelivered outcome on restart. See [NOTIFICATIONS.md](NOTIFICATIONS.md).
 - Preparation provider, background checks, and Queue filters live in System. Filters start from verified career-ops profile preferences and apply to current unprepared roles and future imports.
-- Queue's upload icon opens a file picker and imports the selected discovery JSON; it does not imply automatic refresh.
+- Queue's upload icon opens a file picker and imports the selected discovery JSON. It routes legacy schema-v1 snapshots and typed `hereforwork.discovery-run` envelopes to their respective importers; it does not imply automatic refresh.
 - Applications keeps one current row per role; Details opens a formatted career-ops report preview instead of exposing a question-answer log.
 - Suspicious findings are excluded before Queue. Preparation keeps a suspicious live result as a safety backstop; unknown authorization and `Proceed with Caution` legitimacy continue with their warnings preserved. Dismiss in Applications is limited to failed or ready-for-review work; it records Discarded and deletes only generated preparation artifacts after inline confirmation.
 - Prepare is a durable background queue: two report/CV jobs may run concurrently while Queue stays interactive, and Applications shows queued and in-progress roles immediately. Browser inspection and filling remain FIFO and one application at a time; one failure cannot block later roles.
@@ -82,12 +85,18 @@ Read [MVP_SHAPE.md](MVP_SHAPE.md) before proposing technical architecture or imp
 Discovery producers use the versioned [discovery-run contract](contracts/discovery-run.md).
 The existing schema-v1 snapshot remains supported by the legacy selected-file importer;
 the dedicated `import_discovery_run` operation accepts digest-sealed version-1 envelopes,
-records replay identity, and advances source-specific coverage only after a completed
-transaction. Typed ingestion does not transfer scheduled-task authority. Manual typed
-Refresh is implemented; producer/exporter output, shadow consumption, and optional
-automatic sync remain separately gated migration work. Typed run diagnostics and per-source
-import cursors are exposed in dashboard state and redacted diagnostics; `findingId` remains
-the stable source identity alongside the existing canonical reconciliation keys.
+records durable `(sourceId, runId, digest)` replay identity, source/finding identity,
+diagnostics, and per-source successful-coverage cursors, with replay, conflict, rollback,
+and out-of-order bounds. Manual typed Refresh is implemented and does not imply that the
+historical backlog has been imported. The last global legacy boundary observed was
+`2026-09-01T11:53:14+02:00`; later Markdown/TSV artifacts lack deterministic run/finding
+IDs and digests, so no personal database import was performed. Scheduled tasks remain
+authoritative and must first emit valid typed envelopes for a real incremental proof;
+producer/exporter output, shadow consumption, automatic sync, and cutover remain gated.
+
+Current source validation on 2026-09-03 passed: frontend 93 tests, adapter 53,
+discovery-contract 15, Rust 125 plus 4, typechecks, contract checks, extension build,
+Clippy, and formatting. This documentation update does not claim a new app build or push.
 
 ## Local validation
 

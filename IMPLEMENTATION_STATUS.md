@@ -1,7 +1,7 @@
 # Implementation status
 
 Date: 2026-09-03
-Stage: consumption-side direction integrated; primary browser contract and Applied retirement integrated, packaged, and locally smoke-checked
+Stage: typed discovery ingestion and consumption-side direction integrated; primary browser contract and Applied retirement remain locally validated
 
 ## Current direction closeout
 
@@ -21,9 +21,11 @@ Before inspection and fill, the service worker installs it in the selected appli
 page `MAIN` world. Only verified `release_for_review` restores the original
 `submit`/`requestSubmit` descriptors and captured listeners, removes the guard, and releases
 the lease for human review. This permission adds no browser command, host access, or submission
-capability. The current Apple Silicon package includes the exact manifest and integrated source,
-passes strict code-signature verification, and completed a read-only Queue, Applications, and
-System launch/navigation smoke check without executing an application or form action.
+capability. The previously recorded Apple Silicon package includes the exact manifest and
+integrated browser source, passed strict code-signature verification, and completed a
+read-only Queue, Applications, and System launch/navigation smoke check without executing
+an application or form action. It predates the typed incremental-import update; no new app
+build or push is claimed for the current source.
 
 The Greenhouse and Lever evidence in `evidence/HFW-BROWSER-25` is an isolated,
 reversible public-form observation using synthetic values. It proves current page shape,
@@ -33,11 +35,12 @@ rejects it. The review-only browser fallback remains unavailable: career-ops `ap
 its Playwright internals expose no supported public lease/result contract. Extension
 failures remain visible recovery or human handoff states.
 
-The approved career-ops PDF threshold target remains `3.5`; the effective upstream
-fallback is still `3.0` because no explicit setting is configured. HereForWork reads and
-reports that value and never rewrites career-ops. Existing scheduled tasks remain the
-authoritative executors until the versioned-result, shadow, canary, rollback, and
-explicit per-source cutover gates pass. Canonical Applied reconciliation now retires active
+The upstream career-ops PDF fallback remains `3.0` when its key is absent. This personal
+career-ops configuration is explicitly set to the approved `3.5`, and `capabilities.get`
+confirms `{value: 3.5, source: "configured"}`; the prior mismatch diagnostic is gone.
+HereForWork reads and reports the value and never rewrites career-ops. Existing scheduled
+tasks remain the authoritative executors until the versioned-result, shadow, canary,
+rollback, and explicit per-source cutover gates pass. Canonical Applied reconciliation now retires active
 work for that role transactionally and idempotently: queued/preparing jobs are cancelled,
 pending/leased browser commands become terminal `canonical_terminal` commands, and application
 sessions become released `applied_recorded` sessions with fallback disabled. The role,
@@ -87,9 +90,8 @@ implementation work:
   hash-bound reuse contract.
 - career-ops contains review-only Playwright behavior in its internal web implementation,
   but no supported external lease/result contract that HereForWork may call as fallback.
-- The effective PDF threshold is currently the upstream default `3.0` because no explicit
-  setting was present during the audit; HereForWork cannot silently enforce the approved
-  initial `3.5`.
+- The capability audit's historical no-key observation reported upstream's fallback `3.0`;
+  the current personal configuration is explicitly `3.5` and is reported as configured.
 
 Pre-Queue publication and Playwright fallback remain disabled until their required
 capabilities pass the fail-closed manifest and probes. Artifact-aware Prepare is enabled
@@ -110,6 +112,26 @@ Future gated operations must still revalidate immediately before execution becau
 check is not a durable lease. The current canonical Applied writer is reported as degraded,
 not supported: its existing write remains post-verified, but readable script names do not
 pre-certify semantic compatibility.
+
+## Typed discovery ingestion closeout — 2026-09-03
+
+The manual selected-file path now routes both legacy schema-v1 snapshots and typed
+`hereforwork.discovery-run` envelopes. Typed imports durably record `(sourceId, runId,
+digest)`, `(sourceId, findingId)`, bounded issues/evidence diagnostics, and per-source
+successful-coverage cursors. Replay, digest conflict, retry lineage, rollback, and
+out-of-order attempts are fail-closed and bounded; partial/failed runs remain diagnostic
+records and do not reconcile Queue or advance coverage. This is ingestion only: it does
+not mean the historical backlog has been imported.
+
+The last global legacy boundary observed was `2026-09-01T11:53:14+02:00`. Artifacts after
+that point are Markdown/TSV without deterministic run/finding IDs or a digest, so no
+personal database import was performed. Scheduled tasks remain authoritative and must be
+updated to emit valid typed envelopes before a real incremental proof. No scheduling
+cutover has occurred.
+
+Current source validation passed on 2026-09-03: frontend 93 tests, adapter 53,
+discovery-contract 15, Rust 125 plus 4, typechecks, contract checks, extension build,
+Clippy, and formatting. No app build or push is claimed for this change.
 
 ## Verified implementation evidence
 

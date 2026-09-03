@@ -26,10 +26,11 @@ The installed checkout also declares `1.31.0`. The version string therefore cann
 interface compatibility. HereForWork must record the exact Git revision when available,
 probe every required capability, and reject unexpected shapes before enabling a run.
 
-No configured `auto_pdf_score_threshold` key was present during the audit. Upstream's
-documented and implemented fallback is therefore `3.0`, not the product's approved
-initial `3.5`. HereForWork may report that mismatch and block a threshold-dependent run;
-it must not rewrite the setting.
+Historical audit note: no configured `auto_pdf_score_threshold` key was present during
+that audit, so upstream's documented and implemented fallback was `3.0`, not the
+product's approved initial `3.5`. The current personal career-ops configuration is
+explicitly `3.5`; `capabilities.get` reports `{value: 3.5, source: "configured"}` and no
+mismatch diagnostic. HereForWork still must not rewrite the setting.
 
 ## Evidence inspected
 
@@ -199,9 +200,10 @@ enabled until their required capabilities are supported.
 1. Choose the supported career-ops baseline: the divergent installed checkout, the
    inspected `origin/main`, or a later explicitly updated checkout. The declared version
    cannot make this decision.
-2. Decide whether to set `auto_pdf_score_threshold: 3.5` in career-ops. Until that user
-   configuration change is made explicitly, HereForWork must show effective `3.0` and
-   must not claim that the approved threshold is active.
+2. Keep the user-owned `auto_pdf_score_threshold` configuration explicit and verified.
+   The current personal configuration is `3.5` (`source: "configured"`); if the key is
+   absent in another career-ops checkout, HereForWork must show the upstream fallback
+   `3.0` and must not claim that the approved threshold is active there.
 3. Wait for and consume upstream-neutral public contracts for typed liveness, full A-G
    evaluation/result receipts, artifact freshness/provenance, and review-only Playwright
    driving. HereForWork-specific entry points in career-ops remain forbidden. Contributing

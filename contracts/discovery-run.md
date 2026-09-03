@@ -127,8 +127,8 @@ The approved target pipeline evaluates every live, unique, nonblocked role befor
 That evaluation uses career-ops' full A–G behavior and writes a report for every valid
 evaluation. career-ops may also produce CV/PDF artifacts under its supported
 `auto_pdf_score_threshold`. HereForWork reads the effective configured value instead of
-substituting one; the approved target is `3.5`, while the latest audit still found the
-upstream fallback `3.0` active because no explicit threshold key was configured. This
+substituting one; the approved target and current personal configuration are `3.5`
+(`source: "configured"`). If the key is absent, upstream's fallback is `3.0`; this
 target requires a separately versioned producer/adapter capability; it does not silently
 change this version-1 schema or grant HereForWork authority to rewrite career-ops
 configuration.
@@ -230,6 +230,8 @@ diagnostic records and never advance the cursor. This operation is ingestion onl
 does not execute a source, mutate Gmail, write career-ops, alter scheduled tasks, or
 submit an application.
 
-The producer/exporter, automatic file consumption, and executor cutover remain separate
+The last global legacy boundary observed was `2026-09-01T11:53:14+02:00`; later
+Markdown/TSV artifacts without deterministic run/finding IDs and digest are not imported
+into the personal database. The producer/exporter, automatic file consumption, and executor cutover remain separate
 work. Producers must emit immutable, digest-sealed envelopes with stable source/window/
 run/finding identities; Markdown reports or source-side scan history are not substitutes.

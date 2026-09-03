@@ -69,9 +69,10 @@ then perform its full A–G evaluation before Queue and return the native 1–5 
 evidence, blockers or gaps, compensation context, and material uncertainty. Every valid
 evaluation writes its full report. career-ops may also generate CV/PDF artifacts under
 its supported `auto_pdf_score_threshold`. HereForWork may read and validate that setting
-but never silently rewrites it. The approved product target is `3.5`, while the latest
-audit found the effective upstream fallback still at `3.0` because no explicit threshold
-key was configured.
+but never silently rewrites it. The approved product target and current personal
+configuration are `3.5` (`source: "configured"`). If the key is absent, upstream's
+fallback is `3.0`; that generic fallback must not be presented as the current personal
+value.
 
 At volume, orchestration reuses career-ops' supported batch/pipeline parallelism and model
 routing: fast/economy processing first, escalation for low-confidence results, and an
