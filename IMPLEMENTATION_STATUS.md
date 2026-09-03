@@ -24,7 +24,7 @@ the lease for human review. This permission adds no browser command, host access
 capability. The current post-import Apple Silicon package includes the typed discovery
 import, exact manifest, and integrated browser source; it was rebuilt, strict-signature
 verified, installed at `/Users/leo/Desktop/HereForWork.app`, and passed a read-only
-Queue/System launch/navigation smoke check. No historical backlog was imported and no live
+Queue/Settings launch/navigation smoke check. No historical backlog was imported and no live
 form action was executed. Repository delivery is published on `origin/main`.
 
 The Greenhouse and Lever evidence in `evidence/HFW-BROWSER-25` is an isolated,
@@ -132,7 +132,7 @@ cutover has occurred.
 Current source validation passed on 2026-09-03: frontend 93 tests, adapter 53,
 discovery-contract 15, Rust 125 plus 4, typechecks, contract checks, extension build,
 Clippy, and formatting. The post-import package build, strict-signature verification,
-installation, and read-only Queue/System launch smoke also passed. The historical backlog
+installation, and read-only Queue/Settings launch smoke also passed. The historical backlog
 remains unimported, no live form action was executed, and repository delivery is published
 on `origin/main`.
 
@@ -178,16 +178,16 @@ on `origin/main`.
   different model result. Long provider commands run asynchronously so the window and
   Cancel action remain responsive.
 - The renderer follows the approved full-width Queue / Applications information
-  architecture with secondary System controls and no Activity tab. Applications keeps
+  architecture with secondary Settings controls and no Activity tab. Settings is configuration and diagnostics only; actionable role work remains in Queue. Applications keeps
   one current row per role and opens the formatted career-ops Markdown report in a
   right-side details panel rather than showing a question-answer log.
 - Queue cards reserve the first line for the role title, keep source-backed age and
   decision metadata together below it, and reserve the right edge for Dismiss then
   Prepare. Group descriptions and the repeated footer explanation are removed. Provider
-  selection and background checks now live in System; Queue's upload icon remains an
+  selection and background checks now live in Settings; Queue's upload icon remains an
   explicit selected-file JSON import rather than an automatic refresh.
 - Queue filters are initialized from verified career-ops preferences, remain editable in
-  System, and apply to both current unprepared roles and future imports. The bounded
+  Settings, and apply to both current unprepared roles and future imports. The bounded
   local filter does not replace career-ops evaluation or scoring.
 - Prepare evaluates the role before committing artifacts. Viable matches continue into
   report/CV generation and an automatic new-tab browser handoff when authorization is
@@ -217,10 +217,10 @@ on `origin/main`.
   publication, drift checks, exact tracker post-verification, and conservative rollback
   provide compensating atomicity. Concurrent external writers remain outside that
   transaction and unsafe rollback becomes `manual_repair_required`.
-- System can store a local, hash-bound user-reviewed PDF fallback. It is used only after
+- Settings can store a local, hash-bound user-reviewed PDF fallback. It is used only after
   HTML and fact checks pass and PDF rendering fails; its provenance stays visibly
   `user_reviewed_fallback` and never claims tailoring.
-- The System control reuses the project's registry-derived shadcn `Field`, `Input`, and
+- The Settings control reuses the project's registry-derived shadcn `Field`, `Input`, and
   `Button` primitives; the registry check found no need for a new modal, card, or
   project-owned component.
 - Opening an older personal-proof database creates a pre-migration backup before
@@ -299,7 +299,7 @@ proven truthful. Match scoring remains career-ops-owned and must be presented on
 - Rust formatting and Clippy with warnings denied pass for the current source revision.
 - The integrated Apple Silicon app was rebuilt with ad-hoc signing, passed strict
   code-signature verification, and was installed at `/Users/leo/Desktop/HereForWork.app`.
-  A read-only launch/navigation smoke check covered Queue, Applications, and System. This
+  A read-only launch/navigation smoke check covered Queue, Applications, and Settings. This
   verifies the package boundary and persisted UI state, not a live extension/native-host fill.
 
 ## Extension evidence
@@ -341,7 +341,7 @@ Chrome profile. A new installation still follows these steps:
 
 1. Open `chrome://extensions` in the preferred ordinary Chrome profile.
 2. Enable Developer mode and load the unpacked extension from the path shown in the
-   app's System screen.
+   app's Settings screen.
 3. Copy the resulting 32-letter extension ID into HereForWork, select any existing or
    user-created/named profile, open the extension popup and copy its profile-local
    Installation ID, then

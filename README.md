@@ -31,7 +31,7 @@ not inspect or fill the page again.
 The recorded proof package also contains run and browser-command leases with bounded retries,
 pre-migration backup, restore preflight, redacted diagnostics, provider/native-host
 boundary tests, and the approved full-width Queue / Applications information
-architecture with secondary System controls. This package was rebuilt after the typed
+architecture with secondary Settings controls. Settings is configuration and diagnostics only; actionable role work remains in Queue. This package was rebuilt after the typed
 incremental-import update, strict-signature verified, and installed at
 `/Users/leo/Desktop/HereForWork.app` for the local personal proof. Repository delivery is
 published on `origin/main`.
@@ -46,7 +46,7 @@ tab: the guard is installed in the page's `MAIN` world before inspection/fill an
 the original `submit`/`requestSubmit` descriptors and listeners only after verified
 `release_for_review`. It adds no browser command, host access, or submission capability.
 The package contains the exact manifest and passed a read-only launch and navigation smoke
-check through Queue, Applications, and System; no live form action was executed.
+check through Queue, Applications, and Settings; no live form action was executed.
 
 The first integration uses career-ops as the sole authority for verified profile data, native 1–5 match scoring, application artifacts and their provenance, grounded answers, and canonical tracking. HereForWork owns orchestration, the unified review queue, user-triggered preparation, notifications, retries, and the browser workflow. Scheduling is an end-state HereForWork responsibility; the existing scheduled tasks remain the authoritative executors until each source completes the staged, explicitly approved migration in [SCHEDULING_MIGRATION.md](SCHEDULING_MIGRATION.md).
 
@@ -59,9 +59,9 @@ The first integration uses career-ops as the sole authority for verified profile
 - Every viable role remains available without an arbitrary daily cap.
 - The desktop-first queue is a direct list without a lightweight detail pane.
 - Queue roles use compact, non-expandable cards with the title on its own line, wrapping decision information below, and quiet Dismiss before primary Prepare. They show the native career-ops 1–5 score with concise evidence, blockers or gaps, compensation context, and material uncertainty, but omit ATS, preparation state, and source-count hygiene. A real source publication date may appear as `Today`, `1 day ago`, or `N days ago`, and disappears when missing, invalid, future-dated, or conflicting. HereForWork never converts the score to a percentage or probability or computes its own score.
-- Queue, Applications, and System remain available in a fixed 56-pixel header. Dismiss records canonical Discarded state immediately, then offers a session-only 30-second Undo in a fixed stack of up to three independent notices; notices pause while hovered or keyboard focused and never return after restart.
+- Queue and Applications remain available in a fixed 56-pixel header, with Settings as a secondary utility action. Dismiss records canonical Discarded state immediately, then offers a session-only 30-second Undo in a fixed stack of up to three independent notices; notices pause while hovered or keyboard focused and never return after restart.
 - Preparation failures and released forms use durable, deduped outcome notifications. Visible windows show actionable in-app notices; hidden windows receive informational macOS notifications. Fully quitting never replays an undelivered outcome on restart. See [NOTIFICATIONS.md](NOTIFICATIONS.md).
-- Preparation provider, background checks, and Queue filters live in System. Filters start from verified career-ops profile preferences and apply to current unprepared roles and future imports.
+- Preparation provider, background checks, diagnostics, and Queue filters live in Settings. Settings is configuration and diagnostics only; actionable role attention stays in Queue. Filters start from verified career-ops profile preferences and apply to current unprepared roles and future imports.
 - Queue's upload icon opens a file picker and imports the selected discovery JSON. It routes legacy schema-v1 snapshots and typed `hereforwork.discovery-run` envelopes to their respective importers; it does not imply automatic refresh.
 - Applications keeps one current row per role; Details opens a formatted career-ops report preview instead of exposing a question-answer log.
 - Suspicious findings are excluded before Queue. Preparation keeps a suspicious live result as a safety backstop; unknown authorization and `Proceed with Caution` legitimacy continue with their warnings preserved. Dismiss in Applications is limited to failed or ready-for-review work; it records Discarded and deletes only generated preparation artifacts after inline confirmation.
@@ -101,7 +101,7 @@ producer/exporter output, shadow consumption, automatic sync, and cutover remain
 Current source validation on 2026-09-03 passed: frontend 93 tests, adapter 53,
 discovery-contract 15, Rust 125 plus 4, typechecks, contract checks, extension build,
 Clippy, and formatting. The post-import package build, strict-signature verification,
-installation, and read-only Queue/System launch smoke also passed. The historical backlog
+installation, and read-only Queue/Settings launch smoke also passed. The historical backlog
 remains unimported, no live form action was executed, and repository delivery is published
 on `origin/main`.
 
@@ -136,7 +136,7 @@ cd /path/to/career-ops
 ```
 
 The adapter health check reports this runtime separately. As a recovery-only option,
-System can save an absolute path to a user-reviewed PDF. HereForWork hash-binds the file
+Settings can save an absolute path to a user-reviewed PDF. HereForWork hash-binds the file
 when saved and revalidates it on use. It is used only when PDF rendering fails after HTML
 and fact checks, and successful preparations identify it as an untailored user-reviewed
 fallback. The personal path and PDF are never committed to this repository.
