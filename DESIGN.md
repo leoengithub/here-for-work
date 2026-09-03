@@ -178,7 +178,7 @@ Every new component starts with a shadcn registry search. When the registry prov
 
 ### Navigation
 
-Primary navigation remains compact and familiar. Active state combines Quiet Ink, weight, and a Signal Lime marker. Settings stays a secondary utility action rather than a third primary destination and uses the established Hugeicons settings icon with an accessible label and 44-pixel target.
+Primary navigation remains compact and familiar. Active state combines Quiet Ink, weight, and a Signal Lime marker. Settings stays a secondary utility action rather than a third primary destination: it owns configuration, diagnostics, and user-initiated maintenance/lifecycle utilities such as backup, export, tests, and quit, but never operational attention or recovery. It uses the established Hugeicons settings icon with an accessible label and 44-pixel target.
 
 The production shell keeps this navigation in a fixed 3.5rem top bar. At narrow widths the descriptive brand line yields first, while Queue and Applications remain visible and keyboard reachable; Settings remains a labeled icon action.
 
@@ -196,7 +196,7 @@ The shadcn Card registry primitive was inspected before this pattern was impleme
 
 ### Queue operational states
 
-Operational truth sits above the role list with `aria-live="polite"` and respects reduced motion. Evaluating uses the unchanged shadcn Spinner with a count and elapsed start time, without an ETA. Quantified completed/total work uses the unchanged shadcn Progress component. Waiting uses a clock and last successful run. Blocked or action-required work uses an alert icon, count, and concise explanation, then lists `preQueueRoles` with `state=needs_attention` in a separate attention group. Each row shows title, company, and a plain reason. There is currently no safe role-scoped recovery command, so rows do not invent buttons or route the user to Settings; a typed `global_reconcile` descriptor may expose one group-level retry, while `repair_career_ops` and `none` remain diagnostic. True idle uses the unchanged shadcn Empty pattern and manual import action.
+Operational truth sits above the role list with `aria-live="polite"` and respects reduced motion. Evaluating uses the unchanged shadcn Spinner with a count and elapsed start time, without an ETA. Quantified completed/total work uses the unchanged shadcn Progress component. Waiting uses a clock and last successful run. Blocked or action-required work uses an alert icon, count, and concise explanation, then lists `preQueueRoles` with `state=needs_attention` in a separate attention group. Each row shows title, company, and a plain reason. There is currently no safe role-scoped recovery command, so rows do not invent per-row buttons or route the user to Settings; a typed `global_reconcile` descriptor exposes one group-level retry when safe, while `repair_career_ops` and `none` remain diagnostic. True idle uses the unchanged shadcn Empty pattern and manual import action.
 
 ## Do's and Don'ts
 

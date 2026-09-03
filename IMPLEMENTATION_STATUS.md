@@ -178,7 +178,7 @@ on `origin/main`.
   different model result. Long provider commands run asynchronously so the window and
   Cancel action remain responsive.
 - The renderer follows the approved full-width Queue / Applications information
-  architecture with secondary Settings controls and no Activity tab. Settings is configuration and diagnostics only; actionable role work remains in Queue. Applications keeps
+  architecture with secondary Settings controls and no Activity tab. Settings owns configuration, diagnostics, and user-initiated maintenance/lifecycle utilities; operational attention and recovery remain in Queue. Applications keeps
   one current row per role and opens the formatted career-ops Markdown report in a
   right-side details panel rather than showing a question-answer log.
 - Queue cards reserve the first line for the role title, keep source-backed age and
