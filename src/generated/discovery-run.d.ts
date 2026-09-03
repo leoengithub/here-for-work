@@ -78,6 +78,9 @@ export interface Evidence {
 export interface Scored {
   status: "scored";
   scale: "career_ops_1_to_5";
+  /**
+   * Finite native career-ops score from 1 through 5; preserve the numeric IEEE-754 value without rounding.
+   */
   value: number;
   authority: "career-ops";
   sourceVersion: string;
