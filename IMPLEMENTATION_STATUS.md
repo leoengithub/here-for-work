@@ -25,7 +25,7 @@ capability. The current post-import Apple Silicon package includes the typed dis
 import, exact manifest, and integrated browser source; it was rebuilt, strict-signature
 verified, installed at `/Users/leo/Desktop/HereForWork.app`, and passed a read-only
 Queue/System launch/navigation smoke check. No historical backlog was imported and no live
-form action was executed. No push is claimed.
+form action was executed. Repository delivery is published on `origin/main`.
 
 The Greenhouse and Lever evidence in `evidence/HFW-BROWSER-25` is an isolated,
 reversible public-form observation using synthetic values. It proves current page shape,
@@ -133,7 +133,8 @@ Current source validation passed on 2026-09-03: frontend 93 tests, adapter 53,
 discovery-contract 15, Rust 125 plus 4, typechecks, contract checks, extension build,
 Clippy, and formatting. The post-import package build, strict-signature verification,
 installation, and read-only Queue/System launch smoke also passed. The historical backlog
-remains unimported, no live form action was executed, and no push is claimed.
+remains unimported, no live form action was executed, and repository delivery is published
+on `origin/main`.
 
 ## Verified implementation evidence
 

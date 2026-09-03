@@ -33,7 +33,8 @@ pre-migration backup, restore preflight, redacted diagnostics, provider/native-h
 boundary tests, and the approved full-width Queue / Applications information
 architecture with secondary System controls. This package was rebuilt after the typed
 incremental-import update, strict-signature verified, and installed at
-`/Users/leo/Desktop/HereForWork.app` for the local personal proof. No push is claimed.
+`/Users/leo/Desktop/HereForWork.app` for the local personal proof. Repository delivery is
+published on `origin/main`.
 The real Ashby inspection, Codex preparation, career-ops answer persistence, and explicitly
 authorized fill/read-back/release paths now pass. Only verified Name and Email were filled;
 all other fields and the user-owned terminal action remained untouched. Greenhouse and
@@ -96,7 +97,8 @@ Current source validation on 2026-09-03 passed: frontend 93 tests, adapter 53,
 discovery-contract 15, Rust 125 plus 4, typechecks, contract checks, extension build,
 Clippy, and formatting. The post-import package build, strict-signature verification,
 installation, and read-only Queue/System launch smoke also passed. The historical backlog
-remains unimported, no live form action was executed, and no push is claimed.
+remains unimported, no live form action was executed, and repository delivery is published
+on `origin/main`.
 
 ## Local validation
 
