@@ -5154,13 +5154,14 @@ impl Store {
         )?;
         let pre_queue_roles = pre_queue_statement
             .query_map([], |row| {
+                let state = row.get::<_, String>(3)?;
                 let reason = row.get::<_, String>(4)?;
                 Ok(PreQueueRoleSummary {
                     role_id: row.get(0)?,
                     company: row.get(1)?,
                     title: row.get(2)?,
-                    state: row.get(3)?,
-                    recovery: PreQueueRecovery::for_reason(&reason),
+                    state: state.clone(),
+                    recovery: PreQueueRecovery::for_state_and_reason(&state, &reason),
                     reason,
                     attempt: row.get(5)?,
                     updated_at: row.get(6)?,
@@ -7642,6 +7643,10 @@ mod tests {
         assert!(dashboard.roles.is_empty());
         assert_eq!(dashboard.pre_queue_roles.len(), 1);
         assert_eq!(dashboard.pre_queue_roles[0].state, "awaiting_evaluation");
+        assert_eq!(
+            dashboard.pre_queue_roles[0].recovery.scope,
+            crate::domain::PreQueueRecoveryScope::None
+        );
         assert_eq!(dashboard.handled_count, 0);
         let error = store
             .begin_preparation(&dashboard.pre_queue_roles[0].role_id, "codex")
@@ -7931,7 +7936,7 @@ mod tests {
         assert_eq!(held.pre_queue_roles[0].reason, "source_identity_changed");
         assert_eq!(
             held.pre_queue_roles[0].recovery.scope,
-            crate::domain::PreQueueRecoveryScope::RepairCareerOps
+            crate::domain::PreQueueRecoveryScope::None
         );
 
         allow_all_test_roles(&mut store);

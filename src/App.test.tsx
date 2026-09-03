@@ -619,6 +619,7 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
 
     expect(screen.getByRole("heading", { name: "Queue filters" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Reconcile history" })).not.toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "queue" })).toHaveAttribute("aria-selected", "false");
     expect(screen.getByRole("tab", { name: "applications" })).toHaveAttribute("aria-selected", "false");
     expect(screen.getByRole("checkbox", { name: "Include remote roles" })).toBeInTheDocument();

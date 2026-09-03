@@ -799,7 +799,6 @@ function SystemPanel({
   health,
   busy,
   onRefresh,
-  onReconcile,
   queueFilters,
   onQueueFiltersChange,
   onSaveQueueFilters,
@@ -838,7 +837,6 @@ function SystemPanel({
   health: IntegrationHealth | null;
   busy: boolean;
   onRefresh: () => void;
-  onReconcile: () => void;
   queueFilters: QueueFilters;
   onQueueFiltersChange: (filters: QueueFilters) => void;
   onSaveQueueFilters: () => void;
@@ -916,24 +914,6 @@ function SystemPanel({
         <p className="system-panel__empty">Run a check to verify the local adapter and provider CLIs.</p>
       )}
 
-      <div className="history-control">
-        <div>
-          <h3>Canonical application history</h3>
-          <p>
-            {dashboard.handledCount > 0
-              ? `${dashboard.handledCount} discovered roles are already represented in career-ops and hidden from the new queue.`
-              : "Reconcile before preparing a role so prior applications never reappear as new."}
-          </p>
-        </div>
-        <Button
-
-          type="button"
-          onClick={onReconcile}
-          disabled={busy || health?.careerOps.ready !== true}
-        >
-          Reconcile history
-        </Button>
-      </div>
       <section className="queue-runtime-settings" aria-labelledby="queue-runtime-settings-title">
         <div>
           <h3 id="queue-runtime-settings-title">Queue settings</h3>
@@ -1852,7 +1832,6 @@ export function App() {
           health={health}
           busy={busy}
           onRefresh={() => void refreshHealth()}
-          onReconcile={() => void reconcileHistory()}
           queueFilters={queueFiltersDraft ?? dashboard.queueFilters}
           onQueueFiltersChange={setQueueFiltersDraft}
           onSaveQueueFilters={() => void persistQueueFilters()}

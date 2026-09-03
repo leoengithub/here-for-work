@@ -122,33 +122,45 @@ pub enum PreQueueRecoveryScope {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PreQueueRecoveryAction {
+    ReconcileApplicationHistory,
+    RepairCareerOps,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct PreQueueRecovery {
     pub scope: PreQueueRecoveryScope,
-    pub action: Option<String>,
+    pub action: Option<PreQueueRecoveryAction>,
 }
 
 impl PreQueueRecovery {
-    pub fn for_reason(reason: &str) -> Self {
+    pub fn for_state_and_reason(state: &str, reason: &str) -> Self {
+        if state != "needs_attention" {
+            return Self {
+                scope: PreQueueRecoveryScope::None,
+                action: None,
+            };
+        }
         let (scope, action) = match reason {
             "canonical_history_unavailable" | "evaluation_compatibility_changed" => (
                 PreQueueRecoveryScope::GlobalReconcile,
-                Some("reconcile_application_history".to_string()),
+                Some(PreQueueRecoveryAction::ReconcileApplicationHistory),
             ),
-            "evaluation_result_invalid_or_stale" => (
+            "evaluation_result_invalid_or_stale" | "canonical_evaluation_requires_refresh" => (
                 PreQueueRecoveryScope::GlobalReconcile,
-                Some("reconcile_application_history".to_string()),
+                Some(PreQueueRecoveryAction::ReconcileApplicationHistory),
             ),
             "canonical_match_missing_or_ambiguous"
             | "source_identity_changed"
             | "canonical_status_not_evaluated"
             | "evaluation_receipt_pointer_unreadable"
             | "evaluation_result_identity_mismatch"
-            | "canonical_evaluation_requires_refresh"
             | "evaluation_result_capability_unavailable"
             | "canonical_evaluation_missing_executor_unavailable" => (
                 PreQueueRecoveryScope::RepairCareerOps,
-                Some("repair_career_ops".to_string()),
+                Some(PreQueueRecoveryAction::RepairCareerOps),
             ),
             _ => (PreQueueRecoveryScope::None, None),
         };
@@ -1458,7 +1470,7 @@ mod capability_manifest_tests {
 
 #[cfg(test)]
 mod pre_queue_recovery_tests {
-    use super::{PreQueueRecovery, PreQueueRecoveryScope};
+    use super::{PreQueueRecovery, PreQueueRecoveryAction, PreQueueRecoveryScope};
 
     #[test]
     fn every_emitted_attention_reason_has_a_typed_recovery_scope() {
@@ -1466,6 +1478,7 @@ mod pre_queue_recovery_tests {
             "canonical_history_unavailable",
             "evaluation_compatibility_changed",
             "evaluation_result_invalid_or_stale",
+            "canonical_evaluation_requires_refresh",
         ];
         let career_ops = [
             "canonical_match_missing_or_ambiguous",
@@ -1473,35 +1486,53 @@ mod pre_queue_recovery_tests {
             "canonical_status_not_evaluated",
             "evaluation_receipt_pointer_unreadable",
             "evaluation_result_identity_mismatch",
-            "canonical_evaluation_requires_refresh",
             "evaluation_result_capability_unavailable",
             "canonical_evaluation_missing_executor_unavailable",
         ];
 
         for reason in global {
-            let recovery = PreQueueRecovery::for_reason(reason);
+            let recovery = PreQueueRecovery::for_state_and_reason("needs_attention", reason);
             assert_eq!(
                 recovery.scope,
                 PreQueueRecoveryScope::GlobalReconcile,
                 "{reason}"
             );
             assert_eq!(
-                recovery.action.as_deref(),
-                Some("reconcile_application_history")
+                recovery.action,
+                Some(PreQueueRecoveryAction::ReconcileApplicationHistory)
             );
         }
         for reason in career_ops {
-            let recovery = PreQueueRecovery::for_reason(reason);
+            let recovery = PreQueueRecovery::for_state_and_reason("needs_attention", reason);
             assert_eq!(
                 recovery.scope,
                 PreQueueRecoveryScope::RepairCareerOps,
                 "{reason}"
             );
-            assert_eq!(recovery.action.as_deref(), Some("repair_career_ops"));
+            assert_eq!(
+                recovery.action,
+                Some(PreQueueRecoveryAction::RepairCareerOps)
+            );
         }
 
-        let unknown = PreQueueRecovery::for_reason("unrecognized_reason");
+        let unknown =
+            PreQueueRecovery::for_state_and_reason("needs_attention", "unrecognized_reason");
         assert_eq!(unknown.scope, PreQueueRecoveryScope::None);
         assert_eq!(unknown.action, None);
+
+        let waiting = PreQueueRecovery::for_state_and_reason(
+            "awaiting_evaluation",
+            "canonical_history_unavailable",
+        );
+        assert_eq!(waiting.scope, PreQueueRecoveryScope::None);
+        assert_eq!(waiting.action, None);
+
+        let serialized = serde_json::to_value(PreQueueRecovery::for_state_and_reason(
+            "needs_attention",
+            "canonical_evaluation_requires_refresh",
+        ))
+        .expect("recovery descriptor serializes");
+        assert_eq!(serialized["scope"], "global_reconcile");
+        assert_eq!(serialized["action"], "reconcile_application_history");
     }
 }
