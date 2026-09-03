@@ -7861,7 +7861,11 @@ mod tests {
             .mark_evaluation_sync_unavailable(&role.role_id, "canonical_history_unavailable")
             .unwrap();
         assert!(store.dashboard().unwrap().roles.is_empty());
-        assert!(store.claim_evaluation_sync(&role.role_id, &input_hash).unwrap());
+        assert!(
+            store
+                .claim_evaluation_sync(&role.role_id, &input_hash)
+                .unwrap()
+        );
 
         let evaluation = test_evaluation(&role, "Research first", "High Confidence", "High");
         store
