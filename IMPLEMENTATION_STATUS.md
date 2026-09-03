@@ -1,12 +1,13 @@
 # Implementation status
 
 Date: 2026-09-03
-Stage: consumption-side direction integrated; primary browser contract implemented but release-blocked by the extension permission gate
+Stage: consumption-side direction integrated; primary browser contract and Applied retirement integrated in source; fresh package validation pending
 
 ## Current direction closeout
 
-The current HereForWork `main` includes the approved consumption-side direction through
-the browser safety series ending at `8b683e3`. Queue is gated on a canonical career-ops
+The current HereForWork source includes the approved consumption-side direction through
+the browser safety series ending at `8b683e3`, plus the integrated guard-permission and
+Applied-retirement changes. Queue is gated on a canonical career-ops
 evaluation receipt and presents career-ops' native 1–5 result with decision evidence.
 Prepare reuses only exact, hash-bound HereForWork preparation bundles and refreshes
 missing, stale, or failed artifacts conservatively. Applied is terminal: after the user
@@ -14,12 +15,14 @@ confirms a physical submission, only the canonical tracking write may be retried
 
 The primary extension driver now has a durable role-scoped lease, exact per-field result
 cardinality, settled read-back verification, bounded retry/reconnect behavior, typed
-multi-step/iframe/modal dispositions, and a no-finalization guard. However, the shipped
-extension manifest still lacks the Chrome `scripting` permission required to install and
-remove that guard in the page's main world. The driver therefore fails closed with
-`finalization_guard_permission_required` before inspection. This is a temporary release
-blocker, not achieved browser functionality; the permission change and a fresh package
-validation remain outstanding.
+multi-step/iframe/modal dispositions, and a no-finalization guard. The source and extension
+manifest declare the narrowly scoped Chrome `scripting` permission required for that guard.
+Before inspection and fill, the service worker installs it in the selected application tab's
+page `MAIN` world. Only verified `release_for_review` restores the original
+`submit`/`requestSubmit` descriptors and captured listeners, removes the guard, and releases
+the lease for human review. This permission adds no browser command, host access, or submission
+capability. A fresh package validation is still a release verification step; no current package
+build is claimed by this closeout.
 
 The Greenhouse and Lever evidence in `evidence/HFW-BROWSER-25` is an isolated,
 reversible public-form observation using synthetic values. It proves current page shape,
@@ -33,8 +36,12 @@ The approved career-ops PDF threshold target remains `3.5`; the effective upstre
 fallback is still `3.0` because no explicit setting is configured. HereForWork reads and
 reports that value and never rewrites career-ops. Existing scheduled tasks remain the
 authoritative executors until the versioned-result, shadow, canary, rollback, and
-explicit per-source cutover gates pass. Role-scoped retirement cleanup is also pending
-explicit authorization and must not be inferred from the terminal-state work.
+explicit per-source cutover gates pass. Canonical Applied reconciliation now retires active
+work for that role transactionally and idempotently: queued/preparing jobs are cancelled,
+pending/leased browser commands become terminal `canonical_terminal` commands, and application
+sessions become released `applied_recorded` sessions with fallback disabled. The role,
+completed preparation rows, artifact paths/hashes, and completed browser evidence remain
+preserved; replay does not duplicate effects.
 
 ## Historical gap snapshot — before the 2026-09-03 closeout
 
@@ -237,6 +244,11 @@ pre-certify semantic compatibility.
   writer without reopening its form. The rebuilt packaged app reconciled the new tracker
   row, increased its hidden-history count, and removed the role from Queue. No browser
   command or page action was issued during reconciliation.
+- Reconciliation of a canonical Applied row now retires only that role's active work in one
+  database transaction. Queued/preparing jobs are cancelled, pending/leased browser commands
+  are marked permanently `canonical_terminal`, sessions become `applied_recorded` with their
+  lease released, and completed jobs/commands plus artifact identities remain unchanged. The
+  regression proof covers replay-safe behavior and preservation of rows/evidence.
 - Multi-step inspection now clears prior field markers and excludes controls hidden by
   attributes, ARIA, inline style, or computed style. A refill reuses an existing
   `review_required` browser session instead of reopening the original URL and resetting
@@ -259,9 +271,9 @@ proven truthful. Match scoring remains career-ops-owned and must be presented on
   source revisions; the browser evidence is recorded separately in
   `evidence/HFW-BROWSER-25/README.md`.
 - Rust formatting and Clippy with warnings denied pass for the current source revision.
-- A fresh release package is still required after the extension permission gate is
-  resolved. The previously built ad-hoc-signed Apple Silicon app must not be described
-  as proving the current browser flow while the manifest lacks `scripting`.
+- A fresh release package is still required after the latest source integrations. The
+  previously built ad-hoc-signed Apple Silicon app is historical package evidence and must
+  not be described as proving the current browser flow.
 
 ## Extension evidence
 
@@ -288,10 +300,12 @@ proven truthful. Match scoring remains career-ops-owned and must be presented on
   mounted form; neither wait can introduce a finalization command.
 - Recovery attempts remain visible for audit, but only the newest browser session for a
   preparation exposes the user-confirmed outcome control.
-- The current extension package fails closed with
-  `finalization_guard_permission_required` because `packages/extension/manifest.json`
-  does not yet declare `scripting`. Adding and validating that narrowly scoped permission
-  is a release prerequisite; it does not enable submission or any arbitrary page command.
+- The extension manifest declares `scripting` only for the main-world no-finalization guard.
+  The service worker installs it before inspection/fill in the selected application tab and
+  restores the original `submit`/`requestSubmit` descriptors and listeners only after verified
+  release for human review. It does not enable submission, arbitrary page commands, or wider
+  host access. If the API is unavailable at runtime, the driver still fails closed with the
+  bounded `finalization_guard_permission_required` diagnostic.
 
 ## Manual intervention checkpoints
 
@@ -340,9 +354,9 @@ their own scoped authority before transmitting personal data.
 
 The typed writable adapter runs only fixed career-ops entry points. The generic public-HTTPS
 path is live-proven with individual-field skip/handoff behavior, while the separate
-review-only browser fallback remains unavailable. The next browser checkpoint is a fresh
-package validation after the `scripting` permission gate; native-host Greenhouse and Lever
-E2E proofs remain separate, explicitly no-submit work.
+review-only browser fallback remains unavailable because no public career-ops lease/result
+contract exists. The next browser checkpoint is fresh package validation for the integrated
+source; native-host Greenhouse and Lever E2E proofs remain separate, explicitly no-submit work.
 Scheduled workflows, Gmail, credentials, and career-ops profile facts remain outside
 automated test mutation. The required 14-day shadow, promotion evidence, and rollback
 exercise have not been completed, so no scheduling cutover may be inferred from the

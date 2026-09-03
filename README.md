@@ -9,7 +9,7 @@ HereForWork is a local-first, review-before-submit job-search companion. It is i
 Personal-proof implementation. The stack and implementation direction are recorded in
 [STACK_SELECTION.md](STACK_SELECTION.md) and [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md).
 
-The last verified Apple Silicon package is built at:
+The last recorded Apple Silicon proof package is built at:
 
 ```text
 src-tauri/target/release/bundle/macos/HereForWork.app
@@ -27,18 +27,23 @@ fills and grounded suggestions have been written through career-ops' fixed
 application-answer writer. If that write fails, retry resumes at persistence and does
 not inspect or fill the page again.
 
-The current package also contains run and browser-command leases with bounded retries,
+The recorded proof package also contains run and browser-command leases with bounded retries,
 pre-migration backup, restore preflight, redacted diagnostics, provider/native-host
 boundary tests, and the approved full-width Queue / Applications information
-architecture with secondary System controls. The rebuilt package passes automated checks and code-signature verification.
+architecture with secondary System controls. That package passed its recorded automated checks
+and code-signature verification; this document does not claim a fresh package build after the
+latest source integrations.
 The real Ashby inspection, Codex preparation, career-ops answer persistence, and explicitly
 authorized fill/read-back/release paths now pass. Only verified Name and Email were filled;
 all other fields and the user-owned terminal action remained untouched. Greenhouse and
 Lever have isolated synthetic public-form inspect/read-back evidence with Submit untouched,
 but not native-host/extension E2E evidence because the QA browser exposes WebDriver. The
-current extension package also fails closed with `finalization_guard_permission_required`
-until its manifest declares the narrowly scoped Chrome `scripting` permission; a fresh
-package validation remains required.
+source and extension manifest now include the narrowly scoped Chrome `scripting` permission
+needed for the no-finalization guard. It is used only in the already selected application
+tab: the guard is installed in the page's `MAIN` world before inspection/fill and restores
+the original `submit`/`requestSubmit` descriptors and listeners only after verified
+`release_for_review`. It adds no browser command, host access, or submission capability.
+Fresh package validation remains a release verification step and is not claimed here.
 
 The first integration uses career-ops as the sole authority for verified profile data, native 1–5 match scoring, application artifacts and their provenance, grounded answers, and canonical tracking. HereForWork owns orchestration, the unified review queue, user-triggered preparation, notifications, retries, and the browser workflow. Scheduling is an end-state HereForWork responsibility; the existing scheduled tasks remain the authoritative executors until each source completes the staged, explicitly approved migration in [SCHEDULING_MIGRATION.md](SCHEDULING_MIGRATION.md).
 
@@ -67,6 +72,7 @@ The first integration uses career-ops as the sole authority for verified profile
 - CV uploads use the truthful public filename `Leonardo_Gomez_Frontend_Engineer.pdf`; internal preparation provenance still distinguishes tailored generation from the user-reviewed fallback.
 - HereForWork never submits an application or sends a message for the user.
 - After the user physically submits and confirms the outcome, HereForWork records canonical Applied through career-ops. A tracking failure retries only that writer and never reopens or repeats the form. Applied ends the HereForWork workflow; follow-up, outreach, reply monitoring, interviews, and post-application CRM are out of scope, although the evaluation report may contain interview preparation.
+- When canonical Applied is reconciled, active role-scoped preparation and browser work is retired transactionally and idempotently: queued/preparing work is cancelled, pending or leased browser commands are terminalized, and application sessions are released as `applied_recorded`. Completed preparation rows, artifact paths/hashes, and completed browser evidence remain preserved.
 
 Read [PRODUCT.md](PRODUCT.md) before making product or interface decisions.
 

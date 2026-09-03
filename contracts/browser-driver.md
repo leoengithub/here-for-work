@@ -46,12 +46,15 @@ the driver lease. `focus_review` only focuses the already released tab; it canno
 release, submit, or create a replacement tab when the reviewed tab is gone.
 
 The finalization guard blocks captured submit/click events plus programmatic
-`HTMLFormElement.submit()` and `requestSubmit()` calls from page listeners while fill events are
-dispatched. Installing and restoring that guard in the page's main JavaScript world uses the
-extension's declared `scripting` permission. That permission is used only to install and restore
-this guard in the already selected application tab; it does not add a browser command, widen host
-access, or permit submission. If the API is unavailable, the driver fails closed with
-`finalization_guard_permission_required` before inspection.
+`HTMLFormElement.submit()` and `requestSubmit()` calls from page listeners while the driver owns
+the form. Before inspection and any fill, the service worker installs the guard in the already
+selected application tab's page `MAIN` world using the extension's declared `scripting`
+permission. After all required fields and persistence are verified, `release_for_review` restores
+the original `submit`/`requestSubmit` descriptors and captured listeners, removes the guard, and
+durably releases the lease for human review. The permission is used only for that install/restore
+pair; it does not add a browser command, widen host access, or permit submission. If the API is
+unavailable, the driver fails closed with `finalization_guard_permission_required` before
+inspection.
 
 A hard inspection failure or a fill-plan rejection proven to occur before mutation may release
 the extension lease and mark a future fallback eligible. A partial fill, read-back uncertainty,
