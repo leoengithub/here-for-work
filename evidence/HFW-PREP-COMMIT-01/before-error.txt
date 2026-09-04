@@ -1,0 +1,13 @@
+Toast / adapter_error stage:
+  preparation.result.commit input contains an unknown field.
+
+Live role (id only): 5b2a8484-d54b-40f2-b475-3aa572cdc803
+Observed job state (prior to adapter_ready hotfix cleanup / this fix):
+  action_required / adapter_error / preparation.result.commit
+
+Root cause:
+  AdapterConfig::commit_preparation serialized full PreparationRoleInput
+  (including trackerId, reportPath, reportSha256, upstreamRevision,
+  evaluationCompatibilityFingerprint, artifactCompatibilityFingerprint)
+  into preparation.result.commit. Adapter assertInputKeys allowlist rejects
+  those context-only fields.

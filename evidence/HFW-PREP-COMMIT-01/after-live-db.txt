@@ -1,0 +1,7 @@
+          role_id = 5b2a8484-d54b-40f2-b475-3aa572cdc803
+          company = BCNC GROUP
+            title = Senior React Frontend Developer
+preparation_state = not_started
+        eval_sync = needs_decision
+       latest_job = cancelled//
+adapter_ready = true

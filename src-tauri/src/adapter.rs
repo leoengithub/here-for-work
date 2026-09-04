@@ -528,22 +528,24 @@ impl AdapterConfig {
         canonical_evaluation: Value,
         artifact_plan: Value,
     ) -> Result<PreparationCommit, AdapterError> {
-        let mut payload = serde_json::to_value(input)
-            .expect("preparation role input serializes")
-            .as_object()
-            .cloned()
-            .expect("preparation input is an object");
-        payload.insert(
-            "eventDate".to_string(),
-            Value::String(event_date.to_string()),
-        );
-        payload.insert("job".to_string(), job);
-        payload.insert("result".to_string(), result);
-        payload.insert("canonicalEvaluation".to_string(), canonical_evaluation);
-        payload.insert("artifactPlan".to_string(), artifact_plan);
+        // Adapter allowlist for preparation.result.commit is narrower than
+        // PreparationRoleInput (used by preparation.context.get). Do not dump
+        // tracker/report/fingerprint fields into the commit payload.
+        let payload = json!({
+            "preparationId": input.preparation_id,
+            "eventDate": event_date,
+            "company": input.company,
+            "title": input.title,
+            "location": input.location,
+            "url": input.url,
+            "job": job,
+            "result": result,
+            "canonicalEvaluation": canonical_evaluation,
+            "artifactPlan": artifact_plan,
+        });
         let value = self.request_with_timeout_and_environment(
             "preparation.result.commit",
-            Value::Object(payload),
+            payload,
             Duration::from_secs(240),
             fallback_configuration,
         )?;
@@ -791,7 +793,7 @@ pub fn discover_executable(home: &std::path::Path, name: &str) -> Option<PathBuf
 mod evaluation_pointer_tests {
     use super::{AdapterConfig, HistoryRecord, PreparationRoleInput};
     use crate::provider::bind_context_hash;
-    use serde_json::json;
+    use serde_json::{Value, json};
     use sha2::{Digest, Sha256};
 
     fn record(report: &str) -> HistoryRecord {
@@ -939,5 +941,52 @@ fi
         assert!(requests.contains("preparation.result.commit"));
         assert!(requests.contains(r#""contractVersion":2"#));
         assert!(requests.contains(&format!(r#""contextHash":"{}""#, context_hash)));
+
+        let commit_line = requests
+            .lines()
+            .find(|line| line.contains("preparation.result.commit"))
+            .expect("commit request was logged");
+        let commit_request: Value = serde_json::from_str(commit_line).unwrap();
+        let commit_input = commit_request
+            .get("input")
+            .and_then(Value::as_object)
+            .expect("commit request has input object");
+        let allowed = [
+            "preparationId",
+            "eventDate",
+            "company",
+            "title",
+            "location",
+            "url",
+            "job",
+            "result",
+            "canonicalEvaluation",
+            "artifactPlan",
+        ];
+        for key in commit_input.keys() {
+            assert!(
+                allowed.contains(&key.as_str()),
+                "preparation.result.commit must not send unknown field `{key}`"
+            );
+        }
+        for key in allowed {
+            assert!(
+                commit_input.contains_key(key),
+                "preparation.result.commit missing required field `{key}`"
+            );
+        }
+        for forbidden in [
+            "trackerId",
+            "reportPath",
+            "reportSha256",
+            "upstreamRevision",
+            "evaluationCompatibilityFingerprint",
+            "artifactCompatibilityFingerprint",
+        ] {
+            assert!(
+                !commit_input.contains_key(forbidden),
+                "preparation.result.commit must not include context-only field `{forbidden}`"
+            );
+        }
     }
 }

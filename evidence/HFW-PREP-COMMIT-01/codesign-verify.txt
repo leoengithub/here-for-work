@@ -1,0 +1,6 @@
+--prepared:/Users/leo/Desktop/HereForWork.app/Contents/MacOS/here-for-work-native-host
+--validated:/Users/leo/Desktop/HereForWork.app/Contents/MacOS/here-for-work-native-host
+--prepared:/Users/leo/Desktop/HereForWork.app/Contents/MacOS/reset-stuck-preparations
+--validated:/Users/leo/Desktop/HereForWork.app/Contents/MacOS/reset-stuck-preparations
+/Users/leo/Desktop/HereForWork.app: valid on disk
+/Users/leo/Desktop/HereForWork.app: satisfies its Designated Requirement
