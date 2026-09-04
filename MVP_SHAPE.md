@@ -181,6 +181,8 @@ Dismiss immediately records Discarded through the career-ops adapter, removes th
 
 **Dismiss in Applications** is distinct from Undo dismissal: it is available only when preparation failed or the live form is ready for review. After inline confirmation, it records the unsuitable role as Discarded, deletes only generated preparation artifacts, clears HereForWork's preparation and browser state, and removes the application row. A failed canonical write preserves the preparation and its files for retry. It is unavailable while work is active, while Applied tracking is pending, or after Applied has been confirmed.
 
+**I applied elsewhere in Applications** records Applied through the career-ops adapter when the user submitted outside HereForWork (for example LinkedIn Easy Apply). It is available on idle Applications rows (`action_required` or `completed`) when no application browser session is active or awaiting outcome confirmation. After inline confirmation it keeps generated preparation files, retires HereForWork preparation and browser work, cancels the Applications row, and never submits a form. A failed canonical write preserves the row for tracking retry only. Prefer **I submitted this application** when a live HereForWork browser session is waiting for outcome confirmation.
+
 ## Adapter Boundary
 
 career-ops remains the sole source of truth for verified profile facts, preferences, authorization-aware evaluation and match scoring, reports, tailored documents and their provenance, grounded answers, and canonical application history.

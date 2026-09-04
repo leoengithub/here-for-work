@@ -1,6 +1,6 @@
 # External Applied from Applications Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Let idle Applications rows record canonical career-ops **Applied** via **I applied elsewhere** when the user applied outside HereForWork (e.g. LinkedIn Easy Apply), without a browser session.
 
@@ -52,7 +52,7 @@
   - `Store::complete_applied_effect_for_role(&mut self, role_id: &str, idempotency_key: &str, tracker_id: i64, canonical_status: &str) -> Result<(), StoreError>`
   - `PreparationSummary.applied_tracking_pending: bool` (serde `appliedTrackingPending`)
 
-- [ ] **Step 1: Add failing store tests**
+- [x] **Step 1: Add failing store tests**
 
 Append near other Applied tests in `store.rs`:
 
@@ -189,13 +189,13 @@ fn external_applied_tracking_failure_sets_pending_flag_for_retry() {
 
 Adjust helpers (`queue_and_claim`, `DATASET` tracker) to match existing test fixtures in the same module — if `canonical_tracker_id` is already set by `import_evaluated`, drop the explicit UPDATE.
 
-- [ ] **Step 2: Run tests — expect FAIL**
+- [x] **Step 2: Run tests — expect FAIL**
 
 Run: `corepack pnpm build:adapter && corepack pnpm build:extension && cargo test --manifest-path src-tauri/Cargo.toml --lib external_applied_`
 
 Expected: compile error / FAIL — methods missing.
 
-- [ ] **Step 3: Implement store methods**
+- [x] **Step 3: Implement store methods**
 
 Add to `PreparationSummary` in `domain.rs`:
 
@@ -241,13 +241,13 @@ Implement `complete_applied_effect_for_role`:
 7. Set `roles.preparation_state` to `prepared` if any job was previously `completed`, else `not_started`.
 8. Insert activity: `"The user confirmed an external application; career-ops recorded the canonical Applied outcome."`
 
-- [ ] **Step 4: Run tests — expect PASS**
+- [x] **Step 4: Run tests — expect PASS**
 
 Run: `cargo test --manifest-path src-tauri/Cargo.toml --lib external_applied_`
 
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src-tauri/src/domain.rs src-tauri/src/store.rs
@@ -269,7 +269,7 @@ EOF
 - Consumes: Task 1 store methods
 - Produces: `mark_application_applied` command; `markApplicationApplied(roleId): Promise<DashboardState>`
 
-- [ ] **Step 1: Add Tauri command**
+- [x] **Step 1: Add Tauri command**
 
 Mirror `confirm_application_applied` but role-scoped and return dashboard:
 
@@ -323,7 +323,7 @@ fn mark_application_applied(
 
 Register in `invoke_handler![..., mark_application_applied, ...]`.
 
-- [ ] **Step 2: Add `src/api.ts` wrapper**
+- [x] **Step 2: Add `src/api.ts` wrapper**
 
 ```ts
 export async function markApplicationApplied(roleId: string): Promise<DashboardState> {
@@ -332,7 +332,7 @@ export async function markApplicationApplied(roleId: string): Promise<DashboardS
 }
 ```
 
-- [ ] **Step 3: Type field on frontend**
+- [x] **Step 3: Type field on frontend**
 
 In `src/types.ts` `PreparationSummary`:
 
@@ -342,7 +342,7 @@ appliedTrackingPending: boolean;
 
 Update preview fixtures / any object literals constructing `PreparationSummary` to include `appliedTrackingPending: false` (or true for tracking-pending fixture).
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add src-tauri/src/lib.rs src/api.ts src/types.ts src/dev/applications-preview.ts
@@ -364,7 +364,7 @@ EOF
 - Consumes: `PreparationSummary.appliedTrackingPending`, browser session statuses
 - Produces: `canMarkAppliedElsewhere(item, latestSession, opts) -> boolean`
 
-- [ ] **Step 1: Write failing Vitest cases**
+- [x] **Step 1: Write failing Vitest cases**
 
 ```ts
 import { canMarkAppliedElsewhere } from "./App";
@@ -405,13 +405,13 @@ it("allows I applied elsewhere only for idle Applications rows without outcome s
 
 Ensure `preparationFixture` includes `appliedTrackingPending: false`.
 
-- [ ] **Step 2: Run — expect FAIL**
+- [x] **Step 2: Run — expect FAIL**
 
 Run: `corepack pnpm exec vitest run src/App.test.tsx -t "I applied elsewhere"`
 
 Expected: FAIL — export missing.
 
-- [ ] **Step 3: Implement helper**
+- [x] **Step 3: Implement helper**
 
 ```ts
 const ACTIVE_APPLICATION_BROWSER = new Set<BrowserSessionSummary["status"]>([
@@ -443,11 +443,11 @@ export function canMarkAppliedElsewhere(
 }
 ```
 
-- [ ] **Step 4: Run — expect PASS**
+- [x] **Step 4: Run — expect PASS**
 
 Run: `corepack pnpm exec vitest run src/App.test.tsx -t "I applied elsewhere"`
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/App.tsx src/App.test.tsx
@@ -469,7 +469,7 @@ EOF
 - Modify: `src/dev/applications-preview.ts`
 - Consumes: `canMarkAppliedElsewhere`, `markApplicationApplied`
 
-- [ ] **Step 1: Fixture + failing UI test**
+- [x] **Step 1: Fixture + failing UI test**
 
 In `applications-preview.ts`, ensure failed idle row exists; add `appliedTrackingPending: false` on all prep fixtures.
 
@@ -513,9 +513,9 @@ it("records external Applied from Applications inline confirm", async () => {
 
 Note: preview `failed` row `roleId` must match invoke expectation — read fixture helper for role id pattern.
 
-- [ ] **Step 2: Run — expect FAIL** (CTA missing)
+- [x] **Step 2: Run — expect FAIL** (CTA missing)
 
-- [ ] **Step 3: Implement UI**
+- [x] **Step 3: Implement UI**
 
 State (mirror dismiss):
 
@@ -545,13 +545,13 @@ Also add same CTA + confirm block in preparation Details when eligible (hide whe
 
 Toast on success optional: reuse existing outcome notice pattern if one exists for Applied; otherwise rely on row removal.
 
-- [ ] **Step 4: Run Vitest App suite**
+- [x] **Step 4: Run Vitest App suite**
 
 Run: `corepack pnpm exec vitest run src/App.test.tsx`
 
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/App.tsx src/App.test.tsx src/dev/applications-preview.ts
@@ -572,7 +572,7 @@ EOF
 - Create: `evidence/HFW-MARK-APPLIED-01/README.md`
 - Modify: `docs/superpowers/specs/2026-09-04-external-applied-from-applications-design.md` (status → implemented-in-progress)
 
-- [ ] **Step 1: Update MVP_SHAPE.md**
+- [x] **Step 1: Update MVP_SHAPE.md**
 
 After the Applications Dismiss paragraph, add:
 
@@ -580,7 +580,7 @@ After the Applications Dismiss paragraph, add:
 **I applied elsewhere in Applications** records Applied through the career-ops adapter when the user submitted outside HereForWork (for example LinkedIn Easy Apply). It is available on idle Applications rows (`action_required` or `completed`) when no application browser session is active or awaiting outcome confirmation. After inline confirmation it keeps generated preparation files, retires HereForWork preparation and browser work, cancels the Applications row, and never submits a form. A failed canonical write preserves the row for tracking retry only. Prefer **I submitted this application** when a live HereForWork browser session is waiting for outcome confirmation.
 ```
 
-- [ ] **Step 2: Evidence README**
+- [x] **Step 2: Evidence README**
 
 ```markdown
 # HFW-MARK-APPLIED-01 — External Applied from Applications
@@ -596,7 +596,7 @@ Idle Applications → **I applied elsewhere** → career-ops Applied; artifacts 
 Do not paste personal CV content or full tracker notes here.
 ```
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add MVP_SHAPE.md evidence/HFW-MARK-APPLIED-01/README.md docs/superpowers/specs/2026-09-04-external-applied-from-applications-design.md
@@ -614,7 +614,7 @@ EOF
 
 **Files:** none beyond branch push
 
-- [ ] **Step 1: Push + draft PR**
+- [x] **Step 1: Push + draft PR**
 
 ```bash
 git push -u origin HEAD
@@ -627,13 +627,13 @@ gh pr create --draft --title "feat: mark Applied from Applications (I applied el
 ## Test plan
 - [x] Rust `external_applied_*`
 - [x] Vitest Applications CTA
-- [ ] Manual: failed/idle prep → I applied elsewhere → Applied in career-ops; files remain
+- [x] Manual: failed/idle prep → I applied elsewhere → Applied in career-ops; files remain
 
 EOF
 )"
 ```
 
-- [ ] **Step 2: Stop for user acceptance** — no Desktop ship unless user asks; no merge without explicit OK.
+- [x] **Step 2: Stop for user acceptance** — no Desktop ship unless user asks; no merge without explicit OK.
 
 ---
 
