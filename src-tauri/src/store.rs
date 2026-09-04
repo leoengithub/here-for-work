@@ -29,6 +29,7 @@ const MAX_BROWSER_COMMAND_ATTEMPTS: i64 = 3;
 const MAX_EVALUATION_SYNC_ATTEMPTS: i64 = 3;
 const MAX_ACTIVE_PREPARATIONS: i64 = 2;
 const EVALUATION_LEASE_SECONDS: i64 = 120;
+const EVALUATION_EXECUTOR_LEASE_SECONDS: i64 = 3_600;
 const RUN_STEPS: [&str; 3] = ["discover", "reconcile", "notify"];
 const MAX_DISCOVERY_RUN_BYTES: usize = 2_000_000;
 const MAX_DISCOVERY_FINDINGS: usize = 1_000;
@@ -1100,7 +1101,7 @@ impl Store {
 
     pub fn evaluation_sync_roles(&self) -> Result<Vec<EvaluationSyncRole>, StoreError> {
         let mut statement = self.connection.prepare(
-            "SELECT r.id, r.company, r.title, r.canonical_status,
+            "SELECT r.id, r.company, r.title, r.application_url, r.canonical_status,
                     r.canonical_tracker_id,
                     r.normalized_key,
                     COALESCE((
@@ -1115,14 +1116,15 @@ impl Store {
         )?;
         statement
             .query_map([], |row| {
-                let normalized_key = row.get::<_, String>(5)?;
-                let occurrences = row.get::<_, String>(6)?;
+                let normalized_key = row.get::<_, String>(6)?;
+                let occurrences = row.get::<_, String>(7)?;
                 Ok(EvaluationSyncRole {
                     role_id: row.get(0)?,
                     company: row.get(1)?,
                     title: row.get(2)?,
-                    canonical_status: row.get(3)?,
-                    canonical_tracker_id: row.get(4)?,
+                    application_url: row.get(3)?,
+                    canonical_status: row.get(4)?,
+                    canonical_tracker_id: row.get(5)?,
                     source_identity_hash: format!(
                         "{:x}",
                         Sha256::digest(format!("{normalized_key}\n{occurrences}"))
@@ -1196,6 +1198,15 @@ impl Store {
         role_id: &str,
         input_hash: &str,
     ) -> Result<bool, StoreError> {
+        self.claim_evaluation_sync_with_lease(role_id, input_hash, EVALUATION_LEASE_SECONDS)
+    }
+
+    pub fn claim_evaluation_sync_with_lease(
+        &mut self,
+        role_id: &str,
+        input_hash: &str,
+        lease_seconds: i64,
+    ) -> Result<bool, StoreError> {
         let transaction = self.connection.transaction()?;
         let now = Utc::now();
         let current = transaction
@@ -1244,7 +1255,7 @@ impl Store {
               WHERE role_id = ?4",
             params![
                 input_hash,
-                (now + Duration::seconds(EVALUATION_LEASE_SECONDS)).to_rfc3339(),
+                (now + Duration::seconds(lease_seconds.max(1))).to_rfc3339(),
                 now.to_rfc3339(),
                 role_id
             ],

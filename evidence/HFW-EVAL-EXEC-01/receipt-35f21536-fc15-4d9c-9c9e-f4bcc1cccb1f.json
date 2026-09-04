@@ -1,0 +1,14 @@
+{
+  "roleId": "35f21536-fc15-4d9c-9c9e-f4bcc1cccb1f",
+  "company": "HASH",
+  "title": "Frontend Engineer, EU Remote",
+  "url": "https://hash.ai/careers",
+  "ok": false,
+  "startedAt": "2026-09-04T09:47:47.000Z",
+  "finishedAt": "2026-09-04T09:48:14.000Z",
+  "error": {
+    "code": "adapter_error",
+    "message": "Full A-G evaluation did not produce a canonical Evaluated tracker row (JD file contained only a generic careers-listing page (24 openings, no specific role selected) and WebFetch on https://hash.ai/careers confirmed no individual posting has description/requirements/responsibilities — no evaluable JD content exists.)."
+  },
+  "receipt": null
+}

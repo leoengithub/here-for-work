@@ -300,6 +300,7 @@ test("capabilities expose the fixed safety boundary", async () => {
     "capabilities.get",
     "health.check",
     "history.snapshot",
+    "evaluation.full_ag.run.v1",
     "evaluation.result.read.v1",
     "artifacts.inspect.v1",
     "profile.queue_filters.get",

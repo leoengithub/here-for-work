@@ -158,7 +158,10 @@ impl PreQueueRecovery {
             | "evaluation_receipt_pointer_unreadable"
             | "evaluation_result_identity_mismatch"
             | "evaluation_result_capability_unavailable"
-            | "canonical_evaluation_missing_executor_unavailable" => (
+            | "canonical_evaluation_missing_executor_unavailable"
+            | "evaluation_executor_failed"
+            | "evaluation_executor_receipt_invalid"
+            | "evaluation_executor_url_missing" => (
                 PreQueueRecoveryScope::RepairCareerOps,
                 Some(PreQueueRecoveryAction::RepairCareerOps),
             ),
@@ -709,6 +712,19 @@ pub struct EvaluationResultRead {
     pub role: EvaluationRoleIdentity,
     pub canonical: EvaluationCanonicalIdentity,
     pub evaluation: EvaluationSummary,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution: Option<EvaluationExecutionReceipt>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[allow(dead_code)]
+pub struct EvaluationExecutionReceipt {
+    pub surface: String,
+    pub offer_id: i64,
+    pub url: String,
+    pub executed: bool,
+    pub completed_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -822,6 +838,7 @@ pub struct EvaluationSyncRole {
     pub role_id: String,
     pub company: String,
     pub title: String,
+    pub application_url: Option<String>,
     pub source_identity_hash: String,
     pub canonical_status: Option<String>,
     pub canonical_tracker_id: Option<i64>,
@@ -888,14 +905,15 @@ impl CareerOpsCapabilityId {
     fn expected_interface_class(self) -> CareerOpsInterfaceClass {
         match self {
             Self::DiscoveryReverseAtsRunV1
+            | Self::EvaluationFullAgRunV1
             | Self::EvaluationResultReadV1
             | Self::ArtifactsInspectV1 => CareerOpsInterfaceClass::Conditional,
             Self::DiscoveryCompanyAtsPreviewV1 | Self::CanonicalAppliedWriteV1 => {
                 CareerOpsInterfaceClass::Contracted
             }
-            Self::LivenessRoleReadV1
-            | Self::EvaluationFullAgRunV1
-            | Self::BrowserReviewFallbackV1 => CareerOpsInterfaceClass::Missing,
+            Self::LivenessRoleReadV1 | Self::BrowserReviewFallbackV1 => {
+                CareerOpsInterfaceClass::Missing
+            }
         }
     }
 
@@ -903,14 +921,15 @@ impl CareerOpsCapabilityId {
         match self {
             Self::DiscoveryReverseAtsRunV1
             | Self::DiscoveryCompanyAtsPreviewV1
+            | Self::EvaluationFullAgRunV1
             | Self::EvaluationResultReadV1
             | Self::ArtifactsInspectV1 => matches!(
                 status,
                 CareerOpsCapabilityStatus::Degraded | CareerOpsCapabilityStatus::Unavailable
             ),
-            Self::LivenessRoleReadV1
-            | Self::EvaluationFullAgRunV1
-            | Self::BrowserReviewFallbackV1 => status == CareerOpsCapabilityStatus::Unavailable,
+            Self::LivenessRoleReadV1 | Self::BrowserReviewFallbackV1 => {
+                status == CareerOpsCapabilityStatus::Unavailable
+            }
             Self::CanonicalAppliedWriteV1 => matches!(
                 status,
                 CareerOpsCapabilityStatus::Degraded | CareerOpsCapabilityStatus::Unavailable
@@ -1136,6 +1155,7 @@ impl CareerOpsCapabilityManifest {
             "capabilities.get",
             "health.check",
             "history.snapshot",
+            "evaluation.full_ag.run.v1",
             "evaluation.result.read.v1",
             "artifacts.inspect.v1",
             "profile.queue_filters.get",
@@ -1327,6 +1347,7 @@ mod capability_manifest_tests {
                 "capabilities.get",
                 "health.check",
                 "history.snapshot",
+                "evaluation.full_ag.run.v1",
                 "evaluation.result.read.v1",
                 "artifacts.inspect.v1",
                 "profile.queue_filters.get",
@@ -1368,7 +1389,7 @@ mod capability_manifest_tests {
                 capability("liveness.role.read.v1", "unavailable", "missing", json!([
                     "requires_exact_upstream_revision", "requires_typed_per_role_evidence"
                 ])),
-                capability("evaluation.full_ag.run.v1", "unavailable", "missing", json!([
+                capability("evaluation.full_ag.run.v1", "unavailable", "conditional", json!([
                     "requires_exact_upstream_revision", "requires_atomic_evaluation_receipt",
                     "native_score_1_to_5"
                 ])),

@@ -1,0 +1,42 @@
+{
+  "generatedAt": "2026-09-04T09:55:00.611Z",
+  "upstreamRevision": "3988ef93cfc2c89790e1cd9379ba242d7048ff5e",
+  "outcomes": [
+    {
+      "roleId": "5b2a8484-d54b-40f2-b475-3aa572cdc803",
+      "company": "BCNC GROUP",
+      "title": "Senior React Frontend Developer",
+      "ok": true,
+      "trackerId": 147,
+      "score": 3.6,
+      "reportPath": "reports/147-bcnc-group-2026-09-04.md",
+      "stateHint": "receipt_ready_for_sync",
+      "error": null
+    },
+    {
+      "roleId": "35f21536-fc15-4d9c-9c9e-f4bcc1cccb1f",
+      "company": "HASH",
+      "title": "Frontend Engineer, EU Remote",
+      "ok": false,
+      "trackerId": null,
+      "score": null,
+      "reportPath": null,
+      "stateHint": "needs_attention",
+      "error": {
+        "code": "adapter_error",
+        "message": "Full A-G evaluation did not produce a canonical Evaluated tracker row (JD file contained only a generic careers-listing page (24 openings, no specific role selected) and WebFetch on https://hash.ai/careers confirmed no individual posting has description/requirements/responsibilities — no evaluable JD content exists.)."
+      }
+    },
+    {
+      "roleId": "93d4ef6b-0e49-4513-baf8-58d47033f9fb",
+      "company": "Nunegal Consulting",
+      "title": "Desarrollador/a React",
+      "ok": true,
+      "trackerId": 148,
+      "score": 2.7,
+      "reportPath": "reports/148-nunegal-consulting-2026-09-04.md",
+      "stateHint": "receipt_ready_for_sync",
+      "error": null
+    }
+  ]
+}

@@ -1,0 +1,44 @@
+{
+  "roleId": "93d4ef6b-0e49-4513-baf8-58d47033f9fb",
+  "company": "Nunegal Consulting",
+  "title": "Desarrollador/a React",
+  "url": "https://www.linkedin.com/jobs/view/4450479500/",
+  "ok": true,
+  "startedAt": "2026-09-04T09:54:45.256Z",
+  "finishedAt": "2026-09-04T09:54:45.527Z",
+  "error": null,
+  "receipt": {
+    "contract": "hereforwork.career-ops-evaluation-receipt",
+    "schemaVersion": 1,
+    "upstreamRevision": "3988ef93cfc2c89790e1cd9379ba242d7048ff5e",
+    "compatibilityFingerprint": "6e1175cf362237a583ae0a56224c51143b26d9af2cc61af713e693aab86d72ed",
+    "report": {
+      "path": "reports/148-nunegal-consulting-2026-09-04.md",
+      "sha256": "9f4eff85aa992a7e2ad6fd4628268d55309945a9ab7a881cdf940eab91675309"
+    },
+    "role": {
+      "company": "Nunegal Consulting",
+      "title": "Desarrollador/a React (100% teletrabajo)"
+    },
+    "canonical": {
+      "trackerId": 148,
+      "status": "Evaluated",
+      "score": 2.7,
+      "reportPath": "reports/148-nunegal-consulting-2026-09-04.md"
+    },
+    "evaluation": {
+      "score": 2.7,
+      "finalDecision": "Skip",
+      "legitimacyTier": "Proceed with Caution",
+      "riskLevel": "Medium",
+      "confidence": "Medium"
+    },
+    "execution": {
+      "surface": "batch/batch-runner.sh",
+      "offerId": 229863,
+      "url": "https://www.linkedin.com/jobs/view/4450479500/",
+      "executed": false,
+      "completedAt": "2026-09-04T09:54:45.522Z"
+    }
+  }
+}
