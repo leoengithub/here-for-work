@@ -231,6 +231,12 @@ Canonical Applied is terminal for HereForWork. Follow-up, outreach, reply monito
 interviews, and post-application CRM remain outside this protocol. Interview preparation
 may be report content, but it does not create post-Applied workflow state.
 
+Canonical Rejected is also terminal for HereForWork evaluation sync, on the same path as
+Applied and Discarded (`evaluation_sync` → `state=terminal` / `reason=canonical_terminal`).
+Finished rejections must not enter Queue Needs attention or request career-ops repair.
+Other non-Evaluated canonical statuses remain Needs attention unless a product decision
+also marks them terminal.
+
 Canonical decisions carry a UUID idempotency key. HereForWork retains that key across
 retries, and the adapter verifies the canonical row plus the effect marker before
 replaying or advancing a write. Reusing a decision after canonical state has diverged
