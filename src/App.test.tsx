@@ -6,6 +6,7 @@ import {
   PreQueueStatus,
   QueueOperationalStatus,
   RoleRow,
+  canMarkAppliedElsewhere,
   deriveApplicationState,
   deriveQueueOperationalState,
   preparationRecoveryAction,
@@ -42,6 +43,7 @@ const preparationFixture: PreparationSummary = {
   errorDetail: null,
   retryPolicy: null,
   updatedAt: "2026-09-01T12:00:00Z",
+  appliedTrackingPending: false,
 };
 
 const browserSessionFixture: BrowserSessionSummary = {
@@ -64,6 +66,39 @@ const browserSessionFixture: BrowserSessionSummary = {
 };
 
 describe("App", () => {
+  it("allows I applied elsewhere only for idle Applications rows without outcome session", () => {
+    expect(canMarkAppliedElsewhere(
+      { ...preparationFixture, status: "action_required" },
+      undefined,
+      { recordingApplication: false, dismissing: false },
+    )).toBe(true);
+    expect(canMarkAppliedElsewhere(
+      { ...preparationFixture, status: "completed" },
+      undefined,
+      { recordingApplication: false, dismissing: false },
+    )).toBe(true);
+    expect(canMarkAppliedElsewhere(
+      { ...preparationFixture, status: "queued" },
+      undefined,
+      { recordingApplication: false, dismissing: false },
+    )).toBe(false);
+    expect(canMarkAppliedElsewhere(
+      { ...preparationFixture, status: "completed" },
+      { ...browserSessionFixture, status: "review_required" },
+      { recordingApplication: false, dismissing: false },
+    )).toBe(false);
+    expect(canMarkAppliedElsewhere(
+      { ...preparationFixture, status: "completed" },
+      { ...browserSessionFixture, status: "filling" },
+      { recordingApplication: false, dismissing: false },
+    )).toBe(false);
+    expect(canMarkAppliedElsewhere(
+      { ...preparationFixture, status: "action_required", appliedTrackingPending: true },
+      undefined,
+      { recordingApplication: false, dismissing: false },
+    )).toBe(true);
+  });
+
   it("derives terminal and attention states before stale preparation steps", () => {
     expect(deriveApplicationState({
       ...preparationFixture,
@@ -192,6 +227,40 @@ describe("App", () => {
       expect(within(container.querySelector<HTMLElement>(`[data-preparation-id="${preparationId}"]`)!).queryByRole("button", { name: "Dismiss" }))
         .not.toBeInTheDocument();
     }
+  });
+
+  it("records external Applied from Applications inline confirm", async () => {
+    const after = {
+      ...applicationsPreviewDashboard,
+      preparations: applicationsPreviewDashboard.preparations.filter((p) => p.id !== "failed"),
+    };
+    const invoke = vi.fn(async (command: string, args?: { roleId?: string }) => {
+      if (command === "get_dashboard") return applicationsPreviewDashboard;
+      if (command === "get_cv_fallback_setting") return { path: null, sha256: null };
+      if (command === "take_in_app_outcome_notifications") return [];
+      if (command === "get_browser_setup") return applicationsPreviewBrowserSetup;
+      if (command === "get_browser_sessions") return applicationsPreviewSessions;
+      if (command === "mark_application_applied") {
+        expect(args?.roleId).toBeTruthy();
+        return after;
+      }
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    (window as typeof window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = { invoke };
+    window.history.replaceState({}, "", "/?application-preview=states");
+    const { container } = render(<App />);
+    await screen.findByRole("heading", { name: "Review queue" });
+    fireEvent.click(screen.getByRole("tab", { name: "applications" }));
+    const failedRow = container.querySelector<HTMLElement>('[data-preparation-id="failed"]')!;
+    fireEvent.click(within(failedRow).getByRole("button", { name: "I applied elsewhere" }));
+    expect(within(failedRow).getByRole("alert")).toHaveTextContent(/as Applied in career-ops/i);
+    fireEvent.click(within(failedRow).getByRole("button", { name: "Record Applied" }));
+    await waitFor(() => expect(container.querySelector('[data-preparation-id="failed"]')).not.toBeInTheDocument());
+    expect(invoke).toHaveBeenCalledWith(
+      "mark_application_applied",
+      { roleId: expect.any(String), userConfirmed: true },
+      undefined,
+    );
   });
 
   it("opens a row-scoped inline dismissal confirmation and returns focus safely", async () => {

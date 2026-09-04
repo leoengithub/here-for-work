@@ -3724,6 +3724,263 @@ impl Store {
         Ok((role_id, effect))
     }
 
+    pub fn begin_applied_effect_for_role(
+        &mut self,
+        role_id: &str,
+    ) -> Result<AdapterEffectContext, StoreError> {
+        let (tracker_id, canonical_status) = self
+            .connection
+            .query_row(
+                "SELECT canonical_tracker_id, canonical_status FROM roles WHERE id = ?1",
+                [role_id],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<i64>>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                    ))
+                },
+            )
+            .optional()?
+            .ok_or_else(|| StoreError::InvalidAdapterEffect("role not found".to_string()))?;
+        let tracker_id = tracker_id.ok_or_else(|| {
+            StoreError::InvalidAdapterEffect("canonical tracker row is missing".to_string())
+        })?;
+        let role_is_applied = canonical_status.as_deref().is_some_and(is_applied_status);
+        if role_is_applied {
+            let completed = self
+                .connection
+                .query_row(
+                    "SELECT idempotency_key, parent_effect_key, tracker_id
+                       FROM adapter_effects
+                      WHERE role_id = ?1 AND operation = 'application.applied.confirm'
+                        AND status = 'completed' AND tracker_id = ?2
+                      ORDER BY updated_at DESC LIMIT 1",
+                    params![role_id, tracker_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, Option<String>>(1)?,
+                            row.get::<_, Option<i64>>(2)?,
+                        ))
+                    },
+                )
+                .optional()?;
+            if let Some(completed) = completed {
+                return Ok(AdapterEffectContext {
+                    idempotency_key: completed.0,
+                    role: self.adapter_role_context(role_id)?,
+                    parent_effect_key: completed.1,
+                    tracker_id: completed.2,
+                });
+            }
+            return Err(StoreError::InvalidAdapterEffect(
+                "this role is already recorded as Applied".to_string(),
+            ));
+        }
+        if canonical_status
+            .as_deref()
+            .is_some_and(|status| is_discarded_status(status) || is_rejected_status(status))
+        {
+            return Err(StoreError::InvalidAdapterEffect(
+                "the role already has a terminal canonical outcome".to_string(),
+            ));
+        }
+        let discard_in_progress = self.connection.query_row(
+            "SELECT COUNT(*) FROM adapter_effects
+              WHERE role_id = ?1 AND operation = 'role.discard' AND status = 'pending'",
+            [role_id],
+            |row| row.get::<_, i64>(0),
+        )?;
+        if discard_in_progress > 0 {
+            return Err(StoreError::InvalidAdapterEffect(
+                "application dismissal is already in progress".to_string(),
+            ));
+        }
+        let latest_prep_status: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT status FROM preparation_jobs
+                  WHERE role_id = ?1 AND status != 'cancelled'
+                  ORDER BY updated_at DESC, id DESC LIMIT 1",
+                [role_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        match latest_prep_status.as_deref() {
+            Some("queued") | Some("preparing") => {
+                return Err(StoreError::InvalidAdapterEffect(
+                    "Cancel active work first".to_string(),
+                ));
+            }
+            Some("action_required") | Some("completed") => {}
+            _ => {
+                return Err(StoreError::InvalidAdapterEffect(
+                    "role is not an idle Applications preparation".to_string(),
+                ));
+            }
+        }
+        let blocking_session_status: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT status FROM browser_sessions
+                  WHERE purpose = 'application' AND role_id = ?1
+                    AND status IN (
+                      'waiting_for_extension', 'inspecting', 'drafting_answers', 'answering',
+                      'filling', 'persisting_answers', 'saving_answers', 'releasing',
+                      'connection_verified', 'review_required', 'submitted_tracking_pending'
+                    )
+                  ORDER BY updated_at DESC, id DESC LIMIT 1",
+                [role_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(status) = blocking_session_status.as_deref() {
+            if status == "review_required" || status == "submitted_tracking_pending" {
+                return Err(StoreError::InvalidAdapterEffect(
+                    "confirm the open application session instead".to_string(),
+                ));
+            }
+            return Err(StoreError::InvalidAdapterEffect(
+                "Cancel active work first".to_string(),
+            ));
+        }
+        self.begin_adapter_effect(
+            role_id,
+            "application.applied.confirm",
+            None,
+            Some(tracker_id),
+        )
+    }
+
+    pub fn complete_applied_effect_for_role(
+        &mut self,
+        role_id: &str,
+        idempotency_key: &str,
+        tracker_id: i64,
+        canonical_status: &str,
+    ) -> Result<(), StoreError> {
+        if canonical_status != "Applied" {
+            return Err(StoreError::InvalidAdapterEffect(
+                "applied effect returned a non-Applied status".to_string(),
+            ));
+        }
+        let confirmed_at = Utc::now();
+        let confirmed_at_text = confirmed_at.to_rfc3339();
+        let confirmation_date = confirmed_at.with_timezone(&Madrid).date_naive().to_string();
+        let transaction = self.connection.transaction()?;
+        let changed = transaction.execute(
+            "UPDATE adapter_effects SET status = 'completed', tracker_id = ?1,
+                    error_class = NULL, updated_at = ?2
+              WHERE idempotency_key = ?3 AND role_id = ?4 AND status = 'pending'",
+            params![tracker_id, confirmed_at_text, idempotency_key, role_id],
+        )?;
+        if changed != 1 {
+            let already_completed_at = transaction
+                .query_row(
+                    "SELECT e.updated_at
+                   FROM adapter_effects e
+                   JOIN roles r ON r.id = e.role_id
+                  WHERE e.idempotency_key = ?1 AND e.role_id = ?2
+                    AND e.operation = 'application.applied.confirm'
+                    AND e.status = 'completed' AND e.tracker_id = ?3
+                    AND LOWER(TRIM(COALESCE(r.canonical_status, ''))) = 'applied'",
+                    params![idempotency_key, role_id, tracker_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?;
+            if let Some(completed_at) = already_completed_at {
+                let completed_date = DateTime::parse_from_rfc3339(&completed_at)
+                    .map(|value| value.with_timezone(&Madrid).date_naive().to_string())
+                    .unwrap_or(confirmation_date);
+                transaction.execute(
+                    "UPDATE roles SET canonical_status = 'Applied',
+                                      canonical_date = COALESCE(canonical_date, ?1)
+                      WHERE id = ?2
+                        AND LOWER(TRIM(COALESCE(canonical_status, ''))) = 'applied'",
+                    params![completed_date, role_id],
+                )?;
+                transaction.commit()?;
+                return Ok(());
+            }
+            return Err(StoreError::InvalidAdapterEffect(
+                "applied effect is missing or no longer pending".to_string(),
+            ));
+        }
+        let had_completed_prep: bool = transaction.query_row(
+            "SELECT EXISTS(
+               SELECT 1 FROM preparation_jobs
+                WHERE role_id = ?1 AND status = 'completed'
+             )",
+            [role_id],
+            |row| row.get(0),
+        )?;
+        transaction.execute(
+            "UPDATE roles SET canonical_tracker_id = ?1, canonical_status = 'Applied',
+                    canonical_date = CASE
+                      WHEN LOWER(TRIM(COALESCE(canonical_status, ''))) = 'applied'
+                        THEN COALESCE(canonical_date, ?2)
+                      ELSE ?2 END,
+                    canonical_visibility_override = 0,
+                    updated_at = ?3 WHERE id = ?4",
+            params![tracker_id, confirmation_date, confirmed_at_text, role_id],
+        )?;
+        transaction.execute(
+            "UPDATE evaluation_sync
+                SET state = 'terminal', reason = 'canonical_terminal',
+                    current_receipt_key = NULL, input_hash = NULL,
+                    lease_expires_at = NULL, updated_at = ?1
+              WHERE role_id = ?2",
+            params![confirmed_at_text, role_id],
+        )?;
+        transaction.execute(
+            "UPDATE browser_commands
+                SET status = 'permanent', error_code = 'canonical_terminal',
+                    lease_expires_at = NULL, updated_at = ?1
+              WHERE status IN ('pending', 'leased')
+                AND session_id IN (
+                  SELECT id FROM browser_sessions
+                   WHERE purpose = 'application' AND role_id = ?2
+                )",
+            params![confirmed_at_text, role_id],
+        )?;
+        transaction.execute(
+            "UPDATE browser_sessions
+                SET status = 'applied_recorded', error_code = NULL,
+                    driver_lease_state = 'released', fallback_eligible = 0,
+                    handoff_reason = 'canonical_terminal', updated_at = ?1
+              WHERE purpose = 'application' AND role_id = ?2
+                AND status != 'applied_recorded'",
+            params![confirmed_at_text, role_id],
+        )?;
+        transaction.execute(
+            "UPDATE preparation_jobs
+                SET status = 'cancelled', step = 'cancelled',
+                    error_class = NULL, error_stage = NULL, error_detail = NULL,
+                    retry_policy = NULL, updated_at = ?1
+              WHERE role_id = ?2 AND status != 'cancelled'",
+            params![confirmed_at_text, role_id],
+        )?;
+        transaction.execute(
+            "UPDATE roles SET preparation_state = ?1, updated_at = ?2 WHERE id = ?3",
+            params![
+                if had_completed_prep {
+                    "prepared"
+                } else {
+                    "not_started"
+                },
+                confirmed_at_text,
+                role_id
+            ],
+        )?;
+        transaction.execute(
+            "INSERT INTO activity(id, kind, message, occurred_at)
+             VALUES (?1, 'application', 'The user confirmed an external application; career-ops recorded the canonical Applied outcome.', ?2)",
+            params![Uuid::new_v4().to_string(), confirmed_at_text],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
     pub fn begin_preparation(
         &mut self,
         role_id: &str,
@@ -5627,7 +5884,13 @@ impl Store {
         let mut preparation_statement = self.connection.prepare(
             "SELECT p.id, p.role_id, r.company, r.title, p.provider, p.status, p.step,
                     p.attempt, p.report_path, p.cv_pdf_path, p.cv_source, p.error_class,
-                    p.error_stage, p.error_detail, p.retry_policy, p.updated_at
+                    p.error_stage, p.error_detail, p.retry_policy, p.updated_at,
+                    EXISTS (
+                      SELECT 1 FROM adapter_effects e
+                       WHERE e.role_id = p.role_id
+                         AND e.operation = 'application.applied.confirm'
+                         AND e.status IN ('pending', 'action_required')
+                    ) AS applied_tracking_pending
                FROM preparation_jobs p
                JOIN roles r ON r.id = p.role_id
               WHERE p.status != 'cancelled'
@@ -5657,6 +5920,7 @@ impl Store {
                     error_detail: row.get(13)?,
                     retry_policy: row.get(14)?,
                     updated_at: row.get(15)?,
+                    applied_tracking_pending: row.get(16)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -11164,6 +11428,107 @@ mod tests {
             )
             .unwrap();
         assert_eq!(canonical_status, "Applied");
+    }
+
+    #[test]
+    fn external_applied_rejects_active_preparation() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+        import_evaluated(&mut store, DATASET);
+        let role_id = store.dashboard().unwrap().roles[0].id.clone();
+        store.begin_preparation(&role_id, "codex").unwrap();
+        let err = store.begin_applied_effect_for_role(&role_id).unwrap_err();
+        assert!(err.to_string().contains("Cancel active work first"));
+    }
+
+    #[test]
+    fn external_applied_rejects_outcome_confirmable_browser_session() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+        let session = queue_completed_application_session(&mut store);
+        store
+            .connection
+            .execute(
+                "UPDATE browser_sessions SET status = 'review_required' WHERE id = ?1",
+                [&session.id],
+            )
+            .unwrap();
+        let err = store
+            .begin_applied_effect_for_role(session.role_id.as_deref().unwrap())
+            .unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("confirm the open application session"));
+    }
+
+    #[test]
+    fn external_applied_on_failed_prep_records_applied_and_leaves_applications() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+        import_evaluated(&mut store, DATASET);
+        let role_id = store.dashboard().unwrap().roles[0].id.clone();
+        let first = queue_and_claim(&mut store, &role_id, "codex");
+        store
+            .fail_preparation_with_policy(
+                &first.id,
+                "cv_fact_check_failed",
+                "stage.fact_verification",
+                "CV fact check failed — unsupported metric-like claims: 8 years",
+                "fresh_preparation_provider_run",
+            )
+            .unwrap();
+
+        let effect = store.begin_applied_effect_for_role(&role_id).unwrap();
+        store
+            .complete_applied_effect_for_role(&role_id, &effect.idempotency_key, 42, "Applied")
+            .unwrap();
+
+        let dashboard = store.dashboard().unwrap();
+        assert!(dashboard.preparations.iter().all(|p| p.role_id != role_id));
+        let status: String = store
+            .connection
+            .query_row(
+                "SELECT canonical_status FROM roles WHERE id = ?1",
+                [&role_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "Applied");
+        let prep_status: String = store
+            .connection
+            .query_row(
+                "SELECT status FROM preparation_jobs WHERE id = ?1",
+                [&first.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(prep_status, "cancelled");
+    }
+
+    #[test]
+    fn external_applied_tracking_failure_sets_pending_flag_for_retry() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+        import_evaluated(&mut store, DATASET);
+        let role_id = store.dashboard().unwrap().roles[0].id.clone();
+        let first = queue_and_claim(&mut store, &role_id, "codex");
+        store
+            .fail_preparation(&first.id, "provider_failed", "provider.invoke", "Provider failed.")
+            .unwrap();
+        let effect = store.begin_applied_effect_for_role(&role_id).unwrap();
+        store
+            .fail_adapter_effect(&effect.idempotency_key, "canonical_write_failed")
+            .unwrap();
+        let row = store
+            .dashboard()
+            .unwrap()
+            .preparations
+            .into_iter()
+            .find(|p| p.role_id == role_id)
+            .unwrap();
+        assert!(row.applied_tracking_pending);
+        let retry = store.begin_applied_effect_for_role(&role_id).unwrap();
+        assert_eq!(retry.idempotency_key, effect.idempotency_key);
     }
 
     #[test]

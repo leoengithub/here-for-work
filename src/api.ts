@@ -209,6 +209,11 @@ export async function confirmApplicationApplied(sessionId: string): Promise<Brow
   return invoke<BrowserSessionSummary>("confirm_application_applied", { sessionId, userConfirmed: true });
 }
 
+export async function markApplicationApplied(roleId: string): Promise<DashboardState> {
+  if (!isTauri()) throw new Error("External Applied confirmation is available in the desktop app.");
+  return invoke<DashboardState>("mark_application_applied", { roleId, userConfirmed: true });
+}
+
 export async function configureBrowserBridge(extensionId: string, installationId: string, profileId: string): Promise<BrowserSetup> {
   if (!isTauri()) throw new Error("Browser setup is available in the desktop app.");
   return invoke<BrowserSetup>("configure_browser_bridge", { extensionId, installationId, profileId });

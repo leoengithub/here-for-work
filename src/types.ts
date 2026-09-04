@@ -125,6 +125,7 @@ export interface PreparationSummary {
   errorDetail: string | null;
   retryPolicy: string | null;
   updatedAt: string;
+  appliedTrackingPending: boolean;
 }
 
 export interface PreparationDetail {
