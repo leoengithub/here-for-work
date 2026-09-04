@@ -8,6 +8,7 @@ import {
   RoleRow,
   deriveApplicationState,
   deriveQueueOperationalState,
+  preparationRecoveryAction,
 } from "./App";
 import type { BrowserSessionSummary, PreparationSummary } from "./types";
 import {
@@ -120,13 +121,56 @@ describe("App", () => {
     }, false)).toMatchObject({ label: "Tracking update failed", tone: "attention" });
   });
 
+  it("exposes Prepare again for fresh preparation policies and keeps same-id retry separate", () => {
+    expect(preparationRecoveryAction("action_required", "retry_same_preparation")).toBe("retry");
+    expect(preparationRecoveryAction("action_required", "repair_runtime_then_retry")).toBe("retry");
+    expect(preparationRecoveryAction("action_required", "fresh_preparation_provider_run")).toBe("prepare_again");
+    expect(preparationRecoveryAction("action_required", "fresh_preparation_id")).toBe("prepare_again");
+    expect(preparationRecoveryAction("action_required", "manual_repair_required")).toBeNull();
+    expect(preparationRecoveryAction("action_required", "fresh_preparation_provider_run", "undo_cleanup")).toBeNull();
+    expect(preparationRecoveryAction("preparing", "fresh_preparation_provider_run")).toBeNull();
+  });
+
+  it("renders Prepare again for fact-check recovery in Applications", async () => {
+    const dashboard = {
+      ...applicationsPreviewDashboard,
+      preparations: applicationsPreviewDashboard.preparations.map((item) => (
+        item.id === "failed"
+          ? {
+            ...item,
+            errorClass: "cv_fact_check_failed",
+            errorStage: "stage.fact_verification",
+            errorDetail: "CV fact check failed — unsupported metric-like claims: 8 years",
+            retryPolicy: "fresh_preparation_provider_run",
+          }
+          : item
+      )),
+    };
+    const invoke = vi.fn(async (command: string) => {
+      if (command === "get_dashboard") return dashboard;
+      if (command === "get_cv_fallback_setting") return { path: null, sha256: null };
+      if (command === "take_in_app_outcome_notifications") return [];
+      if (command === "get_browser_setup") return applicationsPreviewBrowserSetup;
+      if (command === "get_browser_sessions") return applicationsPreviewSessions;
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    (window as typeof window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = { invoke };
+    const { container } = render(<App />);
+    await screen.findByRole("heading", { name: "Review queue" });
+    fireEvent.click(screen.getByRole("tab", { name: "applications" }));
+    const failedRow = container.querySelector<HTMLElement>('[data-preparation-id="failed"]')!;
+    expect(within(failedRow).getByRole("button", { name: "Prepare again" })).toBeEnabled();
+    expect(within(failedRow).queryByRole("button", { name: "Retry preparation" })).not.toBeInTheDocument();
+    expect(failedRow).toHaveTextContent("Prepare again starts a fresh provider run");
+  });
+
   it("renders truthful fixture states and direct recovery actions", async () => {
     window.history.replaceState({}, "", "/?application-preview=states");
     const { container } = render(<App />);
     await screen.findByRole("heading", { name: "Review queue" });
     fireEvent.click(screen.getByRole("tab", { name: "applications" }));
 
-    expect(await screen.findByText("Preparation failed")).toBeInTheDocument();
+    expect(await screen.findAllByText("Preparation failed")).toHaveLength(2);
     expect(screen.getByText("Waiting")).toBeInTheDocument();
     expect(screen.getByText("Preparing CV")).toBeInTheDocument();
     expect(screen.getByText("Ready for review")).toBeInTheDocument();
@@ -134,6 +178,7 @@ describe("App", () => {
     expect(screen.getByText("Application recorded")).toBeInTheDocument();
     expect(screen.getByText("Tracking update failed")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Retry preparation" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Prepare again" })).toBeEnabled();
     expect(screen.getAllByRole("button", { name: "Reopen and refill" })).toHaveLength(2);
     expect(screen.getAllByRole("button", { name: "Reopen and refill" })[0]).toBeEnabled();
     expect(screen.getAllByRole("button", { name: "Cancel and return to Queue" })).toHaveLength(2);
@@ -141,6 +186,7 @@ describe("App", () => {
     expect(container.querySelector('[data-preparation-id="recording"]')).not.toHaveTextContent("Undo preparation");
     expect(container.querySelector('[data-preparation-id="tracking"]')).not.toHaveTextContent("Undo preparation");
     expect(within(container.querySelector<HTMLElement>('[data-preparation-id="failed"]')!).getByRole("button", { name: "Dismiss" })).toBeEnabled();
+    expect(within(container.querySelector<HTMLElement>('[data-preparation-id="fact-check-failed"]')!).getByRole("button", { name: "Prepare again" })).toBeEnabled();
     expect(within(container.querySelector<HTMLElement>('[data-preparation-id="review"]')!).getByRole("button", { name: "Dismiss" })).toBeEnabled();
     for (const preparationId of ["waiting", "preparing", "recording", "tracking", "recorded"]) {
       expect(within(container.querySelector<HTMLElement>(`[data-preparation-id="${preparationId}"]`)!).queryByRole("button", { name: "Dismiss" }))

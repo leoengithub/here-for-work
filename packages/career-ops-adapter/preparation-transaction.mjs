@@ -46,13 +46,17 @@ const FAILURE_POLICIES = Object.freeze({
 export class PreparationTransactionError extends Error {
   constructor(code, options = {}) {
     const [defaultStage, defaultPolicy] = FAILURE_POLICIES[code] ?? FAILURE_POLICIES.artifact_commit_failed;
-    super(`Preparation commit failed with ${code}.`);
+    const diagnostics = typeof options.diagnostics === "string" && options.diagnostics.trim()
+      ? boundedWarning(options.diagnostics)
+      : null;
+    super(diagnostics || `Preparation commit failed with ${code}.`);
     this.name = "PreparationTransactionError";
     this.code = code;
     this.stage = options.stage ?? defaultStage;
     this.retryPolicy = options.retryPolicy ?? defaultPolicy;
     this.diagnosticId = options.diagnosticId ?? null;
     this.exitCode = Number.isInteger(options.exitCode) ? options.exitCode : null;
+    this.diagnostics = diagnostics;
   }
 }
 
@@ -167,6 +171,38 @@ function boundedWarning(value) {
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, 240);
+}
+
+function factCheckFailureDetail(output) {
+  try {
+    const result = JSON.parse(String(output ?? ""));
+    if (!result || typeof result !== "object") {
+      return "CV fact check failed without a usable diagnostic.";
+    }
+    const parts = [];
+    if (Array.isArray(result.invented) && result.invented.length) {
+      const claims = result.invented
+        .slice(0, 5)
+        .map((claim) => String(claim ?? "").replace(/\s+/g, " ").trim().slice(0, 48))
+        .filter(Boolean);
+      if (claims.length) {
+        parts.push(`unsupported metric-like claims: ${claims.join(", ")}`);
+      }
+    }
+    if (Array.isArray(result.unsupportedFacts) && result.unsupportedFacts.length) {
+      parts.push(`${result.unsupportedFacts.length} unsupported non-metric fact(s)`);
+    }
+    if (Array.isArray(result.forbidden) && result.forbidden.length) {
+      parts.push(`${result.forbidden.length} forbidden claim(s)`);
+    }
+    if (!parts.length) {
+      const verdict = typeof result.verdict === "string" ? result.verdict : "block";
+      return boundedWarning(`CV fact check failed (verdict: ${verdict}).`);
+    }
+    return boundedWarning(`CV fact check failed — ${parts.join("; ")}`);
+  } catch {
+    return "CV fact check failed without a usable diagnostic.";
+  }
 }
 
 function renderFailureMetadata(error) {
@@ -487,6 +523,9 @@ export async function commitPreparationTransaction(options) {
         stage,
         retryPolicy,
         exitCode: error?.exitCode,
+        diagnostics: code === "cv_fact_check_failed"
+          ? factCheckFailureDetail(error?.output)
+          : undefined,
       });
     }
   };
@@ -594,7 +633,12 @@ export async function commitPreparationTransaction(options) {
     if (await existsAsFile(resolve(root, "config", "cv-facts.json"))) factArgs.push("--config", resolve(root, "config", "cv-facts.json"));
     factArgs.push("--json");
     const factCheck = await command("verify-cv-facts.mjs", factArgs, {}, "cv_fact_check_failed", "stage.fact_verification", "fresh_preparation_provider_run");
-    if (!validFactCheck(factCheck.output)) failure("cv_fact_check_failed", diagnostic);
+    if (!validFactCheck(factCheck.output)) {
+      failure("cv_fact_check_failed", {
+        ...diagnostic,
+        diagnostics: factCheckFailureDetail(factCheck.output),
+      });
+    }
 
     let cvProvenance = { source: "tailored_generated", tailored: true, sourceSha256: null, renderRecovery: null };
     const warnings = [];
@@ -968,7 +1012,15 @@ export async function commitSelectivePreparationTransaction(options) {
   let publication = null;
   const command = async (script, args, env, code, stage, retryPolicy) => {
     try { return await runCareerOpsScript(script, args, env); } catch (error) {
-      throw new PreparationTransactionError(code, { ...diagnostic, stage, retryPolicy, exitCode: error?.exitCode });
+      throw new PreparationTransactionError(code, {
+        ...diagnostic,
+        stage,
+        retryPolicy,
+        exitCode: error?.exitCode,
+        diagnostics: code === "cv_fact_check_failed"
+          ? factCheckFailureDetail(error?.output)
+          : undefined,
+      });
     }
   };
   try {
@@ -1074,7 +1126,12 @@ export async function commitSelectivePreparationTransaction(options) {
     if (await existsAsFile(resolve(root, "config", "cv-facts.json"))) factArgs.push("--config", resolve(root, "config", "cv-facts.json"));
     factArgs.push("--json");
     const factCheck = await command("verify-cv-facts.mjs", factArgs, {}, "cv_fact_check_failed", "stage.fact_verification", "fresh_preparation_provider_run");
-    if (!validFactCheck(factCheck.output)) failure("cv_fact_check_failed", diagnostic);
+    if (!validFactCheck(factCheck.output)) {
+      failure("cv_fact_check_failed", {
+        ...diagnostic,
+        diagnostics: factCheckFailureDetail(factCheck.output),
+      });
+    }
 
     let cvProvenance = currentPlan.cv.scope === "pdf_only"
       ? currentPlan.cv.provenance

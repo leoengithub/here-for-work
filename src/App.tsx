@@ -543,10 +543,49 @@ function preparationFailureExplanation(item: PreparationSummary): string {
   if (item.errorClass === "app_interrupted") {
     return "HereForWork closed while this was running. Retry it, or cancel it and return the role to Queue.";
   }
+  if (
+    item.retryPolicy === "fresh_preparation_provider_run"
+    || item.retryPolicy === "fresh_preparation_id"
+  ) {
+    return "This failure needs a new preparation draft. Prepare again starts a fresh provider run.";
+  }
+  if (item.retryPolicy === "manual_repair_required") {
+    return "This failure needs manual repair. HereForWork will not reuse this preparation automatically.";
+  }
   if (item.errorClass === "artifact_commit_failed" || item.errorStage?.includes("commit")) {
     return "The prepared files could not be saved. Retry uses the same preparation.";
   }
   return "Preparation stopped before the application was ready. Retry uses the saved preparation.";
+}
+
+const SAME_PREPARATION_RETRY_POLICIES = [
+  "retry_same_preparation",
+  "repair_runtime_then_retry",
+] as const;
+
+const FRESH_PREPARATION_RETRY_POLICIES = [
+  "fresh_preparation_provider_run",
+  "fresh_preparation_id",
+] as const;
+
+export type PreparationRecoveryAction = "retry" | "prepare_again" | null;
+
+export function preparationRecoveryAction(
+  status: string,
+  retryPolicy: string | null | undefined,
+  step?: string,
+): PreparationRecoveryAction {
+  if (status !== "action_required" || step === "undo_cleanup") {
+    return null;
+  }
+  const policy = retryPolicy ?? "retry_same_preparation";
+  if ((SAME_PREPARATION_RETRY_POLICIES as readonly string[]).includes(policy)) {
+    return "retry";
+  }
+  if ((FRESH_PREPARATION_RETRY_POLICIES as readonly string[]).includes(policy)) {
+    return "prepare_again";
+  }
+  return null;
 }
 
 export function deriveApplicationState(
@@ -1900,9 +1939,7 @@ export function App() {
               const canDismissPreparation = canDismissApplicationPreparation(item, latestSession, recordingApplication);
               const dismissalOpen = dismissPreparationId === item.id;
               const dismissalInProgress = dismissingPreparationId === item.id;
-              const canRetryPreparation = item.status === "action_required"
-                && item.step !== "undo_cleanup"
-                && ["retry_same_preparation", "repair_runtime_then_retry"].includes(item.retryPolicy ?? "retry_same_preparation");
+              const recoveryAction = preparationRecoveryAction(item.status, item.retryPolicy, item.step);
               const canCancelPreparation = item.status === "queued"
                 || item.status === "preparing"
                 || (item.status === "action_required" && item.errorClass === "app_interrupted");
@@ -1943,13 +1980,17 @@ export function App() {
                     <Button variant="outline" type="button" onClick={() => void showPreparationDetail(item.id)} disabled={busy || dismissalInProgress}>
                       Details
                     </Button>
-                    {canRetryPreparation ? (
+                    {recoveryAction ? (
                       <Button
                         type="button"
                         onClick={() => void prepareQueueRole(item.roleId, item.provider)}
                         disabled={enqueuingRoleIds.has(item.roleId) || dismissalInProgress}
                       >
-                        {enqueuingRoleIds.has(item.roleId) ? "Queueing…" : "Retry preparation"}
+                        {enqueuingRoleIds.has(item.roleId)
+                          ? "Queueing…"
+                          : recoveryAction === "prepare_again"
+                            ? "Prepare again"
+                            : "Retry preparation"}
                       </Button>
                     ) : null}
                     {canDismissPreparation ? (
@@ -2110,16 +2151,26 @@ export function App() {
                     {preparationDetail.cvSource === "user_reviewed_fallback" ? "Open user-reviewed CV" : "Open fact-checked tailored CV"}
                   </Button>
                 ) : null}
-                {preparationDetail.status === "action_required"
-                  && ["retry_same_preparation", "repair_runtime_then_retry"].includes(preparationDetail.retryPolicy ?? "retry_same_preparation") ? (
-                  <Button
-                    type="button"
-                    onClick={() => void prepareQueueRole(preparationDetail.roleId, preparationDetail.provider)}
-                    disabled={enqueuingRoleIds.has(preparationDetail.roleId)}
-                  >
-                    {enqueuingRoleIds.has(preparationDetail.roleId) ? "Queueing…" : "Retry preparation"}
-                  </Button>
-                ) : null}
+                {(() => {
+                  const detailRecovery = preparationRecoveryAction(
+                    preparationDetail.status,
+                    preparationDetail.retryPolicy,
+                  );
+                  if (!detailRecovery) return null;
+                  return (
+                    <Button
+                      type="button"
+                      onClick={() => void prepareQueueRole(preparationDetail.roleId, preparationDetail.provider)}
+                      disabled={enqueuingRoleIds.has(preparationDetail.roleId)}
+                    >
+                      {enqueuingRoleIds.has(preparationDetail.roleId)
+                        ? "Queueing…"
+                        : detailRecovery === "prepare_again"
+                          ? "Prepare again"
+                          : "Retry preparation"}
+                    </Button>
+                  );
+                })()}
                 {detailBrowserSession?.status === "action_required" ? (
                   <Button type="button" onClick={() => void retryBrowser(detailBrowserSession.id)} disabled={busy}>
                     Retry browser step
@@ -2141,9 +2192,18 @@ export function App() {
                 </Alert>
               ) : null}
               {preparationDetail.status === "action_required"
-                && ["fresh_preparation_provider_run", "fresh_preparation_id", "manual_repair_required"].includes(preparationDetail.retryPolicy ?? "") ? (
+                && preparationDetail.retryPolicy === "manual_repair_required" ? (
                 <p className="preparation-detail__empty">
-                  This failure needs a fresh preparation or manual repair. HereForWork will not reuse this preparation automatically.
+                  This failure needs manual repair. HereForWork will not reuse this preparation automatically.
+                </p>
+              ) : null}
+              {preparationDetail.status === "action_required"
+                && preparationRecoveryAction(
+                  preparationDetail.status,
+                  preparationDetail.retryPolicy,
+                ) === "prepare_again" ? (
+                <p className="preparation-detail__empty">
+                  Prepare again starts a new preparation and does not reuse the failed draft.
                 </p>
               ) : null}
               {detailBrowserSession?.errorCode ? (
