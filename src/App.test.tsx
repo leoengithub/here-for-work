@@ -199,6 +199,106 @@ describe("App", () => {
     expect(failedRow).toHaveTextContent("Prepare again starts a fresh provider run");
   });
 
+  it("queues a fresh preparation when Prepare again is clicked", async () => {
+    const failed = applicationsPreviewDashboard.preparations.find((item) => item.id === "fact-check-failed")!;
+    const queued = {
+      ...failed,
+      id: "fact-check-fresh",
+      status: "queued" as const,
+      step: "queued",
+      errorClass: null,
+      errorStage: null,
+      errorDetail: null,
+      retryPolicy: null,
+    };
+    const after = {
+      ...applicationsPreviewDashboard,
+      preparations: applicationsPreviewDashboard.preparations.map((item) => (
+        item.id === "fact-check-failed" ? queued : item
+      )),
+    };
+    const invoke = vi.fn(async (command: string) => {
+      if (command === "get_dashboard") return applicationsPreviewDashboard;
+      if (command === "get_cv_fallback_setting") return { path: null, sha256: null };
+      if (command === "take_in_app_outcome_notifications") return [];
+      if (command === "get_browser_setup") return applicationsPreviewBrowserSetup;
+      if (command === "get_browser_sessions") return applicationsPreviewSessions;
+      if (command === "prepare_role") {
+        return {
+          dashboard: after,
+          disposition: "queued",
+          message: "Preparation queued. You can keep working while HereForWork prepares this application in the background.",
+        };
+      }
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    (window as typeof window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = { invoke };
+    const { container } = render(<App />);
+    await screen.findByRole("heading", { name: "Review queue" });
+    fireEvent.click(screen.getByRole("tab", { name: "applications" }));
+    const failedRow = container.querySelector<HTMLElement>('[data-preparation-id="fact-check-failed"]')!;
+    fireEvent.click(within(failedRow).getByRole("button", { name: "Prepare again" }));
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith(
+        "prepare_role",
+        { roleId: failed.roleId, provider: "codex" },
+        undefined,
+      );
+    });
+    await waitFor(() => {
+      expect(container.querySelector('[data-preparation-id="fact-check-fresh"]')).toBeInTheDocument();
+      expect(container.querySelector('[data-preparation-id="fact-check-failed"]')).not.toBeInTheDocument();
+    });
+  });
+
+  it("hides Prepare again in Details when the failure is undo cleanup", async () => {
+    const failed = {
+      ...applicationsPreviewDashboard.preparations.find((item) => item.id === "fact-check-failed")!,
+      step: "undo_cleanup",
+    };
+    const dashboard = {
+      ...applicationsPreviewDashboard,
+      preparations: applicationsPreviewDashboard.preparations.map((item) => (
+        item.id === "fact-check-failed" ? failed : item
+      )),
+    };
+    const invoke = vi.fn(async (command: string) => {
+      if (command === "get_dashboard") return dashboard;
+      if (command === "get_cv_fallback_setting") return { path: null, sha256: null };
+      if (command === "take_in_app_outcome_notifications") return [];
+      if (command === "get_browser_setup") return applicationsPreviewBrowserSetup;
+      if (command === "get_browser_sessions") return applicationsPreviewSessions;
+      if (command === "get_preparation_detail") {
+        return {
+          preparationId: failed.id,
+          roleId: failed.roleId,
+          company: failed.company,
+          title: failed.title,
+          provider: failed.provider,
+          status: failed.status,
+          stage: "undo_cleanup",
+          errorClass: failed.errorClass,
+          errorDetail: failed.errorDetail,
+          retryPolicy: failed.retryPolicy,
+          reportMarkdown: null,
+          reportPath: null,
+          cvPdfPath: null,
+          cvSource: null,
+        };
+      }
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    (window as typeof window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = { invoke };
+    const { container } = render(<App />);
+    await screen.findByRole("heading", { name: "Review queue" });
+    fireEvent.click(screen.getByRole("tab", { name: "applications" }));
+    const failedRow = container.querySelector<HTMLElement>('[data-preparation-id="fact-check-failed"]')!;
+    expect(within(failedRow).queryByRole("button", { name: "Prepare again" })).not.toBeInTheDocument();
+    fireEvent.click(within(failedRow).getByRole("button", { name: "Details" }));
+    expect(await screen.findByRole("heading", { name: failed.title })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Prepare again" })).not.toBeInTheDocument();
+  });
+
   it("renders truthful fixture states and direct recovery actions", async () => {
     window.history.replaceState({}, "", "/?application-preview=states");
     const { container } = render(<App />);

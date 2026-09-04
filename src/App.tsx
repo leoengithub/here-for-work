@@ -1737,6 +1737,14 @@ export function App() {
       setDashboard(outcome.dashboard);
       setQueueFiltersDraft(outcome.dashboard.queueFilters);
       setNotice(outcome.message);
+      const nextPreparation = outcome.dashboard.preparations.find((item) => item.roleId === roleId);
+      setPreparationDetail((current) => (current?.roleId === roleId ? null : current));
+      setSelectedPreparationId((current) => {
+        if (current && outcome.dashboard.preparations.some((item) => item.id === current)) {
+          return current;
+        }
+        return nextPreparation?.id ?? null;
+      });
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
       try {
@@ -2336,6 +2344,7 @@ export function App() {
                   const detailRecovery = preparationRecoveryAction(
                     preparationDetail.status,
                     preparationDetail.retryPolicy,
+                    preparationDetail.stage,
                   );
                   if (!detailRecovery) return null;
                   return (
@@ -2433,6 +2442,7 @@ export function App() {
                 && preparationRecoveryAction(
                   preparationDetail.status,
                   preparationDetail.retryPolicy,
+                  preparationDetail.stage,
                 ) === "prepare_again" ? (
                 <p className="preparation-detail__empty">
                   Prepare again starts a new preparation and does not reuse the failed draft.

@@ -1507,6 +1507,33 @@ impl Store {
         Ok(())
     }
 
+    /// User-triggered Retry history sync must re-attempt globally recoverable
+    /// holds even after the automatic attempt budget is exhausted.
+    pub fn reset_exhausted_global_reconcile_attempts(&mut self) -> Result<usize, StoreError> {
+        let now = Utc::now().to_rfc3339();
+        let held = {
+            let mut statement = self.connection.prepare(
+                "SELECT role_id, reason FROM evaluation_sync WHERE state = 'needs_attention'",
+            )?;
+            statement
+                .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        let mut changed = 0usize;
+        for (role_id, reason) in held {
+            if !PreQueueRecovery::is_global_reconcile_reason(&reason) {
+                continue;
+            }
+            changed += self.connection.execute(
+                "UPDATE evaluation_sync
+                    SET attempt = 0, input_hash = NULL, lease_expires_at = NULL, updated_at = ?1
+                  WHERE role_id = ?2 AND state = 'needs_attention'",
+                params![now, role_id],
+            )?;
+        }
+        Ok(changed)
+    }
+
     pub fn claim_evaluation_sync(
         &mut self,
         role_id: &str,
@@ -8452,6 +8479,23 @@ mod tests {
     }
 
     #[test]
+    fn evaluated_queue_role_with_receipt_and_url_can_begin_preparation() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+        import_evaluated(&mut store, DATASET);
+        let role = store.dashboard().unwrap().roles[0].clone();
+        assert_eq!(role.preparation_state, "not_started");
+        assert!(role.application_url.is_some());
+        assert!(role.evaluation.is_some());
+
+        let queued = store.begin_preparation(&role.id, "codex").unwrap();
+        let dashboard = store.dashboard().unwrap();
+        assert!(dashboard.roles.iter().all(|item| item.id != role.id));
+        assert_eq!(dashboard.preparations[0].id, queued.id);
+        assert_eq!(dashboard.preparations[0].status, "queued");
+    }
+
+    #[test]
     fn imported_role_is_held_before_queue_and_cannot_prepare_without_a_receipt() {
         let directory = tempfile::tempdir().unwrap();
         let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
@@ -8955,6 +8999,105 @@ mod tests {
     }
 
     #[test]
+    fn user_retry_resets_exhausted_global_reconcile_attempt_budget() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+        store.import_dataset(DATASET).unwrap();
+        let role = store.evaluation_sync_roles().unwrap().remove(0);
+        let input_hash = format!("retry:{}", role.source_identity_hash);
+
+        for _ in 0..MAX_EVALUATION_SYNC_ATTEMPTS {
+            assert!(
+                store
+                    .claim_evaluation_sync(&role.role_id, &input_hash)
+                    .unwrap()
+            );
+            store
+                .hold_evaluation(
+                    &role.role_id,
+                    "needs_attention",
+                    "evaluation_result_invalid_or_stale",
+                )
+                .unwrap();
+        }
+        assert!(
+            !store
+                .claim_evaluation_sync(&role.role_id, &input_hash)
+                .unwrap()
+        );
+
+        assert_eq!(
+            store.reset_exhausted_global_reconcile_attempts().unwrap(),
+            1
+        );
+        assert!(
+            store
+                .claim_evaluation_sync(&role.role_id, &input_hash)
+                .unwrap()
+        );
+        let reset = store
+            .connection
+            .query_row(
+                "SELECT state, attempt, input_hash FROM evaluation_sync WHERE role_id = ?1",
+                [&role.role_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(reset.0, "syncing");
+        assert_eq!(reset.1, 1);
+        assert_eq!(reset.2.as_deref(), Some(input_hash.as_str()));
+    }
+
+    #[test]
+    fn user_retry_does_not_reset_repair_career_ops_holds() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+        store.import_dataset(DATASET).unwrap();
+        let role = store.evaluation_sync_roles().unwrap().remove(0);
+        let input_hash = format!("skip:{}", role.source_identity_hash);
+        assert!(
+            store
+                .claim_evaluation_sync(&role.role_id, &input_hash)
+                .unwrap()
+        );
+        store
+            .hold_evaluation(
+                &role.role_id,
+                "needs_attention",
+                "canonical_status_not_evaluated",
+            )
+            .unwrap();
+
+        assert_eq!(
+            store.reset_exhausted_global_reconcile_attempts().unwrap(),
+            0
+        );
+        let held = store
+            .connection
+            .query_row(
+                "SELECT reason, attempt, input_hash FROM evaluation_sync WHERE role_id = ?1",
+                [&role.role_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(held.0, "canonical_status_not_evaluated");
+        assert_eq!(held.1, 1);
+        assert_eq!(held.2.as_deref(), Some(input_hash.as_str()));
+    }
+
+    #[test]
     fn changed_source_or_compatibility_invalidates_the_current_receipt() {
         let directory = tempfile::tempdir().unwrap();
         let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
@@ -9313,6 +9456,11 @@ mod tests {
         let claimed = store.claim_preparation_work().unwrap().unwrap();
         assert_eq!(claimed.id, restarted.id);
         assert_ne!(claimed.id, first.id);
+        let dashboard = store.dashboard().unwrap();
+        assert_eq!(dashboard.preparations.len(), 1);
+        assert_eq!(dashboard.preparations[0].id, restarted.id);
+        assert_eq!(dashboard.preparations[0].status, "preparing");
+        assert!(dashboard.preparations.iter().all(|item| item.id != first.id));
     }
 
     #[test]
