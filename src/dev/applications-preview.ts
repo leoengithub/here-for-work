@@ -27,6 +27,7 @@ function preparation(
     errorDetail: null,
     retryPolicy: null,
     updatedAt: now,
+    appliedTrackingPending: false,
     ...overrides,
   };
 }

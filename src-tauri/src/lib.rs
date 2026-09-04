@@ -1464,6 +1464,73 @@ fn confirm_application_applied(
         .ok_or("Application session disappeared".to_string())
 }
 
+#[tauri::command]
+fn mark_application_applied(
+    role_id: String,
+    user_confirmed: bool,
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<DashboardState, String> {
+    if !user_confirmed {
+        return Err("Applied requires your explicit outcome confirmation.".to_string());
+    }
+    let context = {
+        let mut store = state
+            .store
+            .lock()
+            .map_err(|_| "Operational store lock was poisoned".to_string())?;
+        store
+            .begin_applied_effect_for_role(&role_id)
+            .map_err(|error| error.to_string())?
+    };
+    let tracker_id = context
+        .tracker_id
+        .ok_or("Canonical tracker row is missing")?;
+    let input = CanonicalRoleInput {
+        idempotency_key: context.idempotency_key.clone(),
+        event_date: madrid_today(),
+        company: context.role.company,
+        title: context.role.title,
+        location: context.role.location,
+        url: context.role.application_url,
+    };
+    let effect = {
+        let _canonical_write = state
+            .canonical_write_lock
+            .lock()
+            .map_err(|_| "Canonical writer lock was poisoned".to_string())?;
+        match state.adapter.confirm_applied(&input, tracker_id) {
+            Ok(effect) => effect,
+            Err(error) => {
+                if let Ok(mut store) = state.store.lock() {
+                    let _ = store
+                        .fail_adapter_effect(&context.idempotency_key, "canonical_write_failed");
+                }
+                let _ = app
+                    .notification()
+                    .builder()
+                    .title("Tracking update pending")
+                    .body("Your external application is not repeated. Open HereForWork to retry only the career-ops update.")
+                    .show();
+                return Err(error.to_string());
+            }
+        }
+    };
+    let mut store = state
+        .store
+        .lock()
+        .map_err(|_| "Operational store lock was poisoned".to_string())?;
+    store
+        .complete_applied_effect_for_role(
+            &role_id,
+            &context.idempotency_key,
+            effect.tracker_id,
+            &effect.status,
+        )
+        .map_err(|error| error.to_string())?;
+    store.dashboard().map_err(|error| error.to_string())
+}
+
 fn start_answer_worker(app: tauri::AppHandle) -> Result<(), String> {
     std::thread::Builder::new()
         .name("here-for-work-answer-worker".to_string())
@@ -2644,6 +2711,7 @@ pub fn run() {
             continue_in_browser,
             reopen_application_form,
             confirm_application_applied,
+            mark_application_applied,
             quit_app,
             create_operational_backup,
             export_operational_summary,

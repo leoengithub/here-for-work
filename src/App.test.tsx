@@ -42,6 +42,7 @@ const preparationFixture: PreparationSummary = {
   errorDetail: null,
   retryPolicy: null,
   updatedAt: "2026-09-01T12:00:00Z",
+  appliedTrackingPending: false,
 };
 
 const browserSessionFixture: BrowserSessionSummary = {
