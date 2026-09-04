@@ -33,3 +33,7 @@ url = "2.5.8"
 
 [dev-dependencies]
 tempfile = "3.26.0"
+
+[[bin]]
+name = "reset-stuck-preparations"
+path = "src/bin/reset-stuck-preparations.rs"

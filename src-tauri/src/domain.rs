@@ -262,6 +262,37 @@ pub struct PreparationSummary {
     pub updated_at: String,
 }
 
+/// Candidate for Q7=B one-shot stuck-preparation cleanup.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct StuckPreparationCandidate {
+    pub role_id: String,
+    pub company: String,
+    pub title: String,
+    pub preparation_state: String,
+    pub canonical_status: Option<String>,
+    pub evaluation_sync_state: Option<String>,
+    pub preparation_id: Option<String>,
+    pub preparation_status: Option<String>,
+    pub error_class: Option<String>,
+    /// `zombie_failed_prep` or `force_role`.
+    pub selection_reason: String,
+}
+
+/// Result of resetting one role's blocking failed preparation to a clean slate.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct StuckPreparationReset {
+    pub role_id: String,
+    pub company: String,
+    pub title: String,
+    pub preparation_state_before: String,
+    pub preparation_state_after: String,
+    pub cancelled_preparation_ids: Vec<String>,
+    pub expired_notification_count: usize,
+    pub changed: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PreparationDetail {

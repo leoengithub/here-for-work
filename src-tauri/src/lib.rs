@@ -23,6 +23,28 @@ use tauri::Manager;
 use tauri_plugin_autostart::ManagerExt;
 use tauri_plugin_notification::NotificationExt;
 
+/// One-shot Q7=B local stuck-preparation cleanup against a store database.
+pub fn list_stuck_preparation_cleanup_candidates(
+    db_path: impl AsRef<std::path::Path>,
+    force_role_ids: &[&str],
+) -> Result<Vec<domain::StuckPreparationCandidate>, String> {
+    let store = Store::open(db_path).map_err(|error| error.to_string())?;
+    store
+        .list_stuck_preparation_cleanup_candidates(force_role_ids)
+        .map_err(|error| error.to_string())
+}
+
+/// Apply Q7=B stuck-preparation cleanup. Idempotent; refuses Applied/Discarded.
+pub fn reset_stuck_preparations(
+    db_path: impl AsRef<std::path::Path>,
+    force_role_ids: &[&str],
+) -> Result<Vec<domain::StuckPreparationReset>, String> {
+    let mut store = Store::open(db_path).map_err(|error| error.to_string())?;
+    store
+        .reset_stuck_preparations(force_role_ids)
+        .map_err(|error| error.to_string())
+}
+
 pub(crate) const PUBLIC_CV_FILENAME: &str = "Leonardo_Gomez_Frontend_Engineer.pdf";
 
 struct AppState {

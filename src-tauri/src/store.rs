@@ -20,7 +20,7 @@ use crate::domain::{
     OutcomeNotification, PreQueueRecovery, PreQueueRoleSummary, PreparationCleanupWork,
     PreparationEvaluationIdentity, PreparationSummary, PreparationWork, QueueEvaluationSummary,
     QueueFilters, QueueGroup, ReconcileResult, RestorePreflight, RoleSummary, RunSummary,
-    ScheduledRun, SourceScheduleSummary,
+    ScheduledRun, SourceScheduleSummary, StuckPreparationCandidate, StuckPreparationReset,
 };
 
 const SCHEMA_VERSION: i64 = 22;
@@ -3680,6 +3680,198 @@ impl Store {
         )?;
         transaction.commit()?;
         Ok(true)
+    }
+
+    /// List roles eligible for Q7=B one-shot stuck-preparation cleanup.
+    ///
+    /// Includes failed / `action_required` preparation that lacks
+    /// `evaluation_sync` in (`ready`, `needs_decision`), plus any
+    /// `force_role_ids` that still have blocking failed prep.
+    /// Never includes Applied / Discarded terminal canonical roles.
+    pub fn list_stuck_preparation_cleanup_candidates(
+        &self,
+        force_role_ids: &[&str],
+    ) -> Result<Vec<StuckPreparationCandidate>, StoreError> {
+        let force: HashSet<&str> = force_role_ids.iter().copied().collect();
+        let mut statement = self.connection.prepare(
+            "SELECT r.id, r.company, r.title, r.preparation_state, r.canonical_status,
+                    evaluation.state,
+                    latest.id, latest.status, latest.error_class
+               FROM roles r
+               LEFT JOIN evaluation_sync evaluation ON evaluation.role_id = r.id
+               LEFT JOIN preparation_jobs latest ON latest.id = (
+                 SELECT candidate.id FROM preparation_jobs candidate
+                  WHERE candidate.role_id = r.id AND candidate.status != 'cancelled'
+                  ORDER BY candidate.updated_at DESC, candidate.id DESC LIMIT 1
+               )
+              WHERE LOWER(TRIM(COALESCE(r.canonical_status, '')))
+                      NOT IN ('applied', 'discarded')
+                AND (
+                      r.preparation_state = 'failed'
+                      OR latest.status = 'action_required'
+                    )
+              ORDER BY r.company, r.title, r.id",
+        )?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                    row.get::<_, Option<String>>(7)?,
+                    row.get::<_, Option<String>>(8)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut candidates = Vec::new();
+        for (
+            role_id,
+            company,
+            title,
+            preparation_state,
+            canonical_status,
+            evaluation_sync_state,
+            preparation_id,
+            preparation_status,
+            error_class,
+        ) in rows
+        {
+            let eval = evaluation_sync_state.as_deref().unwrap_or("");
+            let force_selected = force.contains(role_id.as_str());
+            let zombie = !matches!(eval, "ready" | "needs_decision");
+            if !force_selected && !zombie {
+                continue;
+            }
+            candidates.push(StuckPreparationCandidate {
+                role_id,
+                company,
+                title,
+                preparation_state,
+                canonical_status,
+                evaluation_sync_state,
+                preparation_id,
+                preparation_status,
+                error_class,
+                selection_reason: if force_selected {
+                    "force_role".to_string()
+                } else {
+                    "zombie_failed_prep".to_string()
+                },
+            });
+        }
+        Ok(candidates)
+    }
+
+    /// Clear blocking failed / `action_required` preparation for a role so
+    /// Prepare can start fresh. Preserves evaluation receipts, evaluation_sync,
+    /// and canonical tracker fields. Refuses Applied / Discarded.
+    pub fn reset_stuck_preparation_for_role(
+        &mut self,
+        role_id: &str,
+    ) -> Result<StuckPreparationReset, StoreError> {
+        let transaction = self.connection.transaction()?;
+        let role = transaction
+            .query_row(
+                "SELECT company, title, preparation_state, canonical_status
+                   FROM roles WHERE id = ?1",
+                [role_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                    ))
+                },
+            )
+            .optional()?
+            .ok_or_else(|| StoreError::InvalidPreparation("role was not found".to_string()))?;
+        let (company, title, preparation_state_before, canonical_status) = role;
+        if canonical_status
+            .as_deref()
+            .is_some_and(|status| matches!(status.trim().to_ascii_lowercase().as_str(), "applied" | "discarded"))
+        {
+            return Err(StoreError::InvalidPreparation(
+                "refusing to reset preparation for an Applied or Discarded role".to_string(),
+            ));
+        }
+
+        let mut job_statement = transaction.prepare(
+            "SELECT id FROM preparation_jobs
+              WHERE role_id = ?1 AND status = 'action_required'
+              ORDER BY updated_at DESC, id DESC",
+        )?;
+        let preparation_ids = job_statement
+            .query_map([role_id], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(job_statement);
+
+        let now = Utc::now().to_rfc3339();
+        let mut cancelled_preparation_ids = Vec::new();
+        for preparation_id in &preparation_ids {
+            let cancelled = transaction.execute(
+                "UPDATE preparation_jobs SET status = 'cancelled', step = 'cancelled',
+                        error_class = NULL, error_stage = NULL, error_detail = NULL,
+                        retry_policy = NULL, updated_at = ?1
+                  WHERE id = ?2 AND status = 'action_required'",
+                params![now, preparation_id],
+            )?;
+            if cancelled == 1 {
+                cancelled_preparation_ids.push(preparation_id.clone());
+            }
+        }
+
+        let needs_state_reset = preparation_state_before != "not_started";
+        if needs_state_reset {
+            transaction.execute(
+                "UPDATE roles SET preparation_state = 'not_started', updated_at = ?1 WHERE id = ?2",
+                params![now, role_id],
+            )?;
+        }
+
+        let expired_notification_count = if !cancelled_preparation_ids.is_empty() || needs_state_reset
+        {
+            transaction.execute(
+                "UPDATE notification_outbox
+                    SET status = 'expired', last_error = 'stuck_preparation_cleanup'
+                  WHERE status IN ('pending', 'delivering')
+                    AND event_kind = 'preparation_failed'
+                    AND role_id = ?1",
+                [role_id],
+            )?
+        } else {
+            0
+        };
+
+        let changed = needs_state_reset || !cancelled_preparation_ids.is_empty();
+        transaction.commit()?;
+        Ok(StuckPreparationReset {
+            role_id: role_id.to_string(),
+            company,
+            title,
+            preparation_state_before,
+            preparation_state_after: "not_started".to_string(),
+            cancelled_preparation_ids,
+            expired_notification_count: expired_notification_count as usize,
+            changed,
+        })
+    }
+
+    /// Apply Q7=B cleanup for all current candidates (including force roles).
+    pub fn reset_stuck_preparations(
+        &mut self,
+        force_role_ids: &[&str],
+    ) -> Result<Vec<StuckPreparationReset>, StoreError> {
+        let candidates = self.list_stuck_preparation_cleanup_candidates(force_role_ids)?;
+        let mut results = Vec::with_capacity(candidates.len());
+        for candidate in candidates {
+            results.push(self.reset_stuck_preparation_for_role(&candidate.role_id)?);
+        }
+        Ok(results)
     }
 
     pub fn preparation_artifact_paths(
@@ -8350,6 +8542,188 @@ mod tests {
             store.dashboard().unwrap().preparations[0].status,
             "action_required"
         );
+    }
+
+    #[test]
+    fn stuck_preparation_cleanup_resets_zombie_failed_prep_without_touching_evaluation() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+        import_evaluated(&mut store, DATASET);
+        let role_id = store.dashboard().unwrap().roles[0].id.clone();
+        let work = queue_and_claim(&mut store, &role_id, "codex");
+        store
+            .fail_preparation(
+                &work.id,
+                "artifact_commit_failed",
+                "preparation.result.commit",
+                "The artifact could not be committed.",
+            )
+            .unwrap();
+        store
+            .connection
+            .execute(
+                "UPDATE evaluation_sync SET state = 'hidden', reason = 'canonical_evaluation_not_viable'
+                  WHERE role_id = ?1",
+                [&role_id],
+            )
+            .unwrap();
+        store
+            .connection
+            .execute(
+                "UPDATE roles SET canonical_status = 'Evaluated', canonical_tracker_id = 99
+                  WHERE id = ?1",
+                [&role_id],
+            )
+            .unwrap();
+
+        let candidates = store
+            .list_stuck_preparation_cleanup_candidates(&[])
+            .unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].role_id, role_id);
+        assert_eq!(candidates[0].selection_reason, "zombie_failed_prep");
+
+        let reset = store.reset_stuck_preparation_for_role(&role_id).unwrap();
+        assert!(reset.changed);
+        assert_eq!(reset.preparation_state_after, "not_started");
+        assert_eq!(reset.cancelled_preparation_ids, vec![work.id.clone()]);
+
+        let preparation_state: String = store
+            .connection
+            .query_row(
+                "SELECT preparation_state FROM roles WHERE id = ?1",
+                [&role_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(preparation_state, "not_started");
+        assert!(store.dashboard().unwrap().preparations.is_empty());
+        let (eval_state, tracker_id, canonical_status): (String, i64, String) = store
+            .connection
+            .query_row(
+                "SELECT evaluation.state, r.canonical_tracker_id, r.canonical_status
+                   FROM roles r
+                   JOIN evaluation_sync evaluation ON evaluation.role_id = r.id
+                  WHERE r.id = ?1",
+                [&role_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(eval_state, "hidden");
+        assert_eq!(tracker_id, 99);
+        assert_eq!(canonical_status, "Evaluated");
+
+        let again = store.reset_stuck_preparation_for_role(&role_id).unwrap();
+        assert!(!again.changed);
+        assert!(again.cancelled_preparation_ids.is_empty());
+        assert!(
+            store
+                .list_stuck_preparation_cleanup_candidates(&[])
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn stuck_preparation_cleanup_force_includes_needs_decision_failures() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+        import_evaluated(&mut store, DATASET);
+        let role_id = store.dashboard().unwrap().roles[0].id.clone();
+        store
+            .connection
+            .execute(
+                "UPDATE evaluation_sync SET state = 'needs_decision', reason = 'canonical_evaluation_verified'
+                  WHERE role_id = ?1",
+                [&role_id],
+            )
+            .unwrap();
+        let work = queue_and_claim(&mut store, &role_id, "codex");
+        store
+            .fail_preparation(
+                &work.id,
+                "artifact_inspection_unavailable",
+                "artifacts.inspect.v1",
+                "Artifact inspection is unavailable.",
+            )
+            .unwrap();
+
+        assert!(
+            store
+                .list_stuck_preparation_cleanup_candidates(&[])
+                .unwrap()
+                .is_empty(),
+            "needs_decision failures are not zombies"
+        );
+        let forced = store
+            .list_stuck_preparation_cleanup_candidates(&[&role_id])
+            .unwrap();
+        assert_eq!(forced.len(), 1);
+        assert_eq!(forced[0].selection_reason, "force_role");
+
+        let results = store.reset_stuck_preparations(&[&role_id]).unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].changed);
+        assert_eq!(
+            store.dashboard().unwrap().roles[0].preparation_state,
+            "not_started"
+        );
+        let eval_state: String = store
+            .connection
+            .query_row(
+                "SELECT state FROM evaluation_sync WHERE role_id = ?1",
+                [&role_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(eval_state, "needs_decision");
+    }
+
+    #[test]
+    fn stuck_preparation_cleanup_refuses_applied_and_leaves_discarded_history() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+        import_evaluated(&mut store, DATASET);
+        let role_id = store.dashboard().unwrap().roles[0].id.clone();
+        let work = queue_and_claim(&mut store, &role_id, "codex");
+        store
+            .fail_preparation(
+                &work.id,
+                "canonical_writer_failed",
+                "application.applied.confirm",
+                "Canonical write failed.",
+            )
+            .unwrap();
+        store
+            .connection
+            .execute(
+                "UPDATE roles SET canonical_status = 'Applied', preparation_state = 'not_started'
+                  WHERE id = ?1",
+                [&role_id],
+            )
+            .unwrap();
+
+        assert!(
+            store
+                .list_stuck_preparation_cleanup_candidates(&[&role_id])
+                .unwrap()
+                .is_empty()
+        );
+        let err = store.reset_stuck_preparation_for_role(&role_id).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Applied or Discarded"),
+            "{err}"
+        );
+        let status: String = store
+            .connection
+            .query_row(
+                "SELECT status FROM preparation_jobs WHERE id = ?1",
+                [&work.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "action_required");
     }
 
     #[test]
