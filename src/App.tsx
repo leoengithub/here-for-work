@@ -571,7 +571,7 @@ const FRESH_PREPARATION_RETRY_POLICIES = [
 export type PreparationRecoveryAction = "retry" | "prepare_again" | null;
 
 export function preparationRecoveryAction(
-  status: PreparationSummary["status"],
+  status: string,
   retryPolicy: string | null | undefined,
   step?: string,
 ): PreparationRecoveryAction {
