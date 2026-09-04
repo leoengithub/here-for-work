@@ -1,0 +1,7 @@
+error_class=cv_fact_check_failed
+error_stage=stage.fact_verification
+retry_policy=fresh_preparation_provider_run
+error_detail_before=Preparation commit failed with cv_fact_check_failed.
+blocked_claim_example=8 years (metric-like, absent from sources)
+ui_gap=Retry hidden; no Prepare again CTA
+backend_gap=begin_preparation requeued same preparation_id; recover reused poisoned provider-result

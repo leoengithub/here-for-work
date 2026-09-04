@@ -1,0 +1,1 @@
+role=5b2a8484-d54b-40f2-b475-3aa572cdc803|prep_state=not_started|canonical=Evaluated|latest_noncancelled=none|adapter_ready=true
