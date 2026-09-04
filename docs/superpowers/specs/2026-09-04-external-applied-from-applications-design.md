@@ -1,7 +1,7 @@
 # External Applied from Applications
 
 Date: 2026-09-04  
-Status: approved design (pending spec review)  
+Status: approved; implementation plan ready  
 Branch target: `hfw-mark-applied-elsewhere` (draft PR → `main`)
 
 ## Problem
