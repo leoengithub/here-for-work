@@ -66,6 +66,7 @@ import {
   reopenApplicationForm,
   continueInBrowser,
   confirmApplicationApplied,
+  markApplicationApplied,
   getPreparationDetail,
   getCvFallbackSetting,
   focusReviewForm,
@@ -1306,6 +1307,9 @@ export function App() {
   const [dismissPreparationId, setDismissPreparationId] = useState<string | null>(null);
   const [dismissingPreparationId, setDismissingPreparationId] = useState<string | null>(null);
   const [dismissPreparationError, setDismissPreparationError] = useState<string | null>(null);
+  const [markAppliedPreparationId, setMarkAppliedPreparationId] = useState<string | null>(null);
+  const [markingAppliedRoleId, setMarkingAppliedRoleId] = useState<string | null>(null);
+  const [markAppliedError, setMarkAppliedError] = useState<string | null>(null);
   const [enqueuingRoleIds, setEnqueuingRoleIds] = useState<Set<string>>(() => new Set());
   const [cancellationRequestedRoleIds, setCancellationRequestedRoleIds] = useState<Set<string>>(() => new Set());
   const [reopeningPreparationIds, setReopeningPreparationIds] = useState<Set<string>>(() => new Set());
@@ -1834,6 +1838,8 @@ export function App() {
   };
 
   const openDismissPreparation = (preparationId: string) => {
+    setMarkAppliedPreparationId(null);
+    setMarkAppliedError(null);
     setDismissPreparationId(preparationId);
     setDismissPreparationError(null);
     window.requestAnimationFrame(() => {
@@ -1847,6 +1853,57 @@ export function App() {
     window.requestAnimationFrame(() => {
       document.getElementById(`dismiss-preparation-${preparationId}`)?.focus();
     });
+  };
+
+  const openMarkAppliedPreparation = (preparationId: string) => {
+    setDismissPreparationId(null);
+    setDismissPreparationError(null);
+    setMarkAppliedPreparationId(preparationId);
+    setMarkAppliedError(null);
+    window.requestAnimationFrame(() => {
+      document.getElementById(`keep-applied-preparation-${preparationId}`)?.focus();
+    });
+  };
+
+  const keepMarkAppliedPreparation = (preparationId: string) => {
+    setMarkAppliedPreparationId(null);
+    setMarkAppliedError(null);
+    window.requestAnimationFrame(() => {
+      document.getElementById(`mark-applied-preparation-${preparationId}`)?.focus();
+    });
+  };
+
+  const recordExternalApplied = async (item: PreparationSummary) => {
+    if (markingAppliedRoleId) return;
+    setMarkingAppliedRoleId(item.roleId);
+    setError(null);
+    setNotice(null);
+    setMarkAppliedError(null);
+    try {
+      const next = await markApplicationApplied(item.roleId);
+      setDashboard(next);
+      setBrowserSessions(await getBrowserSessions());
+      setPreparationDetail((current) => current?.preparationId === item.id ? null : current);
+      setMarkAppliedPreparationId(null);
+      setNotice(
+        item.appliedTrackingPending
+          ? "Tracking updated. career-ops recorded Applied and the role left Applications."
+          : "External application recorded. career-ops marked Applied; preparation files stay on disk.",
+      );
+    } catch {
+      setMarkAppliedError(
+        "Applied tracking did not finish. The preparation remains in Applications so you can retry only the career-ops update.",
+      );
+      try {
+        const [nextDashboard, nextSessions] = await Promise.all([getDashboard(), getBrowserSessions()]);
+        setDashboard(nextDashboard);
+        setBrowserSessions(nextSessions);
+      } catch {
+        // Keep the row and retry CTA from the last known state.
+      }
+    } finally {
+      setMarkingAppliedRoleId(null);
+    }
   };
 
   const discardPreparation = async (preparationId: string) => {
@@ -1945,6 +2002,30 @@ export function App() {
           .filter((session) => session.purpose === "application" && session.preparationId === preparationDetail.preparationId)
           .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0]
       : undefined;
+    const detailPreparationSummary = preparationDetail
+      ? dashboard.preparations.find((item) => item.id === preparationDetail.preparationId)
+      : undefined;
+    const detailRecordingApplication = Boolean(
+      detailBrowserSession && recordingSessionIds.has(detailBrowserSession.id),
+    );
+    const detailCanMarkApplied = detailPreparationSummary
+      ? canMarkAppliedElsewhere(detailPreparationSummary, detailBrowserSession, {
+          recordingApplication: detailRecordingApplication,
+          dismissing: dismissingPreparationId === detailPreparationSummary.id,
+        })
+      : false;
+    const detailMarkAppliedOpen = Boolean(
+      detailPreparationSummary && markAppliedPreparationId === detailPreparationSummary.id,
+    );
+    const detailMarkAppliedInProgress = Boolean(
+      detailPreparationSummary && markingAppliedRoleId === detailPreparationSummary.roleId,
+    );
+    const detailMarkAppliedLabel = detailPreparationSummary?.appliedTrackingPending
+      ? "Retry tracking update"
+      : "I applied elsewhere";
+    const detailMarkAppliedConfirmLabel = detailPreparationSummary?.appliedTrackingPending
+      ? "Retry tracking update"
+      : "Record Applied";
     mainContent = (
       <main className="status-workspace" aria-labelledby="applications-title">
         <p className="eyebrow">Application workflow</p>
@@ -1965,9 +2046,17 @@ export function App() {
               const applicationState = deriveApplicationState(item, latestSession, recordingApplication);
               const browserActive = Boolean(latestSession && activeBrowserStatuses.has(latestSession.status));
               const canDismissPreparation = canDismissApplicationPreparation(item, latestSession, recordingApplication);
+              const canMarkApplied = canMarkAppliedElsewhere(item, latestSession, {
+                recordingApplication,
+                dismissing: dismissingPreparationId === item.id,
+              });
               const dismissalOpen = dismissPreparationId === item.id;
               const dismissalInProgress = dismissingPreparationId === item.id;
               const recoveryAction = preparationRecoveryAction(item.status, item.retryPolicy, item.step);
+              const markAppliedOpen = markAppliedPreparationId === item.id;
+              const markAppliedInProgress = markingAppliedRoleId === item.roleId;
+              const markAppliedLabel = item.appliedTrackingPending ? "Retry tracking update" : "I applied elsewhere";
+              const markAppliedConfirmLabel = item.appliedTrackingPending ? "Retry tracking update" : "Record Applied";
               const canCancelPreparation = item.status === "queued"
                 || item.status === "preparing"
                 || (item.status === "action_required" && item.errorClass === "app_interrupted");
@@ -1977,7 +2066,7 @@ export function App() {
                 id={`preparation-${item.id}`}
                 data-preparation-id={item.id}
                 data-selected={selectedPreparationId === item.id || undefined}
-                aria-busy={applicationState.active || undefined}
+                aria-busy={applicationState.active || markAppliedInProgress || undefined}
                 tabIndex={-1}
               >
                 <div className="preparation-list__identity">
@@ -2005,20 +2094,33 @@ export function App() {
                 ) : null}
                 {item.status === "action_required" ? (
                   <div className="preparation-list__actions">
-                    <Button variant="outline" type="button" onClick={() => void showPreparationDetail(item.id)} disabled={busy || dismissalInProgress}>
+                    <Button variant="outline" type="button" onClick={() => void showPreparationDetail(item.id)} disabled={busy || dismissalInProgress || markAppliedInProgress}>
                       Details
                     </Button>
                     {recoveryAction ? (
                       <Button
                         type="button"
                         onClick={() => void prepareQueueRole(item.roleId, item.provider)}
-                        disabled={enqueuingRoleIds.has(item.roleId) || dismissalInProgress}
+                        disabled={enqueuingRoleIds.has(item.roleId) || dismissalInProgress || markAppliedInProgress}
                       >
                         {enqueuingRoleIds.has(item.roleId)
                           ? "Queueing…"
                           : recoveryAction === "prepare_again"
                             ? "Prepare again"
                             : "Retry preparation"}
+                      </Button>
+                    ) : null}
+                    {canMarkApplied ? (
+                      <Button
+                        id={`mark-applied-preparation-${item.id}`}
+                        variant="outline"
+                        type="button"
+                        aria-expanded={markAppliedOpen}
+                        aria-controls={`mark-applied-preparation-confirmation-${item.id}`}
+                        onClick={() => openMarkAppliedPreparation(item.id)}
+                        disabled={dismissalInProgress || markAppliedInProgress}
+                      >
+                        {markAppliedLabel}
                       </Button>
                     ) : null}
                     {canDismissPreparation ? (
@@ -2029,7 +2131,7 @@ export function App() {
                         aria-expanded={dismissalOpen}
                         aria-controls={`dismiss-preparation-confirmation-${item.id}`}
                         onClick={() => openDismissPreparation(item.id)}
-                        disabled={dismissalInProgress}
+                        disabled={dismissalInProgress || markAppliedInProgress}
                       >
                         Dismiss
                       </Button>
@@ -2038,10 +2140,10 @@ export function App() {
                 ) : null}
                 {item.status === "completed" ? (
                   <div className="preparation-list__actions">
-                    <Button variant="outline" type="button" onClick={() => void showPreparationDetail(item.id)} disabled={busy || dismissalInProgress}>
+                    <Button variant="outline" type="button" onClick={() => void showPreparationDetail(item.id)} disabled={busy || dismissalInProgress || markAppliedInProgress}>
                       Details
                     </Button>
-                    <Button variant="outline" type="button" onClick={() => void openArtifact(item.id, "cv")} disabled={busy || dismissalInProgress}>
+                    <Button variant="outline" type="button" onClick={() => void openArtifact(item.id, "cv")} disabled={busy || dismissalInProgress || markAppliedInProgress}>
                       {item.cvSource === "user_reviewed_fallback" ? "Open user-reviewed CV" : "Open tailored CV"}
                     </Button>
                     {!latestSession ? (
@@ -2049,13 +2151,13 @@ export function App() {
 
                       type="button"
                       onClick={() => void continuePreparedRole(item.id)}
-                      disabled={busy || dismissalInProgress || !browserSetup?.approvedInstallationId}
+                      disabled={busy || dismissalInProgress || markAppliedInProgress || !browserSetup?.approvedInstallationId}
                     >
                       Open in browser
                     </Button>
                     ) : null}
                     {latestSession?.status === "action_required" ? (
-                      <Button type="button" onClick={() => void retryBrowser(latestSession.id)} disabled={busy || dismissalInProgress}>
+                      <Button type="button" onClick={() => void retryBrowser(latestSession.id)} disabled={busy || dismissalInProgress || markAppliedInProgress}>
                         Retry browser step
                       </Button>
                     ) : null}
@@ -2065,22 +2167,35 @@ export function App() {
                           variant="outline"
                           type="button"
                           onClick={() => void reopenPreparedRole(item.id)}
-                          disabled={busy || dismissalInProgress || reopeningPreparationIds.has(item.id) || recordingApplication}
+                          disabled={busy || dismissalInProgress || markAppliedInProgress || reopeningPreparationIds.has(item.id) || recordingApplication}
                         >
                           {reopeningPreparationIds.has(item.id) ? "Reopening…" : "Reopen and refill"}
                         </Button>
                         <Button
                           type="button"
                           onClick={() => void confirmApplied(latestSession.id)}
-                          disabled={busy || dismissalInProgress || recordingApplication}
+                          disabled={busy || dismissalInProgress || markAppliedInProgress || recordingApplication}
                         >
                           {recordingApplication ? "Recording…" : "I submitted this application"}
                         </Button>
                       </>
                     ) : null}
                     {latestSession?.status === "submitted_tracking_pending" ? (
-                      <Button type="button" onClick={() => void confirmApplied(latestSession.id)} disabled={busy || dismissalInProgress || recordingApplication}>
+                      <Button type="button" onClick={() => void confirmApplied(latestSession.id)} disabled={busy || dismissalInProgress || markAppliedInProgress || recordingApplication}>
                         {recordingApplication ? "Recording…" : "Retry tracking update"}
+                      </Button>
+                    ) : null}
+                    {canMarkApplied ? (
+                      <Button
+                        id={`mark-applied-preparation-${item.id}`}
+                        variant="outline"
+                        type="button"
+                        aria-expanded={markAppliedOpen}
+                        aria-controls={`mark-applied-preparation-confirmation-${item.id}`}
+                        onClick={() => openMarkAppliedPreparation(item.id)}
+                        disabled={dismissalInProgress || markAppliedInProgress || Boolean(browserActive)}
+                      >
+                        {markAppliedLabel}
                       </Button>
                     ) : null}
                     {canDismissPreparation ? (
@@ -2091,12 +2206,50 @@ export function App() {
                         aria-expanded={dismissalOpen}
                         aria-controls={`dismiss-preparation-confirmation-${item.id}`}
                         onClick={() => openDismissPreparation(item.id)}
-                        disabled={busy || dismissalInProgress || Boolean(browserActive)}
+                        disabled={busy || dismissalInProgress || markAppliedInProgress || Boolean(browserActive)}
                       >
                         Dismiss
                       </Button>
                     ) : null}
                   </div>
+                ) : null}
+                {markAppliedOpen ? (
+                  <Alert
+                    id={`mark-applied-preparation-confirmation-${item.id}`}
+                    className="preparation-list__confirmation"
+                  >
+                    <HugeiconsIcon icon={CheckmarkCircle02Icon} strokeWidth={2} aria-hidden="true" />
+                    <AlertTitle>Record Applied?</AlertTitle>
+                    <AlertDescription>
+                      <p>
+                        This records {item.title} as Applied in career-ops. Preparation files stay on disk. HereForWork retires local work and removes the role from Applications.
+                      </p>
+                      {markAppliedError && markAppliedPreparationId === item.id ? (
+                        <p className="preparation-list__dismiss-error" aria-live="assertive">
+                          {markAppliedError}
+                        </p>
+                      ) : null}
+                      <div className="button-cluster">
+                        <Button
+                          id={`keep-applied-preparation-${item.id}`}
+                          className="text-foreground"
+                          variant="outline"
+                          type="button"
+                          onClick={() => keepMarkAppliedPreparation(item.id)}
+                          disabled={markAppliedInProgress}
+                        >
+                          Keep role
+                        </Button>
+                        <Button
+                          type="button"
+                          onClick={() => void recordExternalApplied(item)}
+                          disabled={markAppliedInProgress}
+                        >
+                          {markAppliedInProgress ? "Recording…" : markAppliedConfirmLabel}
+                        </Button>
+                      </div>
+                    </AlertDescription>
+                  </Alert>
                 ) : null}
                 {dismissalOpen ? (
                   <Alert
@@ -2200,11 +2353,62 @@ export function App() {
                   );
                 })()}
                 {detailBrowserSession?.status === "action_required" ? (
-                  <Button type="button" onClick={() => void retryBrowser(detailBrowserSession.id)} disabled={busy}>
+                  <Button type="button" onClick={() => void retryBrowser(detailBrowserSession.id)} disabled={busy || detailMarkAppliedInProgress}>
                     Retry browser step
                   </Button>
                 ) : null}
+                {detailCanMarkApplied && detailPreparationSummary ? (
+                  <Button
+                    id={`mark-applied-preparation-detail-${detailPreparationSummary.id}`}
+                    variant="outline"
+                    type="button"
+                    aria-expanded={detailMarkAppliedOpen}
+                    aria-controls={`mark-applied-preparation-confirmation-detail-${detailPreparationSummary.id}`}
+                    onClick={() => openMarkAppliedPreparation(detailPreparationSummary.id)}
+                    disabled={detailMarkAppliedInProgress}
+                  >
+                    {detailMarkAppliedLabel}
+                  </Button>
+                ) : null}
               </div>
+              {detailMarkAppliedOpen && detailPreparationSummary ? (
+                <Alert
+                  id={`mark-applied-preparation-confirmation-detail-${detailPreparationSummary.id}`}
+                  className="preparation-list__confirmation"
+                >
+                  <HugeiconsIcon icon={CheckmarkCircle02Icon} strokeWidth={2} aria-hidden="true" />
+                  <AlertTitle>Record Applied?</AlertTitle>
+                  <AlertDescription>
+                    <p>
+                      This records {detailPreparationSummary.title} as Applied in career-ops. Preparation files stay on disk. HereForWork retires local work and removes the role from Applications.
+                    </p>
+                    {markAppliedError ? (
+                      <p className="preparation-list__dismiss-error" aria-live="assertive">
+                        {markAppliedError}
+                      </p>
+                    ) : null}
+                    <div className="button-cluster">
+                      <Button
+                        id={`keep-applied-preparation-${detailPreparationSummary.id}`}
+                        className="text-foreground"
+                        variant="outline"
+                        type="button"
+                        onClick={() => keepMarkAppliedPreparation(detailPreparationSummary.id)}
+                        disabled={detailMarkAppliedInProgress}
+                      >
+                        Keep role
+                      </Button>
+                      <Button
+                        type="button"
+                        onClick={() => void recordExternalApplied(detailPreparationSummary)}
+                        disabled={detailMarkAppliedInProgress}
+                      >
+                        {detailMarkAppliedInProgress ? "Recording…" : detailMarkAppliedConfirmLabel}
+                      </Button>
+                    </div>
+                  </AlertDescription>
+                </Alert>
+              ) : null}
               {preparationDetail.cvSource === "user_reviewed_fallback" ? (
                 <Alert>
                   <AlertTitle>User-reviewed CV fallback</AlertTitle>
