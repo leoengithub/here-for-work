@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -23,6 +24,7 @@ pub struct AdapterConfig {
     pub career_ops_root: PathBuf,
     pub tracker_index_path: PathBuf,
     pub staging_path: PathBuf,
+    pub claude_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Error)]
@@ -287,6 +289,10 @@ impl AdapterConfig {
             .env("HFW_CAREER_OPS_ROOT", &self.career_ops_root)
             .env("HFW_CAREER_OPS_INDEX", &self.tracker_index_path)
             .env("HFW_CAREER_OPS_STAGING", &self.staging_path)
+            .env(
+                "PATH",
+                adapter_child_path(std::env::var_os("PATH"), self.claude_path.as_deref()),
+            )
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -758,6 +764,23 @@ fn read_all(mut reader: impl Read) -> std::io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
+fn adapter_child_path(existing: Option<OsString>, claude_path: Option<&Path>) -> OsString {
+    let mut paths = Vec::new();
+    if let Some(parent) = claude_path.and_then(Path::parent) {
+        if !parent.as_os_str().is_empty() {
+            paths.push(parent.to_path_buf());
+        }
+    }
+    if let Some(existing) = existing {
+        for path in std::env::split_paths(&existing) {
+            if !paths.contains(&path) {
+                paths.push(path);
+            }
+        }
+    }
+    std::env::join_paths(paths).unwrap_or_else(|_| OsString::from("/usr/bin:/bin"))
+}
+
 pub fn discover_executable(home: &std::path::Path, name: &str) -> Option<PathBuf> {
     let mut candidates: HashMap<&str, Vec<PathBuf>> = HashMap::new();
     candidates.insert(
@@ -824,6 +847,7 @@ mod evaluation_pointer_tests {
             career_ops_root: directory.path().into(),
             tracker_index_path: directory.path().join("data/applications.db"),
             staging_path: directory.path().join("outside-staging"),
+            claude_path: None,
         };
 
         let input = adapter
@@ -854,6 +878,7 @@ mod evaluation_pointer_tests {
             career_ops_root: directory.path().into(),
             tracker_index_path: directory.path().join("data/applications.db"),
             staging_path: directory.path().join("outside-staging"),
+            claude_path: None,
         };
         assert!(
             adapter
@@ -897,6 +922,7 @@ fi
             career_ops_root: directory.path().into(),
             tracker_index_path: directory.path().join("applications.db"),
             staging_path: directory.path().join("staging"),
+            claude_path: None,
         };
         let input = PreparationRoleInput {
             preparation_id: "55555555-5555-4555-8555-555555555555".to_string(),
@@ -988,5 +1014,71 @@ fi
                 "preparation.result.commit must not include context-only field `{forbidden}`"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod adapter_spawn_path_tests {
+    use super::{AdapterConfig, adapter_child_path};
+    use serde_json::json;
+    use std::ffi::OsString;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn adapter_child_path_prepends_discovered_claude_directory() {
+        let path = adapter_child_path(
+            Some(OsString::from("/usr/bin:/bin")),
+            Some(Path::new("/Users/example/.local/bin/claude")),
+        );
+        let entries = std::env::split_paths(&path).collect::<Vec<_>>();
+
+        assert_eq!(
+            entries.first().map(PathBuf::as_path),
+            Some(Path::new("/Users/example/.local/bin"))
+        );
+        assert!(entries.contains(&PathBuf::from("/usr/bin")));
+        assert!(entries.contains(&PathBuf::from("/bin")));
+    }
+
+    #[test]
+    fn adapter_spawn_env_includes_discovered_claude_directory() {
+        let directory = tempfile::tempdir().unwrap();
+        let claude_dir = directory.path().join("discovered-bin");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        let claude_path = claude_dir.join("claude");
+        std::fs::write(&claude_path, "#!/bin/sh\n").unwrap();
+        let path_log = directory.path().join("child-path.txt");
+        let script = directory.path().join("adapter.sh");
+        std::fs::write(
+            &script,
+            format!(
+                r#"#!/bin/sh
+request=$(cat)
+printf '%s\n' "$PATH" > '{}'
+id=$(printf '%s' "$request" | sed -E 's/.*"id":"([^"]+)".*/\1/')
+printf '{{"id":"%s","ok":true,"result":{{"ok":true}}}}\n' "$id"
+"#,
+                path_log.display()
+            ),
+        )
+        .unwrap();
+        let adapter = AdapterConfig {
+            node_path: "/bin/sh".into(),
+            script_path: script,
+            career_ops_root: directory.path().into(),
+            tracker_index_path: directory.path().join("applications.db"),
+            staging_path: directory.path().join("staging"),
+            claude_path: Some(claude_path),
+        };
+
+        adapter.request("capabilities.get", json!({})).unwrap();
+        let spawned_path = std::fs::read_to_string(&path_log).unwrap();
+        let entries = std::env::split_paths(spawned_path.trim()).collect::<Vec<_>>();
+
+        assert!(
+            entries.iter().any(|entry| entry == &claude_dir),
+            "adapter spawn PATH must include the discovered claude directory, got {}",
+            spawned_path.trim()
+        );
     }
 }
