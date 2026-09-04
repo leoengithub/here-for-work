@@ -617,6 +617,7 @@ async function runCareerOpsScript(scriptName, args, extraEnv = {}) {
       if (code !== 0) {
         const error = new Error(`career-ops ${scriptName} exited with status ${code}.`);
         error.exitCode = code;
+        error.output = output;
         error.diagnostics = diagnostics;
         reject(error);
         return;

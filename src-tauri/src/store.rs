@@ -3762,40 +3762,63 @@ impl Store {
         }
         let existing = transaction
             .query_row(
-                "SELECT id, provider FROM preparation_jobs
+                "SELECT id, provider, retry_policy FROM preparation_jobs
                   WHERE role_id = ?1 AND status = 'action_required'
                   ORDER BY updated_at DESC LIMIT 1",
                 [role_id],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
             )
             .optional()?;
-        if let Some((id, stored_provider)) = existing {
-            if stored_provider != provider {
-                return Err(StoreError::InvalidPreparation(format!(
-                    "retry must use the original {stored_provider} provider"
-                )));
+        if let Some((id, stored_provider, retry_policy)) = existing {
+            let requires_fresh_preparation = matches!(
+                retry_policy.as_deref(),
+                Some("fresh_preparation_provider_run") | Some("fresh_preparation_id")
+            );
+            if requires_fresh_preparation {
+                transaction.execute(
+                    "UPDATE preparation_jobs
+                        SET status = 'cancelled', step = 'cancelled',
+                            error_class = NULL, error_stage = NULL, error_detail = NULL,
+                            retry_policy = NULL, updated_at = ?1
+                      WHERE id = ?2 AND status = 'action_required'",
+                    params![now, id],
+                )?;
+                // Fall through to insert a new preparation id so recover cannot
+                // reuse a poisoned provider-result from the failed job.
+            } else {
+                if stored_provider != provider {
+                    return Err(StoreError::InvalidPreparation(format!(
+                        "retry must use the original {stored_provider} provider"
+                    )));
+                }
+                transaction.execute(
+                    "UPDATE preparation_jobs
+                        SET status = 'queued', step = 'queued',
+                            error_class = NULL, error_stage = NULL, error_detail = NULL,
+                            retry_policy = NULL,
+                            updated_at = ?1
+                      WHERE id = ?2",
+                    params![now, id],
+                )?;
+                transaction.execute(
+                    "UPDATE roles SET preparation_state = 'queued', updated_at = ?1 WHERE id = ?2",
+                    params![now, role_id],
+                )?;
+                transaction.commit()?;
+                return Ok(PreparationWork {
+                    id,
+                    role_id: role_id.to_string(),
+                    provider: stored_provider,
+                    role,
+                    evaluation,
+                });
             }
-            transaction.execute(
-                "UPDATE preparation_jobs
-                    SET status = 'queued', step = 'queued',
-                        error_class = NULL, error_stage = NULL, error_detail = NULL,
-                        retry_policy = NULL,
-                        updated_at = ?1
-                  WHERE id = ?2",
-                params![now, id],
-            )?;
-            transaction.execute(
-                "UPDATE roles SET preparation_state = 'queued', updated_at = ?1 WHERE id = ?2",
-                params![now, role_id],
-            )?;
-            transaction.commit()?;
-            return Ok(PreparationWork {
-                id,
-                role_id: role_id.to_string(),
-                provider: stored_provider,
-                role,
-                evaluation,
-            });
         }
         let already_active: bool = transaction.query_row(
             "SELECT EXISTS(
@@ -8993,6 +9016,60 @@ mod tests {
             completed.preparations[0].cv_pdf_path.as_deref(),
             Some("output/042-example/cv.pdf")
         );
+    }
+
+    #[test]
+    fn fresh_preparation_provider_run_starts_a_new_preparation_id() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+        import_evaluated(&mut store, DATASET);
+        let role_id = store.dashboard().unwrap().roles[0].id.clone();
+        let first = queue_and_claim(&mut store, &role_id, "codex");
+        store
+            .fail_preparation_with_policy(
+                &first.id,
+                "cv_fact_check_failed",
+                "stage.fact_verification",
+                "CV fact check failed — unsupported metric-like claims: 8 years",
+                "fresh_preparation_provider_run",
+            )
+            .unwrap();
+
+        let restarted = store.begin_preparation(&role_id, "codex").unwrap();
+        assert_ne!(restarted.id, first.id);
+        let failed_status: String = store
+            .connection
+            .query_row(
+                "SELECT status FROM preparation_jobs WHERE id = ?1",
+                [&first.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(failed_status, "cancelled");
+        let claimed = store.claim_preparation_work().unwrap().unwrap();
+        assert_eq!(claimed.id, restarted.id);
+        assert_ne!(claimed.id, first.id);
+    }
+
+    #[test]
+    fn fresh_preparation_id_policy_also_starts_a_new_preparation_id() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+        import_evaluated(&mut store, DATASET);
+        let role_id = store.dashboard().unwrap().roles[0].id.clone();
+        let first = queue_and_claim(&mut store, &role_id, "codex");
+        store
+            .fail_preparation_with_policy(
+                &first.id,
+                "context_changed",
+                "commit.validate",
+                "Context changed before commit.",
+                "fresh_preparation_id",
+            )
+            .unwrap();
+
+        let restarted = store.begin_preparation(&role_id, "codex").unwrap();
+        assert_ne!(restarted.id, first.id);
     }
 
     #[test]

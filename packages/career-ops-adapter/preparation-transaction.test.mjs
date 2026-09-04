@@ -209,6 +209,7 @@ async function harness(options = {}) {
     if (options.failScript === script) {
       const error = new Error(`${"x".repeat(80_000)} /Users/private/name user@example.test`);
       error.exitCode = options.exitCode ?? 9;
+      if (options.failScriptOutput !== undefined) error.output = options.failScriptOutput;
       throw error;
     }
     if (script === "reserve-report-num.mjs") {
@@ -226,7 +227,16 @@ async function harness(options = {}) {
       return { output: "", diagnostics: "" };
     }
     if (script === "verify-cv-facts.mjs") {
-      return { output: JSON.stringify({ verdict: options.factVerdict ?? "pass" }), diagnostics: "" };
+      return {
+        output: JSON.stringify(options.factCheckResult ?? {
+          verdict: options.factVerdict ?? "pass",
+          invented: options.factVerdict === "block" ? ["8 years"] : [],
+          unsupportedFacts: [],
+          forbidden: [],
+          warnings: [],
+        }),
+        diagnostics: "",
+      };
     }
     if (script === "generate-pdf.mjs") {
       await mkdir(dirname(args[1]), { recursive: true });
@@ -352,7 +362,34 @@ test("successful commands cannot bypass HTML or fact-result validation", async (
   await expectFailure(invalidHtml.commit, "cv_build_failed", "retry_same_preparation");
 
   const blockedFacts = await harness({ factVerdict: "block" });
-  await expectFailure(blockedFacts.commit, "cv_fact_check_failed", "fresh_preparation_provider_run");
+  await assert.rejects(blockedFacts.commit, (error) => {
+    assert.equal(error instanceof PreparationTransactionError, true);
+    assert.equal(error.code, "cv_fact_check_failed");
+    assert.equal(error.retryPolicy, "fresh_preparation_provider_run");
+    assert.match(error.message, /unsupported metric-like claims: 8 years/);
+    assert.doesNotMatch(error.message, /user@example|Users\/private|x{40}/);
+    return true;
+  });
+});
+
+test("verify-cv-facts exit failures keep bounded invented-claim diagnostics", async () => {
+  const fixture = await harness({
+    failScript: "verify-cv-facts.mjs",
+    failScriptOutput: JSON.stringify({
+      verdict: "block",
+      invented: ["8 years"],
+      unsupportedFacts: [],
+      forbidden: [],
+      warnings: [],
+    }),
+  });
+  await assert.rejects(fixture.commit, (error) => {
+    assert.equal(error.code, "cv_fact_check_failed");
+    assert.equal(error.retryPolicy, "fresh_preparation_provider_run");
+    assert.match(error.message, /unsupported metric-like claims: 8 years/);
+    assert.doesNotMatch(error.message, /Preparation commit failed with cv_fact_check_failed/);
+    return true;
+  });
 });
 
 test("context changes fail before commit and after staging", async () => {

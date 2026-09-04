@@ -39,10 +39,11 @@ next startup. They are not replayed after a restart. Closing only the window lea
 background app running, so a later outcome may still be delivered natively during that
 same app session.
 
-Retry is available in preparation Details only when the stored policy permits reusing
-the same preparation (`retry_same_preparation` or `repair_runtime_then_retry`). Policies
-that require a fresh provider run, a fresh preparation ID, or manual repair never reuse
-the failed preparation automatically.
+Retry is available in preparation Details when the stored policy permits recovery.
+`retry_same_preparation` and `repair_runtime_then_retry` reuse the same preparation id.
+`fresh_preparation_provider_run` and `fresh_preparation_id` expose Prepare again, which
+cancels the failed job and starts a new preparation id so provider results are never
+reused. `manual_repair_required` stays diagnostic only.
 
 The HereForWork adapter owns the durable compensating preparation transaction and uses
 fixed upstream career-ops CLIs. Structured code, stage, retry policy, and bounded
