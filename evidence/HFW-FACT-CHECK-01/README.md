@@ -54,3 +54,9 @@ node scripts/reset-stuck-preparations.mjs --apply --force-role-id 5b2a8484-d54b-
 ```
 
 Do not paste personal career data, full provider transcripts, or raw CV HTML here.
+
+## Post-ship (2026-09-04)
+
+- Desktop installed: `/Users/leo/Desktop/HereForWork.app` CFBundleShortVersionString `0.1.3`
+- Draft PR: https://github.com/leoengithub/here-for-work/pull/10
+- Live BCNC already `not_started` / `Evaluated` with prior fact-check jobs `cancelled` (force-reset candidates empty — no blocking failed prep)
