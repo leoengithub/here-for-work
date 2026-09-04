@@ -1,7 +1,9 @@
 # career-ops capability boundary
 
-Status: version 1 manifest implemented; evaluation-result reading is conditional; discovery/evaluation execution/browser operations are not implemented
-Audit date: 2026-09-02
+Status: version 1 manifest implemented; evaluation-result reading is conditional;
+evaluation.full_ag.run.v1 is conditional when batch-runner + Claude CLI probes pass;
+discovery execution and browser operations are not implemented
+Audit date: 2026-09-04
 
 This document records which existing career-ops interfaces HereForWork may safely wrap,
 which interfaces require a guarded compatibility adapter, and which approved product
@@ -86,7 +88,7 @@ working implementation ideas; they are not a published external protocol.
 | Agentic broad Web search | `modes/scan.md` instructions and the career-ops web Explore implementation | Internal/presentation only | No callable public contract exists. Keep this source blocked rather than claiming that `scan.mjs` provides it. |
 | Company to ATS expansion | `discover-ats.mjs` preview emits documented JSON (`metadata`, `resolved`, `unresolved`, `pendingEntries`); `--write` is explicit | Contracted for preview | Wrap preview only. Any configuration write remains a separate visible user-approved action; HereForWork never adds `--write` silently. |
 | Per-role liveness | `check-liveness.mjs` emits prose and an aggregate exit code; `liveness-core.mjs` exports internal objects | Presentation/internal only | No typed per-role public result exists. Pre-Queue publication remains blocked until the adapter has a versioned active/expired/uncertain result with evidence. |
-| Full A-G evaluation | `modes/oferta.md` and `modes/pipeline.md` agent instructions; web `/api/run` orchestrates them internally | Internal/presentation only | No public versioned evaluate-one or evaluate-batch process contract exists. Do not parse agent prose or call the private web route. |
+| Full A-G evaluation | `batch/batch-runner.sh` plus post-condition validation through `evaluation.result.read.v1` | Conditional, side-effecting | HFW wraps the fixed batch runner for one HTTPS URL at a time, refuses concurrent/busy batch input, and accepts only a typed receipt after report/tracker identity agreement. Exit codes and worker console prose are never success. |
 | Batch parallelism | `batch/batch-runner.sh --parallel N` with fixed in-repository input/state/log paths and canonical side effects | Conditional, side-effecting | Proven behavior exists, but it is not isolatable or idempotent enough for direct HFW orchestration. Require a supported invocation contract or an upstream-neutral wrapper boundary before use. |
 | Model tier/routing | `config/profile.yml` `spend_tier`; batch `--model`; economy pre-screen for standard/premium | Conditional | HFW may read and report the supported setting. It must not select an uncontracted model or rewrite the preference. |
 | Low-confidence escalation and audit sample | No matching behavior in the inspected batch/pipeline implementation | Missing | Approved target remains blocked; do not describe ordinary pre-screening as escalation or sampling. |
@@ -130,8 +132,10 @@ executor.
 The current probe revision intentionally keeps company-to-ATS preview and evaluation
 result reading degraded until safe strict result-shape probes exist. Reverse-ATS remains
 degraded when its script is present because checkout-local cache writes are not isolated.
-Typed liveness, full A-G execution/receipt, artifact freshness, and browser review fallback
-remain unavailable. The canonical Applied writer reports degraded—not supported—when the
+Typed liveness and browser review fallback remain unavailable. `artifacts.inspect.v1` is
+degraded when the revision-pinned artifact script probe succeeds (canonical report reuse
+plus hash-bound HFW bundles only; unproven career-ops CV/PDF output still refreshes). The
+canonical Applied writer reports degraded—not supported—when the
 exact revision and all fixed writer scripts are readable: existing writes remain
 post-verified, but filename presence is not a side-effect-free semantic compatibility
 probe. Missing scripts or revision make it unavailable without removing the existing
@@ -154,8 +158,9 @@ The smallest semantic capability set required by the approved workflow is:
    a verified zero-checkout-write upstream mode.
 2. `discovery.company_ats.preview.v1` — typed preview; no implicit configuration write.
 3. `liveness.role.read.v1` — active/expired/uncertain with source evidence.
-4. `evaluation.full_ag.run.v1` — fixed full evaluation producing an idempotent result
-   receipt, complete report, canonical score, and optional threshold-gated artifacts.
+4. `evaluation.full_ag.run.v1` — HFW-owned wrapper around `batch/batch-runner.sh`
+   that produces an idempotent result receipt only after `evaluation.result.read.v1`
+   post-conditions pass for the exact report/tracker pair.
 5. `evaluation.result.read.v1` — strict report/tracker reconciliation and evidence
    projection; implemented as a conditional read operation, not a pre-Queue executor.
 6. `artifacts.inspect.v1` — source/output identity, validation outcome, provenance,
@@ -165,12 +170,15 @@ The smallest semantic capability set required by the approved workflow is:
    action.
 8. `canonical.applied.write.v1` — existing idempotent tracking-only transition.
 
-Capabilities 3, 4, 6, and 7 are unavailable against both audited revisions. Capability 5
-is conditional and only accepts the installed checkout’s richer authorization shape
-when its exact compatibility fingerprint is supplied and remains stable. Capability 1
-is conditional; capability 2 and the narrow read/write pieces behind capability 8 have
-usable machine surfaces. The pre-Queue pipeline and Playwright fallback must not be
-enabled until their required capabilities are supported.
+Capabilities 3 and 7 remain unavailable against both audited revisions. Capability 4 is
+conditional when `batch/batch-runner.sh`, the evaluation result probe sources, and the
+`claude` CLI used by batch workers are present; HereForWork composes the receipt from
+post-conditions rather than treating batch stdout as an API. Capability 5 is conditional
+and only accepts the installed checkout’s richer authorization shape when its exact
+compatibility fingerprint is supplied and remains stable. Capability 1 is conditional;
+capability 2 and the narrow read/write pieces behind capability 8 have usable machine
+surfaces. Capability 6 remains conditional for hash-bound HFW bundles. The Playwright
+fallback must not be enabled until capability 7 is supported.
 
 ## Fail-closed invariants
 

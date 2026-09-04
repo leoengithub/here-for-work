@@ -31,6 +31,9 @@ The implemented read-only operations are:
   browser or a valid hash-bound user-reviewed PDF fallback.
 - `history.snapshot`: asks career-ops' tracker to return structured canonical
   application records from its rebuildable SQLite index.
+- `evaluation.full_ag.run.v1`: launches one career-ops batch evaluation for a single
+  HTTPS URL through the fixed `batch/batch-runner.sh` surface, then returns a typed
+  receipt only after `evaluation.result.read.v1` post-conditions succeed.
 - `evaluation.result.read.v1`: reads one known report/tracker result through the
   conditional, fingerprint-bound contract in [`evaluation-result.md`](evaluation-result.md).
 - `artifacts.inspect.v1`: proves the current canonical report and classifies exact
@@ -227,6 +230,12 @@ Canonical decision operations are:
 Canonical Applied is terminal for HereForWork. Follow-up, outreach, reply monitoring,
 interviews, and post-application CRM remain outside this protocol. Interview preparation
 may be report content, but it does not create post-Applied workflow state.
+
+Canonical Rejected is also terminal for HereForWork evaluation sync, on the same path as
+Applied and Discarded (`evaluation_sync` → `state=terminal` / `reason=canonical_terminal`).
+Finished rejections must not enter Queue Needs attention or request career-ops repair.
+Other non-Evaluated canonical statuses remain Needs attention unless a product decision
+also marks them terminal.
 
 Canonical decisions carry a UUID idempotency key. HereForWork retains that key across
 retries, and the adapter verifies the canonical row plus the effect marker before

@@ -1,0 +1,44 @@
+{
+  "roleId": "5b2a8484-d54b-40f2-b475-3aa572cdc803",
+  "company": "BCNC GROUP",
+  "title": "Senior React Frontend Developer",
+  "url": "https://www.linkedin.com/jobs/view/4441477799/",
+  "ok": true,
+  "startedAt": "2026-09-04T09:55:00.295Z",
+  "finishedAt": "2026-09-04T09:55:00.572Z",
+  "error": null,
+  "receipt": {
+    "contract": "hereforwork.career-ops-evaluation-receipt",
+    "schemaVersion": 1,
+    "upstreamRevision": "3988ef93cfc2c89790e1cd9379ba242d7048ff5e",
+    "compatibilityFingerprint": "6e1175cf362237a583ae0a56224c51143b26d9af2cc61af713e693aab86d72ed",
+    "report": {
+      "path": "reports/147-bcnc-group-2026-09-04.md",
+      "sha256": "50e7960620f825643d60189f882e1d18c55139eb5c7d0444e6c9221ce7efd2a2"
+    },
+    "role": {
+      "company": "BCNC GROUP",
+      "title": "Senior React Frontend Developer"
+    },
+    "canonical": {
+      "trackerId": 147,
+      "status": "Evaluated",
+      "score": 3.6,
+      "reportPath": "reports/147-bcnc-group-2026-09-04.md"
+    },
+    "evaluation": {
+      "score": 3.6,
+      "finalDecision": "Consider",
+      "legitimacyTier": "High Confidence",
+      "riskLevel": "Medium",
+      "confidence": "Medium"
+    },
+    "execution": {
+      "surface": "batch/batch-runner.sh",
+      "offerId": 117922,
+      "url": "https://www.linkedin.com/jobs/view/4441477799/",
+      "executed": false,
+      "completedAt": "2026-09-04T09:55:00.567Z"
+    }
+  }
+}

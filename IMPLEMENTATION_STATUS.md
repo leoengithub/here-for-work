@@ -1,7 +1,17 @@
 # Implementation status
 
-Date: 2026-09-03
-Stage: typed discovery ingestion and consumption-side direction integrated; primary browser contract and Applied retirement remain locally validated
+Date: 2026-09-04
+Stage: typed discovery ingestion integrated; evaluation.full_ag.run.v1 compatibility executor landed on branch work; primary browser contract and Applied retirement remain locally validated
+
+## Evaluation executor boundary — 2026-09-04
+
+`evaluation.full_ag.run.v1` is now a conditional HFW-owned adapter operation. It wraps
+career-ops `batch/batch-runner.sh` for one HTTPS URL, refuses busy/concurrent batch
+input, and emits a typed receipt only after `evaluation.result.read.v1` post-conditions
+pass. Version/capability detection stays in HereForWork (D-052). The evaluation sync
+path may invoke the executor when the capability is degraded; set
+`HFW_EVALUATION_EXECUTOR_ALLOWLIST` to a comma-separated role ID list to scope live
+runs. Remaining awaiting roles outside an allowlist stay held without silent loss.
 
 ## Current direction closeout
 

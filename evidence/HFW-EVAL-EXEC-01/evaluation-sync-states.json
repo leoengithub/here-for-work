@@ -1,0 +1,40 @@
+{
+  "generatedAt": "2026-09-04T09:55:20.986Z",
+  "syncOutcomes": [
+    {
+      "roleId": "5b2a8484-d54b-40f2-b475-3aa572cdc803",
+      "ok": true,
+      "evaluationSync": {
+        "state": "needs_decision",
+        "reason": "canonical_evaluation_verified",
+        "trackerId": 147,
+        "canonicalStatus": "Evaluated"
+      },
+      "nativeScore": 3.6,
+      "reportPath": "reports/147-bcnc-group-2026-09-04.md"
+    },
+    {
+      "roleId": "35f21536-fc15-4d9c-9c9e-f4bcc1cccb1f",
+      "ok": false,
+      "evaluationSync": {
+        "state": "needs_attention",
+        "reason": "evaluation_executor_failed",
+        "trackerId": null,
+        "canonicalStatus": null
+      },
+      "error": "careers listing URL has no evaluable JD"
+    },
+    {
+      "roleId": "93d4ef6b-0e49-4513-baf8-58d47033f9fb",
+      "ok": true,
+      "evaluationSync": {
+        "state": "hidden",
+        "reason": "canonical_evaluation_not_viable",
+        "trackerId": 148,
+        "canonicalStatus": "Evaluated"
+      },
+      "nativeScore": 2.7,
+      "reportPath": "reports/148-nunegal-consulting-2026-09-04.md"
+    }
+  ]
+}

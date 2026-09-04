@@ -19,6 +19,10 @@ import {
   commitSelectivePreparationTransaction,
   reviewedCvFallbackReady,
 } from "./preparation-transaction.mjs";
+import {
+  fullAgCompatibilityProbe,
+  runFullAgEvaluation,
+} from "./evaluation-executor.mjs";
 
 const PROTOCOL_VERSION = 1;
 const CAPABILITY_SCHEMA_VERSION = 1;
@@ -45,12 +49,18 @@ const ARTIFACT_INSPECTION_PROBE_FILES = Object.freeze([
   "build-cv-html.mjs",
   "verify-cv-facts.mjs",
   "generate-pdf.mjs",
+  "tracker-utils.mjs",
 ]);
 const ARTIFACT_INSPECTION_MARKERS = Object.freeze({
   "application-artifacts.mjs": ["applicationArtifactPaths", "writeReuseDecision", "schema_version: 1"],
-  "build-cv-html.mjs": ["cv-payload", "page_format"],
+  // HFW calls `node build-cv-html.mjs <cv-payload.json> <cv.html>`; the script
+  // documents that CLI as <input.json> <output.html> and still reads page_format.
+  "build-cv-html.mjs": ["<input.json> <output.html>", "page_format"],
   "verify-cv-facts.mjs": ["--json", "verdict"],
-  "generate-pdf.mjs": ["CAREER_OPS_PDF_INDEX", "# report\\tpdf\\thtml\\tformat\\tdate"],
+  // PDF index env override lives in tracker-utils; generate-pdf imports the resolver
+  // and still writes the documented TSV header HFW's preparation transaction expects.
+  "generate-pdf.mjs": ["resolvePdfIndexPath", "# report\\tpdf\\thtml\\tformat\\tdate"],
+  "tracker-utils.mjs": ["CAREER_OPS_PDF_INDEX", "resolvePdfIndexPath"],
 });
 const SEMVER_RE = /^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$/;
 const GIT_SHA_RE = /^[0-9a-f]{40}$/;
@@ -67,6 +77,7 @@ const operations = Object.freeze([
   "capabilities.get",
   "health.check",
   "history.snapshot",
+  "evaluation.full_ag.run.v1",
   "evaluation.result.read.v1",
   "artifacts.inspect.v1",
   "profile.queue_filters.get",
@@ -283,7 +294,7 @@ function capability(id, status, interfaceClass, sourceRevision, constraints, com
 }
 
 async function capabilityManifest() {
-  const [revision, declaredVersion, threshold, surfaces, evaluationProbe, artifactProbe] = await Promise.all([
+  const [revision, declaredVersion, threshold, surfaces, evaluationProbe, artifactProbe, fullAgProbe] = await Promise.all([
     gitHeadRevision(),
     upstreamDeclaredVersion(),
     effectiveAutoPdfScoreThreshold(),
@@ -296,6 +307,7 @@ async function capabilityManifest() {
     ].map(async (name) => [name, Boolean(root && (await canRead(resolve(root, name))))])),
     evaluationResultCompatibilityProbe(),
     artifactInspectionCompatibilityProbe(),
+    fullAgCompatibilityProbe(root),
   ]);
   const readable = Object.fromEntries(surfaces);
   const diagnostics = [];
@@ -369,12 +381,31 @@ async function capabilityManifest() {
     "career-ops does not expose a typed public per-role liveness result.",
     "Wait for an upstream-neutral active, expired, or uncertain result with evidence.",
   );
-  addDiagnostic(
-    "typed_interface_unavailable",
-    "evaluation.full_ag.run.v1",
-    "career-ops does not expose a versioned full A-G execution and atomic receipt contract.",
-    "Wait for an upstream-neutral typed execution and receipt interface.",
+  const fullAgReady = Boolean(
+    revision
+    && fullAgProbe.fingerprint
+    && evaluationProbe.fingerprint
+    && fullAgProbe.claudeAvailable,
   );
+  if (fullAgReady) {
+    addDiagnostic(
+      "hfw_composed_evaluation_receipt",
+      "evaluation.full_ag.run.v1",
+      "Full A-G execution wraps batch/batch-runner.sh and accepts only evaluation.result.read.v1 post-conditions as the typed receipt.",
+      "Keep revision and fingerprint probes current; never treat batch exit codes or worker console prose as success.",
+    );
+  } else {
+    addDiagnostic(
+      fullAgProbe.claudeAvailable ? "typed_interface_unavailable" : "evaluation_executor_runtime_unavailable",
+      "evaluation.full_ag.run.v1",
+      fullAgProbe.claudeAvailable
+        ? "career-ops batch evaluation surfaces are incomplete for a fail-closed HFW receipt."
+        : "The claude CLI required by career-ops batch-runner.sh is unavailable on PATH.",
+      fullAgProbe.claudeAvailable
+        ? "Restore batch-runner.sh, batch-prompt.md, merge-tracker.mjs, and the evaluation result probe sources."
+        : "Install and authenticate the Claude Code CLI used by career-ops batch workers, then re-run capabilities.get.",
+    );
+  }
   addDiagnostic(
     "safe_shape_probe_required",
     "evaluation.result.read.v1",
@@ -434,11 +465,18 @@ async function capabilityManifest() {
       "requires_exact_upstream_revision",
       "requires_typed_per_role_evidence",
     ]),
-    capability("evaluation.full_ag.run.v1", "unavailable", "missing", revision, [
-      "requires_exact_upstream_revision",
-      "requires_atomic_evaluation_receipt",
-      "native_score_1_to_5",
-    ]),
+    capability(
+      "evaluation.full_ag.run.v1",
+      fullAgReady ? "degraded" : "unavailable",
+      "conditional",
+      revision,
+      [
+        "requires_exact_upstream_revision",
+        "requires_atomic_evaluation_receipt",
+        "native_score_1_to_5",
+      ],
+      fullAgReady ? fullAgProbe.fingerprint : null,
+    ),
     capability("evaluation.result.read.v1", "degraded", "conditional", revision, [
       "requires_exact_upstream_revision",
       "requires_safe_shape_probe",
@@ -2242,6 +2280,20 @@ async function execute(request) {
       const records = JSON.parse(output);
       if (!Array.isArray(records)) throw new Error("career-ops returned an invalid history snapshot.");
       return { records, diagnostics: diagnostics || null };
+    }
+    case "evaluation.full_ag.run.v1": {
+      assertInputKeys(
+        request.input,
+        ["url", "company", "title", "compatibilityFingerprint", "source"],
+        "evaluation.full_ag.run.v1",
+      );
+      return runFullAgEvaluation({
+        root,
+        input: request.input ?? {},
+        capabilityManifest,
+        readEvaluationResult,
+        runTracker,
+      });
     }
     case "evaluation.result.read.v1":
       return readEvaluationResult(request.input ?? {});

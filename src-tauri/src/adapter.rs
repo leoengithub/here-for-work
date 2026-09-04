@@ -254,8 +254,9 @@ pub struct AdapterHealth {
 
 impl AdapterConfig {
     pub fn request(&self, operation: &str, input: Value) -> Result<Value, AdapterError> {
-        let timeout = if operation.starts_with("preparation.") || operation.starts_with("answers.")
-        {
+        let timeout = if operation == "evaluation.full_ag.run.v1" {
+            Duration::from_secs(3_600)
+        } else if operation.starts_with("preparation.") || operation.starts_with("answers.") {
             Duration::from_secs(240)
         } else {
             Duration::from_secs(15)
@@ -416,6 +417,26 @@ impl AdapterConfig {
         let result = self.request(
             "evaluation.result.read.v1",
             serde_json::to_value(input).expect("evaluation result input serializes"),
+        )?;
+        serde_json::from_value(result).map_err(|error| AdapterError::InvalidData(error.to_string()))
+    }
+
+    pub fn evaluation_full_ag_run(
+        &self,
+        url: &str,
+        company: &str,
+        title: &str,
+        compatibility_fingerprint: &str,
+    ) -> Result<EvaluationResultRead, AdapterError> {
+        let result = self.request(
+            "evaluation.full_ag.run.v1",
+            json!({
+                "url": url,
+                "company": company,
+                "title": title,
+                "compatibilityFingerprint": compatibility_fingerprint,
+                "source": "HereForWork",
+            }),
         )?;
         serde_json::from_value(result).map_err(|error| AdapterError::InvalidData(error.to_string()))
     }

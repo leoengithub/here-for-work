@@ -23,6 +23,28 @@ use tauri::Manager;
 use tauri_plugin_autostart::ManagerExt;
 use tauri_plugin_notification::NotificationExt;
 
+/// One-shot Q7=B local stuck-preparation cleanup against a store database.
+pub fn list_stuck_preparation_cleanup_candidates(
+    db_path: impl AsRef<std::path::Path>,
+    force_role_ids: &[&str],
+) -> Result<Vec<domain::StuckPreparationCandidate>, String> {
+    let store = Store::open(db_path).map_err(|error| error.to_string())?;
+    store
+        .list_stuck_preparation_cleanup_candidates(force_role_ids)
+        .map_err(|error| error.to_string())
+}
+
+/// Apply Q7=B stuck-preparation cleanup. Idempotent; refuses Applied/Discarded.
+pub fn reset_stuck_preparations(
+    db_path: impl AsRef<std::path::Path>,
+    force_role_ids: &[&str],
+) -> Result<Vec<domain::StuckPreparationReset>, String> {
+    let mut store = Store::open(db_path).map_err(|error| error.to_string())?;
+    store
+        .reset_stuck_preparations(force_role_ids)
+        .map_err(|error| error.to_string())
+}
+
 pub(crate) const PUBLIC_CV_FILENAME: &str = "Leonardo_Gomez_Frontend_Engineer.pdf";
 
 struct AppState {
@@ -1841,7 +1863,7 @@ fn sync_evaluations_internal(state: &AppState) -> Result<EvaluationSyncResult, S
             for role in roles {
                 if matches!(
                     role.canonical_status.as_deref(),
-                    Some("Applied" | "Discarded")
+                    Some("Applied" | "Discarded" | "Rejected")
                 ) {
                     store
                         .hold_evaluation(&role.role_id, "terminal", "canonical_terminal")
@@ -1870,6 +1892,17 @@ fn sync_evaluations_internal(state: &AppState) -> Result<EvaluationSyncResult, S
     sync_evaluations_with_records(state, &records)
 }
 
+fn evaluation_executor_allowlist() -> Option<std::collections::HashSet<String>> {
+    let raw = std::env::var("HFW_EVALUATION_EXECUTOR_ALLOWLIST").ok()?;
+    let values = raw
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .collect::<std::collections::HashSet<_>>();
+    (!values.is_empty()).then_some(values)
+}
+
 fn sync_evaluations_with_records(
     state: &AppState,
     records: &[HistoryRecord],
@@ -1878,24 +1911,40 @@ fn sync_evaluations_with_records(
         .adapter
         .capabilities()
         .map_err(|error| error.to_string());
-    let (upstream_revision, compatibility_fingerprint) = match manifest {
+    let (upstream_revision, compatibility_fingerprint, executor_fingerprint) = match manifest {
         Ok(manifest) => {
-            let capability = manifest
-                .capabilities
-                .iter()
-                .find(|capability| capability.id == CareerOpsCapabilityId::EvaluationResultReadV1);
-            match (manifest.upstream_revision, capability) {
+            let read_capability = manifest.capabilities.iter().find(|capability| {
+                capability.id == CareerOpsCapabilityId::EvaluationResultReadV1
+            });
+            let run_capability = manifest.capabilities.iter().find(|capability| {
+                capability.id == CareerOpsCapabilityId::EvaluationFullAgRunV1
+            });
+            let read = match (manifest.upstream_revision.clone(), read_capability) {
                 (Some(revision), Some(capability))
                     if capability.status == CareerOpsCapabilityStatus::Degraded
                         && capability.source_revision.as_deref() == Some(revision.as_str())
                         && capability.compatibility_fingerprint.is_some() =>
                 {
-                    (Some(revision), capability.compatibility_fingerprint.clone())
+                    Some((revision, capability.compatibility_fingerprint.clone()))
                 }
-                _ => (None, None),
+                _ => None,
+            };
+            let executor = match (manifest.upstream_revision.as_ref(), run_capability) {
+                (Some(revision), Some(capability))
+                    if capability.status == CareerOpsCapabilityStatus::Degraded
+                        && capability.source_revision.as_deref() == Some(revision.as_str())
+                        && capability.compatibility_fingerprint.is_some() =>
+                {
+                    capability.compatibility_fingerprint.clone()
+                }
+                _ => None,
+            };
+            match read {
+                Some((revision, fingerprint)) => (Some(revision), fingerprint, executor),
+                None => (None, None, None),
             }
         }
-        Err(_) => (None, None),
+        Err(_) => (None, None, None),
     };
     let roles = {
         let mut store = state
@@ -1924,7 +1973,7 @@ fn sync_evaluations_with_records(
         for role in roles {
             if matches!(
                 role.canonical_status.as_deref(),
-                Some("Applied" | "Discarded")
+                Some("Applied" | "Discarded" | "Rejected")
             ) {
                 store
                     .hold_evaluation(&role.role_id, "terminal", "canonical_terminal")
@@ -1943,11 +1992,12 @@ fn sync_evaluations_with_records(
         return Ok(result);
     };
 
+    let allowlist = evaluation_executor_allowlist();
     let mut summary = EvaluationSyncResult::default();
     for role in roles {
         if matches!(
             role.canonical_status.as_deref(),
-            Some("Applied" | "Discarded")
+            Some("Applied" | "Discarded" | "Rejected")
         ) {
             state
                 .store
@@ -1959,17 +2009,128 @@ fn sync_evaluations_with_records(
             continue;
         }
         let Some(tracker_id) = role.canonical_tracker_id else {
-            state
+            let allowlisted = allowlist
+                .as_ref()
+                .map(|set| set.contains(&role.role_id))
+                .unwrap_or(true);
+            let Some(executor_fingerprint) = executor_fingerprint.as_ref() else {
+                state
+                    .store
+                    .lock()
+                    .map_err(|_| "Operational store lock was poisoned".to_string())?
+                    .hold_evaluation(
+                        &role.role_id,
+                        "awaiting_evaluation",
+                        "canonical_evaluation_missing_executor_unavailable",
+                    )
+                    .map_err(|error| error.to_string())?;
+                summary.held += 1;
+                continue;
+            };
+            if !allowlisted {
+                state
+                    .store
+                    .lock()
+                    .map_err(|_| "Operational store lock was poisoned".to_string())?
+                    .hold_evaluation(
+                        &role.role_id,
+                        "awaiting_evaluation",
+                        "canonical_evaluation_pending_executor",
+                    )
+                    .map_err(|error| error.to_string())?;
+                summary.held += 1;
+                continue;
+            }
+            let Some(application_url) = role.application_url.as_deref() else {
+                state
+                    .store
+                    .lock()
+                    .map_err(|_| "Operational store lock was poisoned".to_string())?
+                    .hold_evaluation(
+                        &role.role_id,
+                        "needs_attention",
+                        "evaluation_executor_url_missing",
+                    )
+                    .map_err(|error| error.to_string())?;
+                summary.held += 1;
+                continue;
+            };
+            let input_hash = format!(
+                "{:x}",
+                sha2::Sha256::digest(
+                    serde_json::to_vec(&serde_json::json!({
+                        "roleId": role.role_id,
+                        "sourceIdentityHash": role.source_identity_hash,
+                        "executor": {
+                            "url": application_url,
+                            "compatibilityFingerprint": executor_fingerprint,
+                        },
+                    }))
+                    .map_err(|error| error.to_string())?
+                )
+            );
+            let claimed = state
                 .store
                 .lock()
                 .map_err(|_| "Operational store lock was poisoned".to_string())?
-                .hold_evaluation(
-                    &role.role_id,
-                    "awaiting_evaluation",
-                    "canonical_evaluation_missing_executor_unavailable",
-                )
+                .claim_evaluation_sync_with_lease(&role.role_id, &input_hash, 3_600)
                 .map_err(|error| error.to_string())?;
-            summary.held += 1;
+            if !claimed {
+                summary.unchanged += 1;
+                continue;
+            }
+            let evaluation = match state.adapter.evaluation_full_ag_run(
+                application_url,
+                &role.company,
+                &role.title,
+                executor_fingerprint,
+            ) {
+                Ok(evaluation) => evaluation,
+                Err(_) => {
+                    state
+                        .store
+                        .lock()
+                        .map_err(|_| "Operational store lock was poisoned".to_string())?
+                        .hold_evaluation(
+                            &role.role_id,
+                            "needs_attention",
+                            "evaluation_executor_failed",
+                        )
+                        .map_err(|error| error.to_string())?;
+                    summary.held += 1;
+                    continue;
+                }
+            };
+            if evaluation.canonical.status != "Evaluated"
+                || upstream_revision.as_deref() != Some(evaluation.upstream_revision.as_str())
+            {
+                state
+                    .store
+                    .lock()
+                    .map_err(|_| "Operational store lock was poisoned".to_string())?
+                    .hold_evaluation(
+                        &role.role_id,
+                        "needs_attention",
+                        "evaluation_executor_receipt_invalid",
+                    )
+                    .map_err(|error| error.to_string())?;
+                summary.held += 1;
+                continue;
+            }
+            {
+                let mut store = state
+                    .store
+                    .lock()
+                    .map_err(|_| "Operational store lock was poisoned".to_string())?;
+                let promoted = store
+                    .complete_evaluation_sync(&role, &input_hash, &evaluation)
+                    .map_err(|error| error.to_string())?;
+                if promoted {
+                    summary.promoted += 1;
+                } else {
+                    summary.terminal += 1;
+                }
+            }
             continue;
         };
         let matches = records

@@ -1,0 +1,183 @@
+{
+  "mode": "apply",
+  "db": "/Users/leo/Library/Application Support/com.hereforwork.desktop/here-for-work.sqlite3",
+  "forceRoleIds": [
+    "8acfb1ba-79a1-4e22-beb0-43c9c5e813e4"
+  ],
+  "before": [
+    {
+      "roleId": "db09eb41-26d8-4c11-83cd-2559ad31bff5",
+      "company": "Ashby",
+      "title": "Staff Design Engineer, EU",
+      "preparationState": "prepared",
+      "canonicalStatus": "Discarded",
+      "evaluationSync": "terminal",
+      "latestJob": "action_required/artifact_cleanup_failed"
+    },
+    {
+      "roleId": "5b2a8484-d54b-40f2-b475-3aa572cdc803",
+      "company": "BCNC GROUP",
+      "title": "Senior React Frontend Developer",
+      "preparationState": "failed",
+      "canonicalStatus": "Evaluated",
+      "evaluationSync": "needs_decision",
+      "latestJob": "action_required/context_changed"
+    },
+    {
+      "roleId": "35f21536-fc15-4d9c-9c9e-f4bcc1cccb1f",
+      "company": "HASH",
+      "title": "Frontend Engineer, EU Remote",
+      "preparationState": "not_started",
+      "canonicalStatus": null,
+      "evaluationSync": "needs_attention",
+      "latestJob": null
+    },
+    {
+      "roleId": "5583aeb6-55a6-413e-b0a2-d796c89bf48f",
+      "company": "KoreLabs",
+      "title": "Senior Frontend Engineer",
+      "preparationState": "not_started",
+      "canonicalStatus": "Applied",
+      "evaluationSync": "terminal",
+      "latestJob": "action_required/canonical_writer_failed"
+    },
+    {
+      "roleId": "93d4ef6b-0e49-4513-baf8-58d47033f9fb",
+      "company": "Nunegal Consulting",
+      "title": "Desarrollador/a React",
+      "preparationState": "failed",
+      "canonicalStatus": "Evaluated",
+      "evaluationSync": "hidden",
+      "latestJob": "action_required/artifact_commit_failed"
+    },
+    {
+      "roleId": "8acfb1ba-79a1-4e22-beb0-43c9c5e813e4",
+      "company": "coches.net / Adevinta Motor",
+      "title": "Front End Engineer",
+      "preparationState": "failed",
+      "canonicalStatus": "Evaluated",
+      "evaluationSync": "needs_decision",
+      "latestJob": "action_required/artifact_inspection_unavailable"
+    }
+  ],
+  "after": [
+    {
+      "roleId": "db09eb41-26d8-4c11-83cd-2559ad31bff5",
+      "company": "Ashby",
+      "title": "Staff Design Engineer, EU",
+      "preparationState": "prepared",
+      "canonicalStatus": "Discarded",
+      "evaluationSync": "terminal",
+      "latestJob": "action_required/artifact_cleanup_failed"
+    },
+    {
+      "roleId": "5b2a8484-d54b-40f2-b475-3aa572cdc803",
+      "company": "BCNC GROUP",
+      "title": "Senior React Frontend Developer",
+      "preparationState": "failed",
+      "canonicalStatus": "Evaluated",
+      "evaluationSync": "needs_decision",
+      "latestJob": "action_required/context_changed"
+    },
+    {
+      "roleId": "35f21536-fc15-4d9c-9c9e-f4bcc1cccb1f",
+      "company": "HASH",
+      "title": "Frontend Engineer, EU Remote",
+      "preparationState": "not_started",
+      "canonicalStatus": null,
+      "evaluationSync": "needs_attention",
+      "latestJob": null
+    },
+    {
+      "roleId": "5583aeb6-55a6-413e-b0a2-d796c89bf48f",
+      "company": "KoreLabs",
+      "title": "Senior Frontend Engineer",
+      "preparationState": "not_started",
+      "canonicalStatus": "Applied",
+      "evaluationSync": "terminal",
+      "latestJob": "action_required/canonical_writer_failed"
+    },
+    {
+      "roleId": "93d4ef6b-0e49-4513-baf8-58d47033f9fb",
+      "company": "Nunegal Consulting",
+      "title": "Desarrollador/a React",
+      "preparationState": "not_started",
+      "canonicalStatus": "Evaluated",
+      "evaluationSync": "hidden",
+      "latestJob": null
+    },
+    {
+      "roleId": "8acfb1ba-79a1-4e22-beb0-43c9c5e813e4",
+      "company": "coches.net / Adevinta Motor",
+      "title": "Front End Engineer",
+      "preparationState": "not_started",
+      "canonicalStatus": "Evaluated",
+      "evaluationSync": "needs_decision",
+      "latestJob": null
+    }
+  ],
+  "toolOutput": [
+    {
+      "candidates": [
+        {
+          "canonicalStatus": "Evaluated",
+          "company": "Nunegal Consulting",
+          "errorClass": "artifact_commit_failed",
+          "evaluationSyncState": "hidden",
+          "preparationId": "de6339ae-f7f8-4eb5-8025-4b8141eb1275",
+          "preparationState": "failed",
+          "preparationStatus": "action_required",
+          "roleId": "93d4ef6b-0e49-4513-baf8-58d47033f9fb",
+          "selectionReason": "zombie_failed_prep",
+          "title": "Desarrollador/a React"
+        },
+        {
+          "canonicalStatus": "Evaluated",
+          "company": "coches.net / Adevinta Motor",
+          "errorClass": "artifact_inspection_unavailable",
+          "evaluationSyncState": "needs_decision",
+          "preparationId": "358a0a45-482d-4946-8f3f-5b71da90f906",
+          "preparationState": "failed",
+          "preparationStatus": "action_required",
+          "roleId": "8acfb1ba-79a1-4e22-beb0-43c9c5e813e4",
+          "selectionReason": "force_role",
+          "title": "Front End Engineer"
+        }
+      ],
+      "db": "/Users/leo/Library/Application Support/com.hereforwork.desktop/here-for-work.sqlite3",
+      "forceRoleIds": [
+        "8acfb1ba-79a1-4e22-beb0-43c9c5e813e4"
+      ],
+      "mode": "apply"
+    },
+    {
+      "mode": "apply-result",
+      "results": [
+        {
+          "cancelledPreparationIds": [
+            "de6339ae-f7f8-4eb5-8025-4b8141eb1275"
+          ],
+          "changed": true,
+          "company": "Nunegal Consulting",
+          "expiredNotificationCount": 0,
+          "preparationStateAfter": "not_started",
+          "preparationStateBefore": "failed",
+          "roleId": "93d4ef6b-0e49-4513-baf8-58d47033f9fb",
+          "title": "Desarrollador/a React"
+        },
+        {
+          "cancelledPreparationIds": [
+            "358a0a45-482d-4946-8f3f-5b71da90f906"
+          ],
+          "changed": true,
+          "company": "coches.net / Adevinta Motor",
+          "expiredNotificationCount": 0,
+          "preparationStateAfter": "not_started",
+          "preparationStateBefore": "failed",
+          "roleId": "8acfb1ba-79a1-4e22-beb0-43c9c5e813e4",
+          "title": "Front End Engineer"
+        }
+      ]
+    }
+  ]
+}

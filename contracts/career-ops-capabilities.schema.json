@@ -45,8 +45,8 @@
       "type": "array",
       "items": { "$ref": "#/$defs/operation" },
       "uniqueItems": true,
-      "minItems": 16,
-      "maxItems": 16
+      "minItems": 17,
+      "maxItems": 17
     },
     "sourceOfTruth": {
       "type": "object",
@@ -102,6 +102,7 @@
         "capabilities.get",
         "health.check",
         "history.snapshot",
+        "evaluation.full_ag.run.v1",
         "evaluation.result.read.v1",
         "artifacts.inspect.v1",
         "profile.queue_filters.get",

@@ -274,6 +274,10 @@ const preQueueReasonCopy: Record<string, string> = {
   evaluation_receipt_pointer_unreadable: "The evaluation report pointer could not be read.",
   evaluation_result_capability_unavailable: "The evaluation reader is unavailable.",
   canonical_evaluation_missing_executor_unavailable: "No evaluation executor is available.",
+  canonical_evaluation_pending_executor: "Evaluation is waiting for an allowlisted executor run.",
+  evaluation_executor_failed: "The evaluation executor failed closed.",
+  evaluation_executor_receipt_invalid: "The evaluation executor returned an invalid receipt.",
+  evaluation_executor_url_missing: "The role has no application URL for evaluation.",
 };
 
 export function formatPreQueueReason(reason: string): string {
