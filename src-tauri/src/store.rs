@@ -23,7 +23,7 @@ use crate::domain::{
     ScheduledRun, SourceScheduleSummary, StuckPreparationCandidate, StuckPreparationReset,
 };
 
-const SCHEMA_VERSION: i64 = 22;
+const SCHEMA_VERSION: i64 = 23;
 const MAX_RUN_ATTEMPTS: i64 = 3;
 const MAX_BROWSER_COMMAND_ATTEMPTS: i64 = 3;
 const MAX_EVALUATION_SYNC_ATTEMPTS: i64 = 3;
@@ -789,6 +789,48 @@ impl Store {
                 .execute("UPDATE schema_meta SET version = 22", [])?;
             self.connection.execute_batch("COMMIT;")?;
             version = 22;
+        }
+        if version < 23 {
+            let roles_have_canonical_status = self.connection.query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('roles')
+                  WHERE name = 'canonical_status'",
+                [],
+                |row| row.get::<_, bool>(0),
+            )?;
+            let evaluation_sync_exists = self.connection.query_row(
+                "SELECT COUNT(*) > 0 FROM sqlite_master
+                  WHERE type = 'table' AND name = 'evaluation_sync'",
+                [],
+                |row| row.get::<_, bool>(0),
+            )?;
+            let transaction = self.connection.transaction()?;
+            if roles_have_canonical_status {
+                transaction.execute(
+                    "UPDATE roles SET canonical_status = CASE
+                        WHEN LOWER(TRIM(COALESCE(canonical_status, ''))) = 'rejected'
+                          THEN 'Rejected'
+                        ELSE canonical_status END
+                      WHERE LOWER(TRIM(COALESCE(canonical_status, ''))) = 'rejected'",
+                    [],
+                )?;
+            }
+            if roles_have_canonical_status && evaluation_sync_exists {
+                transaction.execute(
+                    "UPDATE evaluation_sync
+                        SET state = 'terminal', reason = 'canonical_terminal',
+                            current_receipt_key = NULL, input_hash = NULL,
+                            lease_expires_at = NULL,
+                            updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                      WHERE role_id IN (
+                        SELECT id FROM roles
+                         WHERE canonical_status = 'Rejected'
+                      )",
+                    [],
+                )?;
+            }
+            transaction.execute("UPDATE schema_meta SET version = 23", [])?;
+            transaction.commit()?;
+            version = 23;
         }
         if version != SCHEMA_VERSION {
             return Err(StoreError::Database(rusqlite::Error::InvalidQuery));
@@ -1945,7 +1987,7 @@ impl Store {
                   WHERE c.status = 'pending' AND c.attempt < ?1
                     AND (s.purpose != 'application'
                       OR LOWER(TRIM(COALESCE(r.canonical_status, '')))
-                        NOT IN ('applied', 'discarded'))
+                        NOT IN ('applied', 'discarded', 'rejected'))
                     AND (
                       (c.command_type = 'focus_review' AND s.status = 'review_required'
                         AND s.driver_lease_state = 'released')
@@ -1957,7 +1999,7 @@ impl Store {
                              SELECT 1 FROM roles active_role
                               WHERE active_role.id = active.role_id
                                 AND LOWER(TRIM(COALESCE(active_role.canonical_status, '')))
-                                  IN ('applied', 'discarded')
+                                  IN ('applied', 'discarded', 'rejected')
                            )
                            AND active.status IN (
                              'waiting_for_extension', 'inspecting', 'drafting_answers',
@@ -1975,7 +2017,7 @@ impl Store {
                                SELECT 1 FROM roles active_role
                                 WHERE active_role.id = active.role_id
                                   AND LOWER(TRIM(COALESCE(active_role.canonical_status, '')))
-                                    IN ('applied', 'discarded')
+                                    IN ('applied', 'discarded', 'rejected')
                              )
                              AND active.status IN (
                                'waiting_for_extension', 'inspecting', 'drafting_answers',
@@ -3126,8 +3168,10 @@ impl Store {
             "UPDATE roles SET canonical_status = CASE
                 WHEN LOWER(TRIM(COALESCE(canonical_status, ''))) = 'applied' THEN 'Applied'
                 WHEN LOWER(TRIM(COALESCE(canonical_status, ''))) = 'discarded' THEN 'Discarded'
+                WHEN LOWER(TRIM(COALESCE(canonical_status, ''))) = 'rejected' THEN 'Rejected'
                 ELSE canonical_status END
-              WHERE LOWER(TRIM(COALESCE(canonical_status, ''))) IN ('applied', 'discarded')",
+              WHERE LOWER(TRIM(COALESCE(canonical_status, '')))
+                IN ('applied', 'discarded', 'rejected')",
             [],
         )?;
         let cleared = transaction.execute(
@@ -3173,6 +3217,8 @@ impl Store {
                     "Applied"
                 } else if is_discarded_status(&record.status) {
                     "Discarded"
+                } else if is_rejected_status(&record.status) {
+                    "Rejected"
                 } else {
                     record.status.as_str()
                 };
@@ -3192,19 +3238,19 @@ impl Store {
                 transaction.execute(
                     "UPDATE evaluation_sync
                         SET state = CASE
-                              WHEN ?1 IN ('Applied', 'Discarded') THEN 'terminal'
+                              WHEN ?1 IN ('Applied', 'Discarded', 'Rejected') THEN 'terminal'
                               WHEN state = 'terminal' THEN 'awaiting_evaluation'
                               ELSE state END,
                             reason = CASE
-                              WHEN ?1 IN ('Applied', 'Discarded') THEN 'canonical_terminal'
+                              WHEN ?1 IN ('Applied', 'Discarded', 'Rejected') THEN 'canonical_terminal'
                               WHEN state = 'terminal' THEN 'canonical_evaluation_requires_refresh'
                               ELSE reason END,
                             current_receipt_key = CASE
-                              WHEN ?1 IN ('Applied', 'Discarded') OR state = 'terminal'
+                              WHEN ?1 IN ('Applied', 'Discarded', 'Rejected') OR state = 'terminal'
                               THEN NULL ELSE current_receipt_key END,
                             input_hash = CASE WHEN state = 'terminal' THEN NULL ELSE input_hash END,
                             lease_expires_at = CASE
-                              WHEN ?1 IN ('Applied', 'Discarded') OR state = 'terminal'
+                              WHEN ?1 IN ('Applied', 'Discarded', 'Rejected') OR state = 'terminal'
                               THEN NULL ELSE lease_expires_at END,
                             updated_at = ?2
                       WHERE role_id = ?3",
@@ -3244,7 +3290,8 @@ impl Store {
                     current_receipt_key = NULL, input_hash = NULL,
                     lease_expires_at = NULL, updated_at = ?1
               WHERE role_id IN (
-                SELECT id FROM roles WHERE canonical_status = 'Applied'
+                SELECT id FROM roles
+                 WHERE canonical_status IN ('Applied', 'Discarded', 'Rejected')
               ) AND state != 'terminal'",
             [Utc::now().to_rfc3339()],
         )?;
@@ -3300,7 +3347,7 @@ impl Store {
         self.connection
             .query_row(
                 "SELECT LOWER(TRIM(COALESCE(canonical_status, '')))
-                        IN ('applied', 'discarded')
+                        IN ('applied', 'discarded', 'rejected')
                    FROM roles WHERE id = ?1",
                 [role_id],
                 |row| row.get::<_, bool>(0),
@@ -3431,7 +3478,7 @@ impl Store {
         let transaction = self.connection.transaction()?;
         let role_is_terminal = transaction.query_row(
             "SELECT LOWER(TRIM(COALESCE(canonical_status, '')))
-                    IN ('applied', 'discarded')
+                    IN ('applied', 'discarded', 'rejected')
                FROM roles WHERE id = ?1",
             [role_id],
             |row| row.get::<_, bool>(0),
@@ -3522,13 +3569,13 @@ impl Store {
                   JOIN roles r ON r.id = p.role_id
                   WHERE p.status = 'queued'
                     AND LOWER(TRIM(COALESCE(r.canonical_status, '')))
-                      NOT IN ('applied', 'discarded')
+                      NOT IN ('applied', 'discarded', 'rejected')
                     AND (
                       SELECT COUNT(*) FROM preparation_jobs active
                       JOIN roles active_role ON active_role.id = active.role_id
                       WHERE active.status = 'preparing'
                         AND LOWER(TRIM(COALESCE(active_role.canonical_status, '')))
-                          NOT IN ('applied', 'discarded')
+                          NOT IN ('applied', 'discarded', 'rejected')
                     ) < ?1
                   ORDER BY p.created_at, p.rowid LIMIT 1",
                 [MAX_ACTIVE_PREPARATIONS],
@@ -3613,7 +3660,7 @@ impl Store {
                    JOIN roles r ON r.id = p.role_id
                   WHERE p.status = 'completed'
                     AND LOWER(TRIM(COALESCE(r.canonical_status, '')))
-                      NOT IN ('applied', 'discarded')
+                      NOT IN ('applied', 'discarded', 'rejected')
                     AND NOT EXISTS (
                       SELECT 1 FROM browser_sessions b WHERE b.preparation_id = p.id
                     )
@@ -3623,7 +3670,7 @@ impl Store {
                        WHERE earlier.rowid < p.rowid
                          AND earlier.status IN ('queued', 'preparing')
                          AND LOWER(TRIM(COALESCE(earlier_role.canonical_status, '')))
-                           NOT IN ('applied', 'discarded')
+                           NOT IN ('applied', 'discarded', 'rejected')
                     )
                   ORDER BY p.rowid LIMIT 1",
                 [],
@@ -3966,7 +4013,7 @@ impl Store {
             .query_row(
                 "SELECT p.role_id,
                         LOWER(TRIM(COALESCE(r.canonical_status, '')))
-                          IN ('applied', 'discarded')
+                          IN ('applied', 'discarded', 'rejected')
                    FROM preparation_jobs p JOIN roles r ON r.id = p.role_id
                   WHERE p.id = ?1 AND p.status = 'preparing'",
                 [preparation_id],
@@ -5178,7 +5225,7 @@ impl Store {
              JOIN evaluation_receipts receipt
                ON receipt.receipt_key = evaluation.current_receipt_key
              WHERE evaluation.state IN ('ready', 'needs_decision')
-               AND COALESCE(r.canonical_status, '') NOT IN ('Applied', 'Discarded')
+               AND COALESCE(r.canonical_status, '') NOT IN ('Applied', 'Discarded', 'Rejected')
                AND COALESCE(r.legitimacy, '') <> 'suspicious'
                AND r.preparation_state = 'not_started'
              GROUP BY r.id
@@ -5341,7 +5388,7 @@ impl Store {
         let handled_count = self.connection.query_row(
             "SELECT COUNT(*) FROM roles r
                LEFT JOIN evaluation_sync evaluation ON evaluation.role_id = r.id
-              WHERE r.canonical_status IN ('Applied', 'Discarded')
+              WHERE r.canonical_status IN ('Applied', 'Discarded', 'Rejected')
                  OR evaluation.state = 'hidden'",
             [],
             |row| row.get(0),
@@ -5352,7 +5399,7 @@ impl Store {
                FROM evaluation_sync evaluation
                JOIN roles r ON r.id = evaluation.role_id
               WHERE evaluation.state IN ('awaiting_evaluation', 'needs_attention', 'syncing')
-                AND COALESCE(r.canonical_status, '') NOT IN ('Applied', 'Discarded')
+                AND COALESCE(r.canonical_status, '') NOT IN ('Applied', 'Discarded', 'Rejected')
               ORDER BY evaluation.updated_at DESC, r.company COLLATE NOCASE",
         )?;
         let pre_queue_roles = pre_queue_statement
@@ -6334,12 +6381,12 @@ fn reconcile_discovery_finding(
             "UPDATE evaluation_sync
                 SET state = CASE
                       WHEN (SELECT canonical_status FROM roles WHERE id = ?1)
-                           IN ('Applied', 'Discarded') THEN 'terminal'
+                           IN ('Applied', 'Discarded', 'Rejected') THEN 'terminal'
                       ELSE 'awaiting_evaluation'
                     END,
                     reason = CASE
                       WHEN (SELECT canonical_status FROM roles WHERE id = ?1)
-                           IN ('Applied', 'Discarded') THEN 'canonical_terminal'
+                           IN ('Applied', 'Discarded', 'Rejected') THEN 'canonical_terminal'
                       ELSE 'source_identity_changed'
                     END,
                     input_hash = NULL, current_receipt_key = NULL,
@@ -7048,8 +7095,12 @@ fn is_discarded_status(status: &str) -> bool {
     status.trim().eq_ignore_ascii_case("Discarded")
 }
 
+fn is_rejected_status(status: &str) -> bool {
+    status.trim().eq_ignore_ascii_case("Rejected")
+}
+
 fn is_terminal_canonical_status(status: &str) -> bool {
-    is_applied_status(status) || is_discarded_status(status)
+    is_applied_status(status) || is_discarded_status(status) || is_rejected_status(status)
 }
 
 fn title_matches(discovered: &str, canonical: &str) -> bool {
@@ -8797,7 +8848,7 @@ mod tests {
 
     #[test]
     fn browser_handoff_skips_the_oldest_normalized_terminal_preparation() {
-        for terminal_status in [" Applied ", " dIsCaRdEd "] {
+        for terminal_status in [" Applied ", " dIsCaRdEd ", " rEjEcTeD "] {
             let directory = tempfile::tempdir().unwrap();
             let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
             let first = completed_preparation(&mut store);
@@ -9877,6 +9928,158 @@ mod tests {
     }
 
     #[test]
+    fn rejected_history_variants_are_normalized_and_terminal() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+        import_evaluated(&mut store, DATASET);
+        let role_id = store.dashboard().unwrap().roles[0].id.clone();
+        let rejected = HistoryRecord {
+            id: 42,
+            date: "2026-09-03".to_string(),
+            company: "Northstar Tools".to_string(),
+            role: "Frontend Engineer".to_string(),
+            score: "4.2/5".to_string(),
+            status: " rEjEcTeD ".to_string(),
+            pdf: "—".to_string(),
+            report: "reports/042-example.md".to_string(),
+            notes: String::new(),
+        };
+
+        store.reconcile_history(&[rejected]).unwrap();
+
+        let state: (String, String, String) = store
+            .connection
+            .query_row(
+                "SELECT r.canonical_status, e.state, e.reason
+                   FROM roles r JOIN evaluation_sync e ON e.role_id = r.id
+                  WHERE r.id = ?1",
+                [&role_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            state,
+            (
+                "Rejected".to_string(),
+                "terminal".to_string(),
+                "canonical_terminal".to_string()
+            )
+        );
+        let dashboard = store.dashboard().unwrap();
+        assert!(dashboard.roles.is_empty());
+        assert!(
+            !dashboard
+                .pre_queue_roles
+                .iter()
+                .any(|role| role.role_id == role_id)
+        );
+    }
+
+    #[test]
+    fn rejected_roles_leave_needs_attention_and_count_as_handled() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+        import_evaluated(&mut store, DATASET);
+        let role_id = store.dashboard().unwrap().roles[0].id.clone();
+        store
+            .connection
+            .execute(
+                "UPDATE roles SET canonical_status = 'Rejected' WHERE id = ?1",
+                [&role_id],
+            )
+            .unwrap();
+        store
+            .connection
+            .execute(
+                "UPDATE evaluation_sync
+                    SET state = 'needs_attention', reason = 'canonical_status_not_evaluated'
+                  WHERE role_id = ?1",
+                [&role_id],
+            )
+            .unwrap();
+
+        store
+            .hold_evaluation(&role_id, "terminal", "canonical_terminal")
+            .unwrap();
+
+        let dashboard = store.dashboard().unwrap();
+        assert!(
+            !dashboard
+                .pre_queue_roles
+                .iter()
+                .any(|role| role.role_id == role_id)
+        );
+        assert!(dashboard.roles.is_empty());
+        assert_eq!(dashboard.handled_count, 1);
+        let state: (String, String) = store
+            .connection
+            .query_row(
+                "SELECT state, reason FROM evaluation_sync WHERE role_id = ?1",
+                [&role_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            state,
+            ("terminal".to_string(), "canonical_terminal".to_string())
+        );
+    }
+
+    #[test]
+    fn schema_v23_terminalizes_existing_rejected_roles() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("test.sqlite3");
+        {
+            let mut store = Store::open(&path).unwrap();
+            import_evaluated(&mut store, DATASET);
+            let role_id = store.dashboard().unwrap().roles[0].id.clone();
+            store
+                .connection
+                .execute(
+                    "UPDATE roles SET canonical_status = ' rejected ' WHERE id = ?1",
+                    [&role_id],
+                )
+                .unwrap();
+            store
+                .connection
+                .execute(
+                    "UPDATE evaluation_sync
+                        SET state = 'needs_attention', reason = 'canonical_status_not_evaluated'
+                      WHERE role_id = ?1",
+                    [&role_id],
+                )
+                .unwrap();
+            store
+                .connection
+                .execute("UPDATE schema_meta SET version = 22", [])
+                .unwrap();
+        }
+
+        let store = Store::open(&path).unwrap();
+        let state: (String, String, String, i64) = store
+            .connection
+            .query_row(
+                "SELECT r.canonical_status, e.state, e.reason, m.version
+                   FROM roles r
+                   JOIN evaluation_sync e ON e.role_id = r.id
+                   CROSS JOIN schema_meta m",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            state,
+            (
+                "Rejected".to_string(),
+                "terminal".to_string(),
+                "canonical_terminal".to_string(),
+                23
+            )
+        );
+        assert!(store.dashboard().unwrap().pre_queue_roles.is_empty());
+    }
+
+    #[test]
     fn stale_evaluation_completion_cannot_overwrite_applied() {
         let directory = tempfile::tempdir().unwrap();
         let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
@@ -10015,7 +10218,7 @@ mod tests {
 
     #[test]
     fn terminal_roles_are_defensively_excluded_from_preparation_and_browser_claims() {
-        for terminal_status in [" Applied ", " discarded "] {
+        for terminal_status in [" Applied ", " discarded ", " rejected "] {
             let directory = tempfile::tempdir().unwrap();
             let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
             let session = queue_completed_application_session(&mut store);
@@ -10280,7 +10483,7 @@ mod tests {
                 "Applied".to_string(),
                 "terminal".to_string(),
                 "canonical_terminal".to_string(),
-                22
+                23
             )
         );
     }

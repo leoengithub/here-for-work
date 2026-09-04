@@ -1863,7 +1863,7 @@ fn sync_evaluations_internal(state: &AppState) -> Result<EvaluationSyncResult, S
             for role in roles {
                 if matches!(
                     role.canonical_status.as_deref(),
-                    Some("Applied" | "Discarded")
+                    Some("Applied" | "Discarded" | "Rejected")
                 ) {
                     store
                         .hold_evaluation(&role.role_id, "terminal", "canonical_terminal")
@@ -1973,7 +1973,7 @@ fn sync_evaluations_with_records(
         for role in roles {
             if matches!(
                 role.canonical_status.as_deref(),
-                Some("Applied" | "Discarded")
+                Some("Applied" | "Discarded" | "Rejected")
             ) {
                 store
                     .hold_evaluation(&role.role_id, "terminal", "canonical_terminal")
@@ -1997,7 +1997,7 @@ fn sync_evaluations_with_records(
     for role in roles {
         if matches!(
             role.canonical_status.as_deref(),
-            Some("Applied" | "Discarded")
+            Some("Applied" | "Discarded" | "Rejected")
         ) {
             state
                 .store
