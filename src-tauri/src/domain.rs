@@ -1106,6 +1106,12 @@ pub enum CareerOpsCapabilityDiagnosticCode {
     PublicBrowserFallbackUnavailable,
     CanonicalWriterUnavailable,
     CanonicalWriterCompatibilityUnverified,
+    EvaluationExecutorRuntimeUnavailable,
+    HfwComposedEvaluationReceipt,
+    /// Soft-fail bucket so a newer adapter diagnostic cannot break `capabilities.get`
+    /// deserialization / `adapter_ready`. Keep known codes registered above.
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1456,6 +1462,62 @@ mod capability_manifest_tests {
             serde_json::from_value(manifest_value()).expect("manifest deserializes");
 
         manifest.validate().expect("manifest validates");
+    }
+
+    #[test]
+    fn capability_manifest_deserializes_t1_evaluation_diagnostic_codes() {
+        use super::CareerOpsCapabilityDiagnosticCode;
+
+        let mut value = manifest_value();
+        value["diagnostics"] = json!([
+            {
+                "code": "evaluation_executor_runtime_unavailable",
+                "capabilityId": "evaluation.full_ag.run.v1",
+                "message": "The claude CLI required by career-ops batch-runner.sh is unavailable on PATH.",
+                "action": "Install and authenticate the Claude Code CLI used by career-ops batch workers, then re-run capabilities.get."
+            },
+            {
+                "code": "hfw_composed_evaluation_receipt",
+                "capabilityId": "evaluation.full_ag.run.v1",
+                "message": "Full A-G execution wraps batch/batch-runner.sh and accepts only evaluation.result.read.v1 post-conditions as the typed receipt.",
+                "action": "Keep revision and fingerprint probes current; never treat batch exit codes or worker console prose as success."
+            }
+        ]);
+
+        let manifest: CareerOpsCapabilityManifest =
+            serde_json::from_value(value).expect("T1 diagnostic codes deserialize");
+        manifest.validate().expect("manifest with T1 diagnostics validates");
+        assert_eq!(
+            manifest.diagnostics[0].code,
+            CareerOpsCapabilityDiagnosticCode::EvaluationExecutorRuntimeUnavailable
+        );
+        assert_eq!(
+            manifest.diagnostics[1].code,
+            CareerOpsCapabilityDiagnosticCode::HfwComposedEvaluationReceipt
+        );
+    }
+
+    #[test]
+    fn capability_manifest_soft_fails_unknown_diagnostic_codes() {
+        use super::CareerOpsCapabilityDiagnosticCode;
+
+        let mut value = manifest_value();
+        value["diagnostics"] = json!([{
+            "code": "future_adapter_diagnostic_not_yet_registered",
+            "capabilityId": "evaluation.result.read.v1",
+            "message": "A newer adapter emitted an unrecognized diagnostic.",
+            "action": "Register the code in the closed enum when the product depends on it."
+        }]);
+
+        let manifest: CareerOpsCapabilityManifest =
+            serde_json::from_value(value).expect("unknown diagnostic codes must soft-fail");
+        manifest
+            .validate()
+            .expect("unknown diagnostic codes must not break validation");
+        assert_eq!(
+            manifest.diagnostics[0].code,
+            CareerOpsCapabilityDiagnosticCode::Unknown
+        );
     }
 
     #[test]

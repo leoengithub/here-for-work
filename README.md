@@ -9,7 +9,9 @@ HereForWork is a local-first, review-before-submit job-search companion. It is i
 Personal-proof implementation. The stack and implementation direction are recorded in
 [STACK_SELECTION.md](STACK_SELECTION.md) and [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md).
 
-The current source uses schema-v22 SQLite migrations. The current post-import Apple
+The current source uses schema-v25 SQLite migrations. Desktop app installs must bump
+`package.json`, `src-tauri/tauri.conf.json`, and `src-tauri/Cargo.toml` together so
+Info.plist / About shows the new version (this hotfix is `0.1.1`). The current post-import Apple
 Silicon proof package is at:
 
 ```text
