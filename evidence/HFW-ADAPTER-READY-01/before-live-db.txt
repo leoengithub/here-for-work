@@ -1,0 +1,9 @@
+adapter_ready|false|2026-09-04T12:27:12.537095+00:00
+needs_attention|evaluation_result_capability_unavailable|57
+terminal|canonical_terminal|21
+action_required|source_adapter_not_configured|catch_up|19
+BCNC GROUP|Senior React Frontend Developer|needs_attention|evaluation_result_capability_unavailable|1|failed
+Nunegal Consulting|Desarrollador/a React|needs_attention|evaluation_result_capability_unavailable|1|not_started
+Wizeline|Frontend Software Engineer (Barcelona Hybrid)|needs_attention|evaluation_result_capability_unavailable|1|not_started
+Wizeline|Senior React Software Engineer (Barcelona hybrid)|needs_attention|evaluation_result_capability_unavailable|1|not_started
+coches.net / Adevinta Motor|Front End Engineer|needs_attention|evaluation_result_capability_unavailable|1|not_started

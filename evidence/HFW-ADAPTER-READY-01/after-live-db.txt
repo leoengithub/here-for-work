@@ -1,0 +1,16 @@
+adapter_ready|true|2026-09-04T13:15:33.014322+00:00
+25
+needs_attention|evaluation_executor_failed|51
+terminal|canonical_terminal|21
+needs_decision|canonical_evaluation_verified|4
+hidden|canonical_evaluation_not_viable|1
+needs_attention|canonical_status_not_evaluated|1
+cancelled|source_adapter_not_configured_superseded|catch_up|19
+BCNC GROUP|Senior React Frontend Developer|needs_decision|canonical_evaluation_verified|not_started|1
+Nunegal Consulting|Desarrollador/a React|hidden|canonical_evaluation_not_viable|not_started|1
+Wizeline|Frontend Software Engineer (Barcelona Hybrid)|needs_decision|canonical_evaluation_verified|not_started|1
+Wizeline|Senior React Software Engineer (Barcelona hybrid)|needs_decision|canonical_evaluation_verified|not_started|1
+coches.net / Adevinta Motor|Front End Engineer|needs_decision|canonical_evaluation_verified|not_started|1
+4
+not_started
+cancelled

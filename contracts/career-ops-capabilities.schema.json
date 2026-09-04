@@ -211,7 +211,9 @@
             "structured_provenance_unavailable",
             "public_browser_fallback_unavailable",
             "canonical_writer_unavailable",
-            "canonical_writer_compatibility_unverified"
+            "canonical_writer_compatibility_unverified",
+            "evaluation_executor_runtime_unavailable",
+            "hfw_composed_evaluation_receipt"
           ]
         },
         "capabilityId": {

@@ -23,7 +23,7 @@ use crate::domain::{
     ScheduledRun, SourceScheduleSummary, StuckPreparationCandidate, StuckPreparationReset,
 };
 
-const SCHEMA_VERSION: i64 = 23;
+const SCHEMA_VERSION: i64 = 25;
 const MAX_RUN_ATTEMPTS: i64 = 3;
 const MAX_BROWSER_COMMAND_ATTEMPTS: i64 = 3;
 const MAX_EVALUATION_SYNC_ATTEMPTS: i64 = 3;
@@ -832,6 +832,244 @@ impl Store {
             transaction.commit()?;
             version = 23;
         }
+        if version < 24 {
+            // Repair false capability holds that still point at a durable receipt,
+            // supersede non-actionable staged catch-up placeholders, and clear
+            // stuck prep on roles restored to Queue eligibility.
+            let evaluation_sync_exists = self.connection.query_row(
+                "SELECT COUNT(*) > 0 FROM sqlite_master
+                  WHERE type = 'table' AND name = 'evaluation_sync'",
+                [],
+                |row| row.get::<_, bool>(0),
+            )?;
+            let receipts_exist = self.connection.query_row(
+                "SELECT COUNT(*) > 0 FROM sqlite_master
+                  WHERE type = 'table' AND name = 'evaluation_receipts'",
+                [],
+                |row| row.get::<_, bool>(0),
+            )?;
+            let runs_exist = self.connection.query_row(
+                "SELECT COUNT(*) > 0 FROM sqlite_master
+                  WHERE type = 'table' AND name = 'runs'",
+                [],
+                |row| row.get::<_, bool>(0),
+            )?;
+            let preparation_jobs_exist = self.connection.query_row(
+                "SELECT COUNT(*) > 0 FROM sqlite_master
+                  WHERE type = 'table' AND name = 'preparation_jobs'",
+                [],
+                |row| row.get::<_, bool>(0),
+            )?;
+            let transaction = self.connection.transaction()?;
+            if evaluation_sync_exists && receipts_exist {
+                transaction.execute(
+                    "UPDATE evaluation_sync
+                        SET state = CASE
+                              WHEN receipt.final_decision = 'Skip'
+                                OR receipt.legitimacy = 'Suspicious'
+                                THEN 'hidden'
+                              WHEN receipt.final_decision = 'Research first'
+                                OR COALESCE(json_array_length(receipt.blockers_json), 0) > 0
+                                OR COALESCE(json_array_length(receipt.gaps_json), 0) > 0
+                                OR COALESCE(
+                                     json_array_length(
+                                       json_extract(
+                                         receipt.material_uncertainty_json,
+                                         '$.notEvaluatedRiskSignals'
+                                       )
+                                     ),
+                                     0
+                                   ) > 0
+                                THEN 'needs_decision'
+                              ELSE 'ready'
+                            END,
+                            reason = CASE
+                              WHEN receipt.final_decision = 'Skip'
+                                OR receipt.legitimacy = 'Suspicious'
+                                THEN 'canonical_evaluation_not_viable'
+                              ELSE 'canonical_evaluation_verified'
+                            END,
+                            lease_expires_at = NULL,
+                            updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                       FROM evaluation_receipts AS receipt
+                      WHERE evaluation_sync.current_receipt_key = receipt.receipt_key
+                        AND evaluation_sync.state = 'needs_attention'
+                        AND evaluation_sync.reason = 'evaluation_result_capability_unavailable'",
+                    [],
+                )?;
+            }
+            if runs_exist {
+                transaction.execute(
+                    "UPDATE runs
+                        SET status = 'cancelled',
+                            error_class = 'source_adapter_not_configured_superseded',
+                            lease_expires_at = NULL,
+                            updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                      WHERE status = 'action_required'
+                        AND error_class = 'source_adapter_not_configured'
+                        AND kind = 'catch_up'",
+                    [],
+                )?;
+                transaction.execute(
+                    "UPDATE run_steps
+                        SET status = 'cancelled',
+                            error_class = 'source_adapter_not_configured_superseded',
+                            updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                      WHERE status IN ('action_required', 'blocked')
+                        AND run_id IN (
+                          SELECT id FROM runs
+                           WHERE status = 'cancelled'
+                             AND error_class = 'source_adapter_not_configured_superseded'
+                        )",
+                    [],
+                )?;
+                transaction.execute(
+                    "INSERT INTO activity(id, kind, message, occurred_at)
+                     SELECT lower(hex(randomblob(16))), 'schedule',
+                            'Superseded obsolete staged catch-up placeholders that had no recovery action.',
+                            strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                      WHERE EXISTS (
+                        SELECT 1 FROM runs
+                         WHERE status = 'cancelled'
+                           AND error_class = 'source_adapter_not_configured_superseded'
+                      )
+                        AND NOT EXISTS (
+                          SELECT 1 FROM activity
+                           WHERE message = 'Superseded obsolete staged catch-up placeholders that had no recovery action.'
+                        )",
+                    [],
+                )?;
+            }
+            if evaluation_sync_exists && preparation_jobs_exist {
+                // Mirror Q7=B force cleanup for roles restored to Queue eligibility.
+                transaction.execute(
+                    "UPDATE preparation_jobs
+                        SET status = 'cancelled', step = 'cancelled',
+                            error_class = NULL, error_stage = NULL, error_detail = NULL,
+                            retry_policy = NULL,
+                            updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                      WHERE status = 'action_required'
+                        AND role_id IN (
+                          SELECT evaluation.role_id
+                            FROM evaluation_sync evaluation
+                           WHERE evaluation.state IN ('ready', 'needs_decision')
+                             AND evaluation.reason = 'canonical_evaluation_verified'
+                             AND evaluation.current_receipt_key IS NOT NULL
+                        )",
+                    [],
+                )?;
+                transaction.execute(
+                    "UPDATE roles
+                        SET preparation_state = 'not_started',
+                            updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                      WHERE preparation_state IN ('failed', 'queued', 'preparing')
+                        AND id IN (
+                          SELECT evaluation.role_id
+                            FROM evaluation_sync evaluation
+                           WHERE evaluation.state IN ('ready', 'needs_decision')
+                             AND evaluation.reason = 'canonical_evaluation_verified'
+                             AND evaluation.current_receipt_key IS NOT NULL
+                        )",
+                    [],
+                )?;
+                transaction.execute(
+                    "UPDATE notification_outbox
+                        SET status = 'expired', last_error = 'stuck_preparation_cleanup'
+                      WHERE status IN ('pending', 'delivering')
+                        AND event_kind = 'preparation_failed'
+                        AND role_id IN (
+                          SELECT evaluation.role_id
+                            FROM evaluation_sync evaluation
+                           WHERE evaluation.state IN ('ready', 'needs_decision')
+                             AND evaluation.reason = 'canonical_evaluation_verified'
+                             AND evaluation.current_receipt_key IS NOT NULL
+                        )",
+                    [],
+                )?;
+            }
+            transaction.execute("UPDATE schema_meta SET version = 24", [])?;
+            transaction.commit()?;
+            version = 24;
+        }
+        if version < 25 {
+            // Restore roles whose durable receipts were cleared because they
+            // carried the composed executor fingerprint instead of the read probe.
+            let evaluation_sync_exists = self.connection.query_row(
+                "SELECT COUNT(*) > 0 FROM sqlite_master
+                  WHERE type = 'table' AND name = 'evaluation_sync'",
+                [],
+                |row| row.get::<_, bool>(0),
+            )?;
+            let receipts_exist = self.connection.query_row(
+                "SELECT COUNT(*) > 0 FROM sqlite_master
+                  WHERE type = 'table' AND name = 'evaluation_receipts'",
+                [],
+                |row| row.get::<_, bool>(0),
+            )?;
+            let transaction = self.connection.transaction()?;
+            if evaluation_sync_exists && receipts_exist {
+                transaction.execute(
+                    "UPDATE evaluation_sync
+                        SET current_receipt_key = (
+                              SELECT receipt.receipt_key
+                                FROM evaluation_receipts AS receipt
+                               WHERE receipt.role_id = evaluation_sync.role_id
+                               ORDER BY receipt.created_at DESC, receipt.receipt_key DESC
+                               LIMIT 1
+                            ),
+                            updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                      WHERE state = 'needs_attention'
+                        AND reason = 'evaluation_compatibility_changed'
+                        AND current_receipt_key IS NULL
+                        AND EXISTS (
+                          SELECT 1 FROM evaluation_receipts AS receipt
+                           WHERE receipt.role_id = evaluation_sync.role_id
+                        )",
+                    [],
+                )?;
+                transaction.execute(
+                    "UPDATE evaluation_sync
+                        SET state = CASE
+                              WHEN receipt.final_decision = 'Skip'
+                                OR receipt.legitimacy = 'Suspicious'
+                                THEN 'hidden'
+                              WHEN receipt.final_decision = 'Research first'
+                                OR COALESCE(json_array_length(receipt.blockers_json), 0) > 0
+                                OR COALESCE(json_array_length(receipt.gaps_json), 0) > 0
+                                OR COALESCE(
+                                     json_array_length(
+                                       json_extract(
+                                         receipt.material_uncertainty_json,
+                                         '$.notEvaluatedRiskSignals'
+                                       )
+                                     ),
+                                     0
+                                   ) > 0
+                                THEN 'needs_decision'
+                              ELSE 'ready'
+                            END,
+                            reason = CASE
+                              WHEN receipt.final_decision = 'Skip'
+                                OR receipt.legitimacy = 'Suspicious'
+                                THEN 'canonical_evaluation_not_viable'
+                              ELSE 'canonical_evaluation_verified'
+                            END,
+                            lease_expires_at = NULL,
+                            updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                       FROM evaluation_receipts AS receipt
+                      WHERE evaluation_sync.current_receipt_key = receipt.receipt_key
+                        AND evaluation_sync.state = 'needs_attention'
+                        AND evaluation_sync.reason IN (
+                          'evaluation_result_capability_unavailable',
+                          'evaluation_compatibility_changed'
+                        )",
+                    [],
+                )?;
+            }
+            transaction.execute("UPDATE schema_meta SET version = 25", [])?;
+            transaction.commit()?;
+            version = 25;
+        }
         if version != SCHEMA_VERSION {
             return Err(StoreError::Database(rusqlite::Error::InvalidQuery));
         }
@@ -1190,10 +1428,29 @@ impl Store {
             .map_err(StoreError::from)
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn invalidate_evaluation_compatibility(
         &mut self,
         upstream_revision: Option<&str>,
         compatibility_fingerprint: Option<&str>,
+    ) -> Result<usize, StoreError> {
+        self.invalidate_evaluation_compatibility_with_alternates(
+            upstream_revision,
+            compatibility_fingerprint,
+            None,
+        )
+    }
+
+    /// Invalidate receipts that no longer match the active evaluation probes.
+    ///
+    /// Accepts the result-read fingerprint plus an optional executor/composed
+    /// alternate so HFW-composed A–G receipts are not wiped when only the read
+    /// probe fingerprint differs.
+    pub fn invalidate_evaluation_compatibility_with_alternates(
+        &mut self,
+        upstream_revision: Option<&str>,
+        compatibility_fingerprint: Option<&str>,
+        alternate_compatibility_fingerprint: Option<&str>,
     ) -> Result<usize, StoreError> {
         let (Some(upstream_revision), Some(compatibility_fingerprint)) =
             (upstream_revision, compatibility_fingerprint)
@@ -1201,6 +1458,8 @@ impl Store {
             return Ok(0);
         };
         let now = Utc::now().to_rfc3339();
+        let alternate = alternate_compatibility_fingerprint
+            .filter(|value| !value.is_empty() && *value != compatibility_fingerprint);
         self.connection
             .execute(
                 "UPDATE evaluation_sync
@@ -1212,9 +1471,15 @@ impl Store {
                       SELECT 1 FROM evaluation_receipts receipt
                        WHERE receipt.receipt_key = evaluation_sync.current_receipt_key
                          AND receipt.upstream_revision = ?2
-                         AND receipt.compatibility_fingerprint = ?3
+                         AND (
+                           receipt.compatibility_fingerprint = ?3
+                           OR (
+                             ?4 IS NOT NULL
+                             AND receipt.compatibility_fingerprint = ?4
+                           )
+                         )
                     )",
-                params![now, upstream_revision, compatibility_fingerprint],
+                params![now, upstream_revision, compatibility_fingerprint, alternate],
             )
             .map_err(StoreError::from)
     }
@@ -1225,11 +1490,18 @@ impl Store {
         reason: &str,
     ) -> Result<(), StoreError> {
         let reason = sanitize_evaluation_reason(reason);
+        // Do not demote roles that already hold a durable verified receipt. A
+        // transient read-capability outage must not yank them from Queue again.
         self.connection.execute(
             "UPDATE evaluation_sync
                 SET state = 'needs_attention', reason = ?1,
                     attempt = 0, lease_expires_at = NULL, updated_at = ?2
-              WHERE role_id = ?3 AND state <> 'terminal'",
+              WHERE role_id = ?3
+                AND state <> 'terminal'
+                AND NOT (
+                  state IN ('ready', 'needs_decision', 'hidden')
+                  AND current_receipt_key IS NOT NULL
+                )",
             params![reason, Utc::now().to_rfc3339(), role_id],
         )?;
         Ok(())
@@ -5424,14 +5696,19 @@ impl Store {
             |row| row.get(0),
         )?;
         let action_required_run_count = self.connection.query_row(
-            "SELECT COUNT(*) FROM runs WHERE status = 'action_required'",
+            "SELECT COUNT(*) FROM runs
+              WHERE status = 'action_required'
+                AND COALESCE(error_class, '') != 'source_adapter_not_configured'",
             [],
             |row| row.get(0),
         )?;
         let mut sources_statement = self.connection.prepare(
             "SELECT s.source_id, s.display_name, s.timezone, s.schedule_hours,
                     s.execution_mode, s.last_successful_at,
-                    COUNT(CASE WHEN r.status = 'action_required' THEN 1 END)
+                    COUNT(CASE
+                      WHEN r.status = 'action_required'
+                       AND COALESCE(r.error_class, '') != 'source_adapter_not_configured'
+                      THEN 1 END)
                FROM source_schedules s
                LEFT JOIN runs r ON r.source_id = s.source_id
               WHERE s.enabled = 1
@@ -7165,6 +7442,7 @@ mod tests {
         BrowserSessionSummary, EvaluationResultRead, HistoryRecord, ImportResult, PreparationWork,
         QueueGroup,
     };
+    use rusqlite::params;
     use serde_json::Value;
     use sha2::{Digest, Sha256};
 
@@ -8079,16 +8357,25 @@ mod tests {
             )
             .unwrap();
         assert_eq!(receipt_during_outage, receipt_before);
-        assert!(store.dashboard().unwrap().roles.is_empty());
+        let state_during_outage: String = store
+            .connection
+            .query_row(
+                "SELECT state FROM evaluation_sync WHERE role_id = ?1",
+                [&role.role_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            matches!(state_during_outage.as_str(), "ready" | "needs_decision"),
+            "verified receipt must stay queue-eligible during a transient read outage"
+        );
+        assert_eq!(store.dashboard().unwrap().roles.len(), 1);
 
         assert!(
-            store
+            !store
                 .claim_evaluation_sync(&role.role_id, &input_hash)
                 .unwrap()
         );
-        store
-            .complete_evaluation_sync(&role, &input_hash, &evaluation)
-            .unwrap();
         assert_eq!(store.dashboard().unwrap().roles.len(), 1);
         assert_eq!(
             store
@@ -8098,6 +8385,206 @@ mod tests {
                 .unwrap(),
             1
         );
+    }
+
+    #[test]
+    fn capability_outage_still_holds_roles_without_a_verified_receipt() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+        store.import_dataset(DATASET).unwrap();
+        let role = store.evaluation_sync_roles().unwrap().remove(0);
+
+        store
+            .mark_evaluation_sync_unavailable(
+                &role.role_id,
+                "evaluation_result_capability_unavailable",
+            )
+            .unwrap();
+        let (state, reason, receipt): (String, String, Option<String>) = store
+            .connection
+            .query_row(
+                "SELECT state, reason, current_receipt_key FROM evaluation_sync WHERE role_id = ?1",
+                [&role.role_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(state, "needs_attention");
+        assert_eq!(reason, "evaluation_result_capability_unavailable");
+        assert!(receipt.is_none());
+        assert!(store.dashboard().unwrap().roles.is_empty());
+    }
+
+    #[test]
+    fn schema_v24_rehydrates_capability_unavailable_roles_with_receipts() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("test.sqlite3");
+        let mut store = Store::open(&path).unwrap();
+        store.import_dataset(DATASET).unwrap();
+        let role = store.evaluation_sync_roles().unwrap().remove(0);
+        let input_hash = format!("rehydrate:{}", role.source_identity_hash);
+        assert!(
+            store
+                .claim_evaluation_sync(&role.role_id, &input_hash)
+                .unwrap()
+        );
+        let evaluation = test_evaluation(&role, "Research first", "High Confidence", "High");
+        store
+            .complete_evaluation_sync(&role, &input_hash, &evaluation)
+            .unwrap();
+        assert_eq!(store.dashboard().unwrap().roles.len(), 1);
+
+        store
+            .connection
+            .execute(
+                "UPDATE evaluation_sync
+                    SET state = 'needs_attention',
+                        reason = 'evaluation_result_capability_unavailable',
+                        updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                  WHERE role_id = ?1",
+                [&role.role_id],
+            )
+            .unwrap();
+        store
+            .connection
+            .execute(
+                "INSERT INTO runs(
+                   id, source_id, kind, coverage_start, coverage_end, status, error_class,
+                   created_at, updated_at, dedupe_key
+                 ) VALUES (
+                   'catch-up-obsolete', 'frontend-role-scan', 'catch_up',
+                   '2026-08-30T00:00:00Z', '2026-08-30T08:00:00Z',
+                   'action_required', 'source_adapter_not_configured',
+                   '2026-08-30T08:00:00Z', '2026-08-30T08:00:00Z',
+                   'frontend-role-scan:2026-08-30T08:00:00Z'
+                 )",
+                [],
+            )
+            .unwrap();
+        store
+            .connection
+            .execute("UPDATE schema_meta SET version = 23", [])
+            .unwrap();
+        drop(store);
+
+        let store = Store::open(&path).unwrap();
+        let (state, reason): (String, String) = store
+            .connection
+            .query_row(
+                "SELECT state, reason FROM evaluation_sync WHERE role_id = ?1",
+                [&role.role_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(state, "needs_decision");
+        assert_eq!(reason, "canonical_evaluation_verified");
+        assert_eq!(store.dashboard().unwrap().roles.len(), 1);
+        assert_eq!(store.dashboard().unwrap().action_required_run_count, 0);
+        let run_status: String = store
+            .connection
+            .query_row(
+                "SELECT status FROM runs WHERE id = 'catch-up-obsolete'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(run_status, "cancelled");
+        let schema: i64 = store
+            .connection
+            .query_row("SELECT version FROM schema_meta", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(schema, 25);
+    }
+
+    #[test]
+    fn schema_v25_restores_executor_fingerprint_receipts_cleared_by_read_probe() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("test.sqlite3");
+        let mut store = Store::open(&path).unwrap();
+        store.import_dataset(DATASET).unwrap();
+        let role = store.evaluation_sync_roles().unwrap().remove(0);
+        let input_hash = format!("exec-fp:{}", role.source_identity_hash);
+        assert!(
+            store
+                .claim_evaluation_sync(&role.role_id, &input_hash)
+                .unwrap()
+        );
+        let evaluation = test_evaluation(&role, "Research first", "High Confidence", "High");
+        store
+            .complete_evaluation_sync(&role, &input_hash, &evaluation)
+            .unwrap();
+        let receipt_key: String = store
+            .connection
+            .query_row(
+                "SELECT current_receipt_key FROM evaluation_sync WHERE role_id = ?1",
+                [&role.role_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        // Simulate an HFW-composed receipt that recorded the executor fingerprint.
+        let executor_fingerprint = "f".repeat(64);
+        store
+            .connection
+            .execute(
+                "UPDATE evaluation_receipts
+                    SET compatibility_fingerprint = ?1
+                  WHERE receipt_key = ?2",
+                params![executor_fingerprint, &receipt_key],
+            )
+            .unwrap();
+        let stored_fp: String = store
+            .connection
+            .query_row(
+                "SELECT compatibility_fingerprint FROM evaluation_receipts WHERE receipt_key = ?1",
+                [&receipt_key],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored_fp, executor_fingerprint);
+        assert_eq!(
+            store
+                .invalidate_evaluation_compatibility_with_alternates(
+                    Some(&"d".repeat(40)),
+                    Some(&"e".repeat(64)),
+                    Some(executor_fingerprint.as_str()),
+                )
+                .unwrap(),
+            0
+        );
+        store
+            .connection
+            .execute(
+                "UPDATE evaluation_sync
+                    SET state = 'needs_attention',
+                        reason = 'evaluation_compatibility_changed',
+                        current_receipt_key = NULL,
+                        input_hash = NULL
+                  WHERE role_id = ?1",
+                [&role.role_id],
+            )
+            .unwrap();
+        store
+            .connection
+            .execute("UPDATE schema_meta SET version = 24", [])
+            .unwrap();
+        drop(store);
+
+        let store = Store::open(&path).unwrap();
+        let (state, reason, pointer): (String, String, Option<String>) = store
+            .connection
+            .query_row(
+                "SELECT state, reason, current_receipt_key FROM evaluation_sync WHERE role_id = ?1",
+                [&role.role_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(state, "needs_decision");
+        assert_eq!(reason, "canonical_evaluation_verified");
+        assert_eq!(pointer.as_deref(), Some(receipt_key.as_str()));
+        let schema: i64 = store
+            .connection
+            .query_row("SELECT version FROM schema_meta", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(schema, 25);
     }
 
     #[test]
@@ -10617,7 +11104,9 @@ mod tests {
         assert!(second.is_empty());
         let dashboard = store.dashboard().unwrap();
         assert_eq!(dashboard.pending_run_count, 0);
-        assert_eq!(dashboard.action_required_run_count, 2);
+        // Staged `source_adapter_not_configured` catch-ups are preserved windows,
+        // not actionable Queue blockers.
+        assert_eq!(dashboard.action_required_run_count, 0);
         assert!(
             dashboard
                 .recent_runs

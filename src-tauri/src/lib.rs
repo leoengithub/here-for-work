@@ -1955,9 +1955,10 @@ fn sync_evaluations_with_records(
             .recover_expired_evaluation_syncs()
             .map_err(|error| error.to_string())?;
         store
-            .invalidate_evaluation_compatibility(
+            .invalidate_evaluation_compatibility_with_alternates(
                 upstream_revision.as_deref(),
                 compatibility_fingerprint.as_deref(),
+                executor_fingerprint.as_deref(),
             )
             .map_err(|error| error.to_string())?;
         store
