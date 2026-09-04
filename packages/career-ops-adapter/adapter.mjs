@@ -49,12 +49,18 @@ const ARTIFACT_INSPECTION_PROBE_FILES = Object.freeze([
   "build-cv-html.mjs",
   "verify-cv-facts.mjs",
   "generate-pdf.mjs",
+  "tracker-utils.mjs",
 ]);
 const ARTIFACT_INSPECTION_MARKERS = Object.freeze({
   "application-artifacts.mjs": ["applicationArtifactPaths", "writeReuseDecision", "schema_version: 1"],
-  "build-cv-html.mjs": ["cv-payload", "page_format"],
+  // HFW calls `node build-cv-html.mjs <cv-payload.json> <cv.html>`; the script
+  // documents that CLI as <input.json> <output.html> and still reads page_format.
+  "build-cv-html.mjs": ["<input.json> <output.html>", "page_format"],
   "verify-cv-facts.mjs": ["--json", "verdict"],
-  "generate-pdf.mjs": ["CAREER_OPS_PDF_INDEX", "# report\\tpdf\\thtml\\tformat\\tdate"],
+  // PDF index env override lives in tracker-utils; generate-pdf imports the resolver
+  // and still writes the documented TSV header HFW's preparation transaction expects.
+  "generate-pdf.mjs": ["resolvePdfIndexPath", "# report\\tpdf\\thtml\\tformat\\tdate"],
+  "tracker-utils.mjs": ["CAREER_OPS_PDF_INDEX", "resolvePdfIndexPath"],
 });
 const SEMVER_RE = /^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$/;
 const GIT_SHA_RE = /^[0-9a-f]{40}$/;

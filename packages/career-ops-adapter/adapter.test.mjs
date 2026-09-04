@@ -230,9 +230,10 @@ async function evaluationFixture({ report = evaluationReport, tracker = {}, init
   await writeFile(join(fixtureRoot, "modes/oferta.md"), "## Machine Summary\n");
   await writeFile(join(fixtureRoot, "templates/states.yml"), "states: []\n");
   await writeFile(join(fixtureRoot, "application-artifacts.mjs"), "// applicationArtifactPaths writeReuseDecision schema_version: 1\n");
-  await writeFile(join(fixtureRoot, "build-cv-html.mjs"), "// cv-payload page_format\n");
+  await writeFile(join(fixtureRoot, "build-cv-html.mjs"), "// <input.json> <output.html> page_format\n");
   await writeFile(join(fixtureRoot, "verify-cv-facts.mjs"), "// --json verdict\n");
-  await writeFile(join(fixtureRoot, "generate-pdf.mjs"), "// CAREER_OPS_PDF_INDEX # report\\tpdf\\thtml\\tformat\\tdate\n");
+  await writeFile(join(fixtureRoot, "generate-pdf.mjs"), "// resolvePdfIndexPath # report\\tpdf\\thtml\\tformat\\tdate\n");
+  await writeFile(join(fixtureRoot, "tracker-utils.mjs"), "// CAREER_OPS_PDF_INDEX resolvePdfIndexPath\n");
   const trackerRecord = {
     id: 7, date: "2026-09-02", company: tracker.company ?? "Example Co", role: tracker.role ?? "Frontend Engineer",
     score: tracker.score ?? "4.2/5", status: tracker.status ?? "Evaluated", pdf: "❌",
@@ -412,6 +413,88 @@ test("capability probes pin exact revision, declared version, threshold, and fai
   }, { HFW_CAREER_OPS_ROOT: root });
   assert.deepEqual(defaulted.result.autoPdfScoreThreshold, { value: 3, source: "upstream_default" });
   assert.ok(defaulted.result.diagnostics.some(({ code }) => code === "auto_pdf_threshold_product_mismatch"));
+});
+
+test("artifacts.inspect.v1 probe is degraded with a fingerprint when the contract markers are present", async () => {
+  const root = await mkdtemp(join(tmpdir(), "hfw-artifact-probe-ok-"));
+  await Promise.all([
+    writeFile(join(root, "package.json"), '{"version":"1.31.0"}\n'),
+    writeFile(join(root, "application-artifacts.mjs"), "// applicationArtifactPaths writeReuseDecision schema_version: 1\n"),
+    writeFile(join(root, "build-cv-html.mjs"), "// <input.json> <output.html> page_format\n"),
+    writeFile(join(root, "verify-cv-facts.mjs"), "// --json verdict\n"),
+    writeFile(join(root, "generate-pdf.mjs"), "// resolvePdfIndexPath # report\\tpdf\\thtml\\tformat\\tdate\n"),
+    writeFile(join(root, "tracker-utils.mjs"), "// CAREER_OPS_PDF_INDEX resolvePdfIndexPath\n"),
+  ]);
+  for (const [command, args] of [
+    ["git", ["init", "--quiet"]],
+    ["git", ["add", "."]],
+    ["git", ["-c", "user.name=HereForWork Test", "-c", "user.email=test@hereforwork.local", "commit", "--quiet", "-m", "fixture"]],
+  ]) {
+    const result = await runCommand(command, args, root);
+    assert.equal(result.status, 0, result.stderr);
+  }
+
+  const response = await request({
+    id: "artifact-probe-ok",
+    protocolVersion: 1,
+    operation: "capabilities.get",
+    input: {},
+  }, { HFW_CAREER_OPS_ROOT: root });
+  assert.equal(response.ok, true, JSON.stringify(response));
+  const artifact = response.result.capabilities.find(({ id }) => id === "artifacts.inspect.v1");
+  assert.equal(artifact.status, "degraded");
+  assert.match(artifact.compatibilityFingerprint, /^[a-f0-9]{64}$/);
+  assert.equal(artifact.sourceRevision, response.result.upstreamRevision);
+  assert.ok(response.result.diagnostics.some(({ code, capabilityId }) => (
+    code === "safe_shape_probe_required" && capabilityId === "artifacts.inspect.v1"
+  )));
+});
+
+test("artifacts.inspect.v1 probe fails closed when contract markers drift", async () => {
+  const root = await mkdtemp(join(tmpdir(), "hfw-artifact-probe-miss-"));
+  await Promise.all([
+    writeFile(join(root, "package.json"), '{"version":"1.31.0"}\n'),
+    writeFile(join(root, "application-artifacts.mjs"), "// applicationArtifactPaths writeReuseDecision schema_version: 1\n"),
+    // Missing <input.json> <output.html> CLI contract marker.
+    writeFile(join(root, "build-cv-html.mjs"), "// page_format only\n"),
+    writeFile(join(root, "verify-cv-facts.mjs"), "// --json verdict\n"),
+    writeFile(join(root, "generate-pdf.mjs"), "// resolvePdfIndexPath # report\\tpdf\\thtml\\tformat\\tdate\n"),
+    writeFile(join(root, "tracker-utils.mjs"), "// CAREER_OPS_PDF_INDEX resolvePdfIndexPath\n"),
+  ]);
+  for (const [command, args] of [
+    ["git", ["init", "--quiet"]],
+    ["git", ["add", "."]],
+    ["git", ["-c", "user.name=HereForWork Test", "-c", "user.email=test@hereforwork.local", "commit", "--quiet", "-m", "fixture"]],
+  ]) {
+    const result = await runCommand(command, args, root);
+    assert.equal(result.status, 0, result.stderr);
+  }
+
+  const drifted = await request({
+    id: "artifact-probe-drift",
+    protocolVersion: 1,
+    operation: "capabilities.get",
+    input: {},
+  }, { HFW_CAREER_OPS_ROOT: root });
+  assert.equal(drifted.ok, true, JSON.stringify(drifted));
+  const driftedCapability = drifted.result.capabilities.find(({ id }) => id === "artifacts.inspect.v1");
+  assert.equal(driftedCapability.status, "unavailable");
+  assert.equal(driftedCapability.compatibilityFingerprint, null);
+  assert.ok(drifted.result.diagnostics.some(({ code, capabilityId }) => (
+    code === "structured_provenance_unavailable" && capabilityId === "artifacts.inspect.v1"
+  )));
+
+  await unlink(join(root, "tracker-utils.mjs"));
+  await writeFile(join(root, "build-cv-html.mjs"), "// <input.json> <output.html> page_format\n");
+  const missing = await request({
+    id: "artifact-probe-missing",
+    protocolVersion: 1,
+    operation: "capabilities.get",
+    input: {},
+  }, { HFW_CAREER_OPS_ROOT: root });
+  const missingCapability = missing.result.capabilities.find(({ id }) => id === "artifacts.inspect.v1");
+  assert.equal(missingCapability.status, "unavailable");
+  assert.equal(missingCapability.compatibilityFingerprint, null);
 });
 
 test("capabilities reject unknown inputs and report malformed threshold without exposing a path", async () => {
@@ -880,7 +963,7 @@ Approved compensation preference:
     process.stdout.write("042\\n");
   `);
   await writeFile(join(root, "build-cv-html.mjs"), `
-    // cv-payload page_format
+    // <input.json> <output.html> page_format
     import { mkdir, readFile, writeFile } from "node:fs/promises";
     import { dirname } from "node:path";
     const input = process.argv[2];
@@ -891,6 +974,7 @@ Approved compensation preference:
   `);
   await writeFile(join(root, "verify-cv-facts.mjs"), `// --json verdict\nprocess.stdout.write(JSON.stringify({ verdict: "pass" }));\n`);
   await writeFile(join(root, "generate-pdf.mjs"), `
+    // resolvePdfIndexPath # report\\tpdf\\thtml\\tformat\\tdate
     import { mkdir, writeFile } from "node:fs/promises";
     import { dirname } from "node:path";
     if (!process.argv.includes("--allow-reorder")) {
@@ -908,6 +992,7 @@ Approved compensation preference:
     const relative = (path) => path.slice(root.length + 1);
     await writeFile(process.env.CAREER_OPS_PDF_INDEX, "# report\\tpdf\\thtml\\tformat\\tdate — written by generate-pdf.mjs, do not edit\\n" + [report, relative(output), relative(input), format, "2026-08-30"].join("\\t") + "\\n");
   `);
+  await writeFile(join(root, "tracker-utils.mjs"), "// CAREER_OPS_PDF_INDEX resolvePdfIndexPath\n");
   await writeFile(join(root, "hfw-preparation-commit.mjs"), "process.exit(99);\n");
   await writeFile(join(root, "application-artifacts.mjs"), "// applicationArtifactPaths writeReuseDecision schema_version: 1\n");
   await writeFile(join(root, "batch/batch-prompt.md"), "#### Machine Summary\nauthorization_confidence:\nauthorization_evidence:\nauthorization_scope:\nengagement_mechanism:\nauthorization_question:\n");
