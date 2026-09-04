@@ -654,6 +654,34 @@ export function canDismissApplicationPreparation(
   return state.label === "Preparation failed" || state.label === "Ready for review";
 }
 
+const ACTIVE_APPLICATION_BROWSER = new Set<BrowserSessionSummary["status"]>([
+  "waiting_for_extension",
+  "inspecting",
+  "drafting_answers",
+  "answering",
+  "filling",
+  "persisting_answers",
+  "saving_answers",
+  "releasing",
+  "connection_verified",
+]);
+
+export function canMarkAppliedElsewhere(
+  item: PreparationSummary,
+  latestSession: BrowserSessionSummary | undefined,
+  options: { recordingApplication: boolean; dismissing: boolean },
+): boolean {
+  if (options.recordingApplication || options.dismissing) return false;
+  if (item.status !== "action_required" && item.status !== "completed") return false;
+  if (!latestSession) return true;
+  if (latestSession.status === "review_required" || latestSession.status === "submitted_tracking_pending") {
+    return false;
+  }
+  if (ACTIVE_APPLICATION_BROWSER.has(latestSession.status)) return false;
+  if (latestSession.status === "applied_recorded") return false;
+  return true;
+}
+
 function ApplicationStatus({ state }: { state: ApplicationState }) {
   const icon = state.active ? (
     <Spinner className="motion-reduce:animate-none" />

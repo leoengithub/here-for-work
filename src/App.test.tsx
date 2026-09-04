@@ -6,6 +6,7 @@ import {
   PreQueueStatus,
   QueueOperationalStatus,
   RoleRow,
+  canMarkAppliedElsewhere,
   deriveApplicationState,
   deriveQueueOperationalState,
   preparationRecoveryAction,
@@ -65,6 +66,39 @@ const browserSessionFixture: BrowserSessionSummary = {
 };
 
 describe("App", () => {
+  it("allows I applied elsewhere only for idle Applications rows without outcome session", () => {
+    expect(canMarkAppliedElsewhere(
+      { ...preparationFixture, status: "action_required" },
+      undefined,
+      { recordingApplication: false, dismissing: false },
+    )).toBe(true);
+    expect(canMarkAppliedElsewhere(
+      { ...preparationFixture, status: "completed" },
+      undefined,
+      { recordingApplication: false, dismissing: false },
+    )).toBe(true);
+    expect(canMarkAppliedElsewhere(
+      { ...preparationFixture, status: "queued" },
+      undefined,
+      { recordingApplication: false, dismissing: false },
+    )).toBe(false);
+    expect(canMarkAppliedElsewhere(
+      { ...preparationFixture, status: "completed" },
+      { ...browserSessionFixture, status: "review_required" },
+      { recordingApplication: false, dismissing: false },
+    )).toBe(false);
+    expect(canMarkAppliedElsewhere(
+      { ...preparationFixture, status: "completed" },
+      { ...browserSessionFixture, status: "filling" },
+      { recordingApplication: false, dismissing: false },
+    )).toBe(false);
+    expect(canMarkAppliedElsewhere(
+      { ...preparationFixture, status: "action_required", appliedTrackingPending: true },
+      undefined,
+      { recordingApplication: false, dismissing: false },
+    )).toBe(true);
+  });
+
   it("derives terminal and attention states before stale preparation steps", () => {
     expect(deriveApplicationState({
       ...preparationFixture,
