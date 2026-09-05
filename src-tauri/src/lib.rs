@@ -2628,12 +2628,14 @@ pub fn run() {
             }
             let career_ops_root = home_dir.join("Work/career-ops");
             let tracker_index_path = career_ops_root.join("data/applications.db");
+            let claude_path = discover_executable(&home_dir, "claude");
             let adapter = AdapterConfig {
                 node_path,
                 script_path,
                 career_ops_root,
                 tracker_index_path,
                 staging_path: career_ops_staging_path,
+                claude_path: claude_path.clone(),
             };
             let fallback_configuration =
                 store.cv_fallback_setting().ok().and_then(|setting| {
@@ -2656,7 +2658,7 @@ pub fn run() {
                 store: Mutex::new(store),
                 adapter,
                 codex_path: discover_executable(&home_dir, "codex"),
-                claude_path: discover_executable(&home_dir, "claude"),
+                claude_path,
                 provider_schema_path,
                 preparation_schema_path,
                 answer_schema_path,
