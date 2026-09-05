@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "capturedAt": "2026-09-05T08:00:00Z",
+  "desktopVersion": "0.1.6",
+  "redaction": {
+    "roleTitle": "omitted",
+    "company": "omitted",
+    "applicationUrl": "host only",
+    "profileFacts": "omitted",
+    "artifactPaths": "omitted"
+  },
+  "pairing": {
+    "approvedExtensionIdMatchesUnpackedInstall": true,
+    "nativeHostAllowedOriginMatchesApprovedId": true,
+    "selectedChromeProfile": "Profile 1",
+    "browserLastConnectedAt": "2026-09-05T07:58:04Z"
+  },
+  "session": {
+    "purpose": "application",
+    "roleCanonicalStatus": "Evaluated",
+    "preparationStatus": "completed",
+    "status": "action_required",
+    "errorCode": "extension_command_expired",
+    "driverLeaseState": "released",
+    "fallbackEligible": true,
+    "handoffReason": "extension_command_expired",
+    "pageHost": "buffer.com",
+    "createdAt": "2026-09-05T07:33:22Z",
+    "updatedAt": "2026-09-05T07:58:06Z"
+  },
+  "commands": [
+    {
+      "commandType": "inspect_request",
+      "status": "permanent",
+      "errorCode": "lease_expired",
+      "attempt": 3,
+      "createdAt": "2026-09-05T07:33:22Z",
+      "updatedAt": "2026-09-05T07:34:57Z",
+      "note": "claimed three times; no command_result before each 30s lease expired"
+    },
+    {
+      "commandType": "inspect_request",
+      "status": "permanent",
+      "errorCode": "extension_handshake_timeout",
+      "attempt": 0,
+      "createdAt": "2026-09-05T07:35:22Z",
+      "updatedAt": "2026-09-05T07:35:37Z",
+      "note": "Retry requeued inspect; recover_stalled reverted the session; never claimed"
+    }
+  ]
+}
