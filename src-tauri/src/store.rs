@@ -1534,6 +1534,53 @@ impl Store {
         Ok(changed)
     }
 
+    const RETRY_EVALUATION_REASONS: &[&str] = &[
+        "evaluation_result_invalid_or_stale",
+        "evaluation_receipt_pointer_unreadable",
+        "evaluation_result_capability_unavailable",
+        "canonical_evaluation_missing_executor_unavailable",
+        "canonical_evaluation_pending_executor",
+        "evaluation_executor_failed",
+        "evaluation_executor_receipt_invalid",
+        "evaluation_executor_url_missing",
+    ];
+
+    pub fn retry_evaluation_for_role(&mut self, role_id: &str) -> Result<(), StoreError> {
+        let current = self
+            .connection
+            .query_row(
+                "SELECT state, reason FROM evaluation_sync WHERE role_id = ?1",
+                [role_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?
+            .ok_or_else(|| {
+                StoreError::InvalidPreparation(
+                    "retry evaluation is not available for this role".to_string(),
+                )
+            })?;
+        let can_retry = current.0 == "needs_attention"
+            && Self::RETRY_EVALUATION_REASONS.contains(&current.1.as_str());
+        if !can_retry {
+            return Err(StoreError::InvalidPreparation(
+                "retry evaluation is not available for this role".to_string(),
+            ));
+        }
+        self.connection.execute(
+            "UPDATE evaluation_sync
+                SET state = 'awaiting_evaluation',
+                    reason = 'evaluation_receipt_required',
+                    attempt = 0,
+                    input_hash = NULL,
+                    current_receipt_key = NULL,
+                    lease_expires_at = NULL,
+                    updated_at = ?1
+              WHERE role_id = ?2 AND state = 'needs_attention'",
+            params![Utc::now().to_rfc3339(), role_id],
+        )?;
+        Ok(())
+    }
+
     pub fn claim_evaluation_sync(
         &mut self,
         role_id: &str,
@@ -5980,7 +6027,7 @@ impl Store {
             |row| row.get(0),
         )?;
         let mut pre_queue_statement = self.connection.prepare(
-            "SELECT r.id, r.company, r.title, evaluation.state, evaluation.reason,
+            "SELECT r.id, r.company, r.title, r.application_url, evaluation.state, evaluation.reason,
                     evaluation.attempt, evaluation.updated_at
                FROM evaluation_sync evaluation
                JOIN roles r ON r.id = evaluation.role_id
@@ -5990,17 +6037,18 @@ impl Store {
         )?;
         let pre_queue_roles = pre_queue_statement
             .query_map([], |row| {
-                let state = row.get::<_, String>(3)?;
-                let reason = row.get::<_, String>(4)?;
+                let state = row.get::<_, String>(4)?;
+                let reason = row.get::<_, String>(5)?;
                 Ok(PreQueueRoleSummary {
                     role_id: row.get(0)?,
                     company: row.get(1)?,
                     title: row.get(2)?,
+                    application_url: row.get(3)?,
                     state: state.clone(),
                     recovery: PreQueueRecovery::for_state_and_reason(&state, &reason),
                     reason,
-                    attempt: row.get(5)?,
-                    updated_at: row.get(6)?,
+                    attempt: row.get(6)?,
+                    updated_at: row.get(7)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -9093,6 +9141,119 @@ mod tests {
             )
             .unwrap();
         assert_eq!(held.0, "canonical_status_not_evaluated");
+        assert_eq!(held.1, 1);
+        assert_eq!(held.2.as_deref(), Some(input_hash.as_str()));
+    }
+
+    fn hold_attention_with_hash(store: &mut Store, reason: &str) -> (String, String) {
+        let role = store.evaluation_sync_roles().unwrap().remove(0);
+        let input_hash = format!("retry-eval:{}", role.source_identity_hash);
+        assert!(
+            store
+                .claim_evaluation_sync(&role.role_id, &input_hash)
+                .unwrap()
+        );
+        store
+            .hold_evaluation(&role.role_id, "needs_attention", reason)
+            .unwrap();
+        (role.role_id, input_hash)
+    }
+
+    fn evaluation_sync_state(store: &Store, role_id: &str) -> (String, i64, Option<String>) {
+        store
+            .connection
+            .query_row(
+                "SELECT state, attempt, input_hash FROM evaluation_sync WHERE role_id = ?1",
+                [role_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn retry_evaluation_for_stale_attention_returns_role_to_awaiting_evaluation() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+        store.import_dataset(DATASET).unwrap();
+        let (role_id, input_hash) =
+            hold_attention_with_hash(&mut store, "evaluation_result_invalid_or_stale");
+        let before = evaluation_sync_state(&store, &role_id);
+        assert_eq!(before.0, "needs_attention");
+        assert_eq!(before.1, 1);
+        assert_eq!(before.2.as_deref(), Some(input_hash.as_str()));
+
+        store.retry_evaluation_for_role(&role_id).unwrap();
+
+        let after = evaluation_sync_state(&store, &role_id);
+        assert_eq!(after.0, "awaiting_evaluation");
+        assert_eq!(after.1, 0);
+        assert_eq!(after.2, None);
+        assert_eq!(
+            store.dashboard().unwrap().pre_queue_roles[0]
+                .application_url
+                .as_deref(),
+            Some("https://example.test/jobs/1")
+        );
+    }
+
+    #[test]
+    fn retry_evaluation_for_executor_unavailable_returns_role_to_awaiting_evaluation() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+        store.import_dataset(DATASET).unwrap();
+        let (role_id, _) =
+            hold_attention_with_hash(&mut store, "canonical_evaluation_missing_executor_unavailable");
+
+        store.retry_evaluation_for_role(&role_id).unwrap();
+
+        let after = evaluation_sync_state(&store, &role_id);
+        assert_eq!(after.0, "awaiting_evaluation");
+        assert_eq!(after.1, 0);
+        assert_eq!(after.2, None);
+    }
+
+    #[test]
+    fn retry_evaluation_for_not_evaluated_status_is_rejected() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+        store.import_dataset(DATASET).unwrap();
+        let (role_id, input_hash) =
+            hold_attention_with_hash(&mut store, "canonical_status_not_evaluated");
+
+        let error = store.retry_evaluation_for_role(&role_id).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("retry evaluation is not available")
+        );
+        let held = evaluation_sync_state(&store, &role_id);
+        assert_eq!(held.0, "needs_attention");
+        assert_eq!(held.1, 1);
+        assert_eq!(held.2.as_deref(), Some(input_hash.as_str()));
+    }
+
+    #[test]
+    fn retry_evaluation_for_global_reconcile_reason_is_rejected() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+        store.import_dataset(DATASET).unwrap();
+        let (role_id, input_hash) =
+            hold_attention_with_hash(&mut store, "canonical_history_unavailable");
+
+        let error = store.retry_evaluation_for_role(&role_id).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("retry evaluation is not available")
+        );
+        let held = evaluation_sync_state(&store, &role_id);
+        assert_eq!(held.0, "needs_attention");
         assert_eq!(held.1, 1);
         assert_eq!(held.2.as_deref(), Some(input_hash.as_str()));
     }

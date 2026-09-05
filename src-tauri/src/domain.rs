@@ -184,6 +184,7 @@ pub struct PreQueueRoleSummary {
     pub role_id: String,
     pub company: String,
     pub title: String,
+    pub application_url: Option<String>,
     pub state: String,
     pub reason: String,
     pub recovery: PreQueueRecovery,

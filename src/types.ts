@@ -49,6 +49,7 @@ export interface PreQueueRoleSummary {
   roleId: string;
   company: string;
   title: string;
+  applicationUrl: string | null;
   state: "awaiting_evaluation" | "needs_attention" | "syncing";
   reason: string;
   recovery: PreQueueRecoveryDescriptor;

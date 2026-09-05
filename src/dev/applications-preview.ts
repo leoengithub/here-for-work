@@ -153,6 +153,7 @@ export const queuePreviewDashboard: DashboardState = {
       roleId: "pending-1",
       company: "Example Labs",
       title: "Frontend Engineer",
+      applicationUrl: "https://example.test/pending-1/apply",
       state: "syncing",
       reason: "evaluation_result_read_pending",
       recovery: { scope: "none", action: null },
@@ -163,6 +164,7 @@ export const queuePreviewDashboard: DashboardState = {
       roleId: "attention-1",
       company: "Example Studio",
       title: "UI Engineer",
+      applicationUrl: "https://example.test/attention-1/apply",
       state: "needs_attention",
       reason: "evaluation_result_invalid_or_stale",
       recovery: { scope: "global_reconcile", action: "reconcile_application_history" },
@@ -180,6 +182,7 @@ const preQueueFixture = (count: number, state: "awaiting_evaluation" | "syncing"
     roleId: `preview-${state}-${index + 1}`,
     company: state === "needs_attention" ? "Northstar Tools" : "Example Labs",
     title: state === "needs_attention" ? "Frontend Engineer" : "Platform Engineer",
+    applicationUrl: `https://example.test/preview-${state}-${index + 1}/apply`,
     state,
     reason,
     recovery: (state === "needs_attention" && reason === "canonical_history_unavailable"
