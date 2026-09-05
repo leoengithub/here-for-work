@@ -6,6 +6,7 @@ import {
   PreQueueStatus,
   QueueOperationalStatus,
   RoleRow,
+  attentionCardAction,
   canMarkAppliedElsewhere,
   deriveApplicationState,
   deriveQueueOperationalState,
@@ -66,6 +67,14 @@ const browserSessionFixture: BrowserSessionSummary = {
 };
 
 describe("App", () => {
+  it("classifies Needs attention card actions by reason", () => {
+    expect(attentionCardAction("canonical_status_not_evaluated", "repair_career_ops")).toBe("dismiss");
+    expect(attentionCardAction("evaluation_result_invalid_or_stale", "global_reconcile")).toBe("retry_evaluation");
+    expect(attentionCardAction("canonical_evaluation_missing_executor_unavailable", "repair_career_ops")).toBe("retry_evaluation");
+    expect(attentionCardAction("canonical_history_unavailable", "global_reconcile")).toBe(null);
+    expect(attentionCardAction("source_identity_changed", "none")).toBe(null);
+  });
+
   it("allows I applied elsewhere only for idle Applications rows without outcome session", () => {
     expect(canMarkAppliedElsewhere(
       { ...preparationFixture, status: "action_required" },
@@ -628,7 +637,7 @@ describe("App", () => {
     expect(screen.getByRole("heading", { name: "Needs attention" })).toBeInTheDocument();
     expect(screen.getByText("Example Studio")).toBeInTheDocument();
     expect(screen.getByText("The evaluation result is invalid or stale.")).toBeInTheDocument();
-    expect(screen.getByText("Included in the group retry above.")).toBeInTheDocument();
+    expect(screen.getAllByText("Included in the group retry above.")).toHaveLength(2);
     expect(screen.getByRole("button", { name: "Retry history sync" })).toBeEnabled();
     expect(screen.queryByText("1 role needs attention")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Open System" })).not.toBeInTheDocument();

@@ -267,6 +267,26 @@ export function PreQueueStatus({ roles }: { roles: DashboardState["preQueueRoles
   return <p className="pre-queue-status" role="status">{parts.join(". ")}.</p>;
 }
 
+const RETRY_EVALUATION_REASONS = [
+  "evaluation_result_invalid_or_stale",
+  "evaluation_receipt_pointer_unreadable",
+  "evaluation_result_capability_unavailable",
+  "canonical_evaluation_missing_executor_unavailable",
+  "canonical_evaluation_pending_executor",
+  "evaluation_executor_failed",
+  "evaluation_executor_receipt_invalid",
+  "evaluation_executor_url_missing",
+] as const;
+
+export type AttentionCardAction = "dismiss" | "retry_evaluation" | null;
+
+export function attentionCardAction(reason: string, recoveryScope: string): AttentionCardAction {
+  if (reason === "canonical_status_not_evaluated") return "dismiss";
+  if ((RETRY_EVALUATION_REASONS as readonly string[]).includes(reason)) return "retry_evaluation";
+  if (recoveryScope === "global_reconcile") return null;
+  return null;
+}
+
 const preQueueReasonCopy: Record<string, string> = {
   canonical_history_unavailable: "Canonical history could not be read.",
   canonical_match_missing_or_ambiguous: "The canonical history match is missing or ambiguous.",
