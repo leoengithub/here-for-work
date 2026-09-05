@@ -1900,6 +1900,9 @@ fn reconcile_application_history(
             .store
             .lock()
             .map_err(|_| "Operational store lock was poisoned".to_string())?;
+        store
+            .reset_exhausted_global_reconcile_attempts()
+            .map_err(|error| error.to_string())?;
         reconcile_history_preserving_adapter_gate(&mut store, &records)?
     };
     sync_evaluations_with_records(&state, &records)?;

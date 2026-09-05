@@ -169,6 +169,13 @@ impl PreQueueRecovery {
         };
         Self { scope, action }
     }
+
+    pub fn is_global_reconcile_reason(reason: &str) -> bool {
+        matches!(
+            Self::for_state_and_reason("needs_attention", reason).scope,
+            PreQueueRecoveryScope::GlobalReconcile
+        )
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1649,5 +1656,18 @@ mod pre_queue_recovery_tests {
         .expect("recovery descriptor serializes");
         assert_eq!(serialized["scope"], "global_reconcile");
         assert_eq!(serialized["action"], "reconcile_application_history");
+
+        for reason in global {
+            assert!(
+                PreQueueRecovery::is_global_reconcile_reason(reason),
+                "{reason}"
+            );
+        }
+        for reason in career_ops {
+            assert!(
+                !PreQueueRecovery::is_global_reconcile_reason(reason),
+                "{reason}"
+            );
+        }
     }
 }
