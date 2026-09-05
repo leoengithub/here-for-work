@@ -120,7 +120,7 @@ export interface PreparationSummary {
   attempt: number;
   reportPath: string | null;
   cvPdfPath: string | null;
-  cvSource: "tailored_generated" | "user_reviewed_fallback" | null;
+  cvSource: "tailored_generated" | "user_reviewed_fallback" | "user_accepted_unverified" | null;
   errorClass: string | null;
   errorStage: string | null;
   errorDetail: string | null;
@@ -144,7 +144,7 @@ export interface PreparationDetail {
   reportMarkdown: string | null;
   reportPath: string | null;
   cvPdfPath: string | null;
-  cvSource: "tailored_generated" | "user_reviewed_fallback" | null;
+  cvSource: "tailored_generated" | "user_reviewed_fallback" | "user_accepted_unverified" | null;
 }
 
 export interface CvFallbackSetting {

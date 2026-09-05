@@ -67,7 +67,7 @@ export interface Reference {
   sha256: Sha256;
 }
 export interface Provenance {
-  source: "tailored_generated" | "user_reviewed_fallback";
+  source: "tailored_generated" | "user_reviewed_fallback" | "user_accepted_unverified";
   tailored: boolean;
   sourceSha256: null | Sha256;
   renderRecovery: {

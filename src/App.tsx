@@ -38,6 +38,7 @@ import {
 } from "@/components/ui/select";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { RoleTitleLink } from "./role-title-link";
 import { Textarea } from "@/components/ui/textarea";
 import {
   Toaster,
@@ -72,6 +73,7 @@ import {
   getCvFallbackSetting,
   focusReviewForm,
   openPreparationArtifact,
+  continueUnverifiedPreparation,
   quitApp,
   cancelPreparation,
   sendTestNotification,
@@ -173,9 +175,9 @@ export function RoleRow({
       <article className="role-card" aria-labelledby={titleId} aria-busy={enqueuing || undefined}>
         <div className="role-card__heading">
           {role.applicationUrl ? (
-            <a id={titleId} className="role-card__title" href={role.applicationUrl} target="_blank" rel="noreferrer">
+            <RoleTitleLink id={titleId} className="role-card__title" href={role.applicationUrl}>
               {role.title}
-            </a>
+            </RoleTitleLink>
           ) : (
             <span id={titleId} className="role-card__title">{role.title}</span>
           )}
@@ -365,9 +367,9 @@ function PreQueueAttentionGroup({
               <div>
                 <h4 id={titleId}>
                   {role.applicationUrl ? (
-                    <a className="pre-queue-role__title" href={role.applicationUrl} target="_blank" rel="noreferrer">
+                    <RoleTitleLink className="pre-queue-role__title" href={role.applicationUrl}>
                       {role.title}
-                    </a>
+                    </RoleTitleLink>
                   ) : role.title}
                 </h4>
                 <p className="pre-queue-role__company">{role.company}</p>
@@ -666,6 +668,22 @@ const FRESH_PREPARATION_RETRY_POLICIES = [
 ] as const;
 
 export type PreparationRecoveryAction = "retry" | "prepare_again" | null;
+
+function canContinueUnverified(status: string, errorClass: string | null | undefined): boolean {
+  return status === "action_required" && errorClass === "cv_fact_check_failed";
+}
+
+function cvSourceListLabel(source: string | null | undefined): string {
+  if (source === "user_reviewed_fallback") return " · User-reviewed CV";
+  if (source === "user_accepted_unverified") return " · User-accepted unverified CV";
+  return "";
+}
+
+function cvOpenLabel(source: string | null | undefined, { detail = false } = {}): string {
+  if (source === "user_reviewed_fallback") return "Open user-reviewed CV";
+  if (source === "user_accepted_unverified") return "Open user-accepted unverified CV";
+  return detail ? "Open fact-checked tailored CV" : "Open tailored CV";
+}
 
 export function preparationRecoveryAction(
   status: string,
@@ -1406,6 +1424,9 @@ export function App() {
   const [markAppliedPreparationId, setMarkAppliedPreparationId] = useState<string | null>(null);
   const [markingAppliedRoleId, setMarkingAppliedRoleId] = useState<string | null>(null);
   const [markAppliedError, setMarkAppliedError] = useState<string | null>(null);
+  const [continueUnverifiedId, setContinueUnverifiedId] = useState<string | null>(null);
+  const [continuingUnverifiedId, setContinuingUnverifiedId] = useState<string | null>(null);
+  const [continueUnverifiedError, setContinueUnverifiedError] = useState<string | null>(null);
   const [enqueuingRoleIds, setEnqueuingRoleIds] = useState<Set<string>>(() => new Set());
   const [cancellationRequestedRoleIds, setCancellationRequestedRoleIds] = useState<Set<string>>(() => new Set());
   const [reopeningPreparationIds, setReopeningPreparationIds] = useState<Set<string>>(() => new Set());
@@ -1846,6 +1867,7 @@ export function App() {
     setNotice(null);
     try {
       const outcome = await prepareRole(roleId, provider);
+      setContinueUnverifiedId(null);
       setDashboard(outcome.dashboard);
       setQueueFiltersDraft(outcome.dashboard.queueFilters);
       setNotice(outcome.message);
@@ -1870,6 +1892,26 @@ export function App() {
         next.delete(roleId);
         return next;
       });
+    }
+  };
+
+  const confirmContinueUnverified = async (preparationId: string) => {
+    setContinuingUnverifiedId(preparationId);
+    setContinueUnverifiedError(null);
+    setError(null);
+    try {
+      const next = await continueUnverifiedPreparation(preparationId);
+      setDashboard(next);
+      setQueueFiltersDraft(next.queueFilters);
+      setContinueUnverifiedId(null);
+      setNotice("User accepted an unverified CV and continued to the form.");
+      setPreparationDetail((current) => (current?.preparationId === preparationId ? null : current));
+    } catch (reason) {
+      const message = reason instanceof Error ? reason.message : String(reason);
+      setContinueUnverifiedError(message);
+      setError(message);
+    } finally {
+      setContinuingUnverifiedId(null);
     }
   };
 
@@ -2192,14 +2234,14 @@ export function App() {
                 <div className="preparation-list__identity">
                   <strong>
                     {item.applicationUrl ? (
-                      <a className="preparation-list__title" href={item.applicationUrl} target="_blank" rel="noreferrer">
+                      <RoleTitleLink className="preparation-list__title" href={item.applicationUrl}>
                         {item.title}
-                      </a>
+                      </RoleTitleLink>
                     ) : item.title}
                   </strong>
                   <span>
                     {item.company} · {item.provider}
-                    {item.cvSource === "user_reviewed_fallback" ? " · User-reviewed CV" : ""}
+                    {cvSourceListLabel(item.cvSource)}
                   </span>
                 </div>
                 <ApplicationStatus state={applicationState} />
@@ -2236,6 +2278,21 @@ export function App() {
                             : "Retry preparation"}
                       </Button>
                     ) : null}
+                    {canContinueUnverified(item.status, item.errorClass) ? (
+                      <Button
+                        variant="outline"
+                        type="button"
+                        aria-expanded={continueUnverifiedId === item.id}
+                        aria-controls={`continue-unverified-confirmation-${item.id}`}
+                        onClick={() => {
+                          setContinueUnverifiedError(null);
+                          setContinueUnverifiedId(item.id);
+                        }}
+                        disabled={dismissalInProgress || markAppliedInProgress || continuingUnverifiedId === item.id}
+                      >
+                        Continue anyway
+                      </Button>
+                    ) : null}
                     {canMarkApplied ? (
                       <Button
                         id={`mark-applied-preparation-${item.id}`}
@@ -2264,13 +2321,50 @@ export function App() {
                     ) : null}
                   </div>
                 ) : null}
+                {continueUnverifiedId === item.id ? (
+                  <Alert
+                    id={`continue-unverified-confirmation-${item.id}`}
+                    className="preparation-list__confirmation"
+                    variant="destructive"
+                  >
+                    <HugeiconsIcon icon={Alert02Icon} strokeWidth={2} aria-hidden="true" />
+                    <AlertTitle>Continue with an unverified CV?</AlertTitle>
+                    <AlertDescription>
+                      <p>{item.errorDetail}</p>
+                      <p>This CV will not be marked fact-checked. HereForWork will finish this same preparation and open the form.</p>
+                      {continueUnverifiedError ? (
+                        <p className="preparation-list__dismiss-error" aria-live="assertive">
+                          {continueUnverifiedError}
+                        </p>
+                      ) : null}
+                      <div className="button-cluster">
+                        <Button
+                          className="text-foreground"
+                          variant="outline"
+                          type="button"
+                          onClick={() => setContinueUnverifiedId(null)}
+                          disabled={continuingUnverifiedId === item.id}
+                        >
+                          Keep failed
+                        </Button>
+                        <Button
+                          type="button"
+                          onClick={() => void confirmContinueUnverified(item.id)}
+                          disabled={continuingUnverifiedId === item.id}
+                        >
+                          {continuingUnverifiedId === item.id ? "Continuing…" : "Continue with unverified CV"}
+                        </Button>
+                      </div>
+                    </AlertDescription>
+                  </Alert>
+                ) : null}
                 {item.status === "completed" ? (
                   <div className="preparation-list__actions">
                     <Button variant="outline" type="button" onClick={() => void showPreparationDetail(item.id)} disabled={busy || dismissalInProgress || markAppliedInProgress}>
                       Details
                     </Button>
                     <Button variant="outline" type="button" onClick={() => void openArtifact(item.id, "cv")} disabled={busy || dismissalInProgress || markAppliedInProgress}>
-                      {item.cvSource === "user_reviewed_fallback" ? "Open user-reviewed CV" : "Open tailored CV"}
+                      {cvOpenLabel(item.cvSource)}
                     </Button>
                     {!latestSession ? (
                     <Button
@@ -2447,9 +2541,9 @@ export function App() {
                 </p>
                   <SheetTitle id="preparation-detail-title">
                     {detailPreparationSummary?.applicationUrl ? (
-                      <a className="preparation-list__title" href={detailPreparationSummary.applicationUrl} target="_blank" rel="noreferrer">
+                      <RoleTitleLink className="preparation-list__title" href={detailPreparationSummary.applicationUrl}>
                         {preparationDetail.title}
-                      </a>
+                      </RoleTitleLink>
                     ) : preparationDetail.title}
                   </SheetTitle>
                   <p>{preparationDetail.company} · {preparationDetail.provider}</p>
@@ -2461,7 +2555,7 @@ export function App() {
                 ) : null}
                 {preparationDetail.cvPdfPath ? (
                   <Button variant="outline" type="button" onClick={() => void openArtifact(preparationDetail.preparationId, "cv")}>
-                    {preparationDetail.cvSource === "user_reviewed_fallback" ? "Open user-reviewed CV" : "Open fact-checked tailored CV"}
+                    {cvOpenLabel(preparationDetail.cvSource, { detail: true })}
                   </Button>
                 ) : null}
                 {(() => {
@@ -2485,6 +2579,21 @@ export function App() {
                     </Button>
                   );
                 })()}
+                {canContinueUnverified(preparationDetail.status, preparationDetail.errorClass) ? (
+                  <Button
+                    variant="outline"
+                    type="button"
+                    aria-expanded={continueUnverifiedId === preparationDetail.preparationId}
+                    aria-controls={`continue-unverified-confirmation-detail-${preparationDetail.preparationId}`}
+                    onClick={() => {
+                      setContinueUnverifiedError(null);
+                      setContinueUnverifiedId(preparationDetail.preparationId);
+                    }}
+                    disabled={continuingUnverifiedId === preparationDetail.preparationId}
+                  >
+                    Continue anyway
+                  </Button>
+                ) : null}
                 {detailBrowserSession?.status === "action_required" ? (
                   <Button type="button" onClick={() => void retryBrowser(detailBrowserSession.id)} disabled={busy || detailMarkAppliedInProgress}>
                     Retry browser step
@@ -2542,11 +2651,57 @@ export function App() {
                   </AlertDescription>
                 </Alert>
               ) : null}
+              {continueUnverifiedId === preparationDetail.preparationId
+                && canContinueUnverified(preparationDetail.status, preparationDetail.errorClass) ? (
+                <Alert
+                  id={`continue-unverified-confirmation-detail-${preparationDetail.preparationId}`}
+                  className="preparation-list__confirmation"
+                  variant="destructive"
+                >
+                  <HugeiconsIcon icon={Alert02Icon} strokeWidth={2} aria-hidden="true" />
+                  <AlertTitle>Continue with an unverified CV?</AlertTitle>
+                  <AlertDescription>
+                    <p>{preparationDetail.errorDetail}</p>
+                    <p>This CV will not be marked fact-checked. HereForWork will finish this same preparation and open the form.</p>
+                    {continueUnverifiedError ? (
+                      <p className="preparation-list__dismiss-error" aria-live="assertive">
+                        {continueUnverifiedError}
+                      </p>
+                    ) : null}
+                    <div className="button-cluster">
+                      <Button
+                        className="text-foreground"
+                        variant="outline"
+                        type="button"
+                        onClick={() => setContinueUnverifiedId(null)}
+                        disabled={continuingUnverifiedId === preparationDetail.preparationId}
+                      >
+                        Keep failed
+                      </Button>
+                      <Button
+                        type="button"
+                        onClick={() => void confirmContinueUnverified(preparationDetail.preparationId)}
+                        disabled={continuingUnverifiedId === preparationDetail.preparationId}
+                      >
+                        {continuingUnverifiedId === preparationDetail.preparationId ? "Continuing…" : "Continue with unverified CV"}
+                      </Button>
+                    </div>
+                  </AlertDescription>
+                </Alert>
+              ) : null}
               {preparationDetail.cvSource === "user_reviewed_fallback" ? (
                 <Alert>
                   <AlertTitle>User-reviewed CV fallback</AlertTitle>
                   <AlertDescription>
                     PDF rendering failed, so this preparation uses your configured reviewed CV. It was not tailored for this role.
+                  </AlertDescription>
+                </Alert>
+              ) : null}
+              {preparationDetail.cvSource === "user_accepted_unverified" ? (
+                <Alert>
+                  <AlertTitle>User-accepted unverified CV</AlertTitle>
+                  <AlertDescription>
+                    You accepted this CV after bounded fact checks failed. It is not marked fact-checked.
                   </AlertDescription>
                 </Alert>
               ) : null}

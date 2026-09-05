@@ -67,7 +67,7 @@
       "type": "object", "additionalProperties": false,
       "required": ["source", "tailored", "sourceSha256", "renderRecovery"],
       "properties": {
-        "source": { "type": "string", "enum": ["tailored_generated", "user_reviewed_fallback"] },
+        "source": { "type": "string", "enum": ["tailored_generated", "user_reviewed_fallback", "user_accepted_unverified"] },
         "tailored": { "type": "boolean" },
         "sourceSha256": { "anyOf": [{ "type": "null" }, { "$ref": "#/$defs/sha256" }] },
         "renderRecovery": { "type": ["object", "null"] }

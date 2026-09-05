@@ -60,7 +60,11 @@ be proved.
 The configured user-reviewed PDF fallback is copied only after PDF rendering
 fails. Its source must remain a regular PDF with the saved SHA-256 before and after
 copying; HereForWork never overwrites or deletes the source. Its provenance remains
-`user_reviewed_fallback`, `tailored: false`.
+`user_reviewed_fallback`, `tailored: false`. An explicit user accept after a failed
+bounded fact check records `user_accepted_unverified`. Publishing staged tailored HTML
+sets `tailored: true`. Publishing the hash-bound fallback sets `tailored: false` plus
+the existing fallback hash/recovery fields. Both include a `cv_fact_check_failed`
+warning recovered by `user_accepted_unverified` and must not be described as fact-checked.
 
 No report, CV, profile content, or form answer is persisted in HereForWork. Only
 bounded paths, hashes, compatibility identities, provenance labels, and sanitized

@@ -6,6 +6,7 @@ import { dirname, join, relative } from "node:path";
 import { test } from "node:test";
 
 import {
+  acceptUnverifiedPreparationTransaction,
   commitPreparationTransaction,
   commitSelectivePreparationTransaction,
   PreparationTransactionError,
@@ -142,6 +143,7 @@ async function selectiveHarness(options = {}) {
     setFailScript(value) { failScript = value; },
     setPlan(value) { inspectedPlan = structuredClone(value); fixture.input.artifactPlan = structuredClone(value); },
     commit: () => commitSelectivePreparationTransaction(transactionOptions),
+    acceptUnverified: () => acceptUnverifiedPreparationTransaction(transactionOptions),
   };
 }
 
@@ -306,6 +308,7 @@ async function harness(options = {}) {
     calls,
     get released() { return released; },
     commit: () => commitPreparationTransaction(transactionOptions),
+    acceptUnverified: () => acceptUnverifiedPreparationTransaction(transactionOptions),
   };
 }
 
@@ -370,6 +373,54 @@ test("successful commands cannot bypass HTML or fact-result validation", async (
     assert.doesNotMatch(error.message, /user@example|Users\/private|x{40}/);
     return true;
   });
+});
+
+test("acceptUnverified publishes staged HTML after a fact-check failure without a new provider run", async () => {
+  const fixture = await harness({ factVerdict: "block" });
+  await expectFailure(fixture.commit(), "cv_fact_check_failed", "fresh_preparation_provider_run");
+  const buildCallsBefore = fixture.calls.filter(({ script }) => script === "build-cv-html.mjs").length;
+  const committed = await fixture.acceptUnverified();
+  assert.equal(committed.cvProvenance.source, "user_accepted_unverified");
+  assert.equal(committed.cvProvenance.tailored, true);
+  assert.equal(committed.cvProvenance.sourceSha256, null);
+  assert.equal(committed.cvProvenance.renderRecovery, null);
+  assert.equal(committed.warnings[0].code, "cv_fact_check_failed");
+  assert.equal(committed.warnings[0].recoveredBy, "user_accepted_unverified");
+  assert.match(committed.warnings[0].detail, /unsupported metric-like claims: 8 years/);
+  assert.doesNotMatch(JSON.stringify(committed), /fact-checked|passed fact checks|verified CV/i);
+  assert.equal(fixture.calls.filter(({ script }) => script === "build-cv-html.mjs").length, buildCallsBefore);
+  assert.equal(fixture.calls.filter(({ script }) => script === "verify-cv-facts.mjs").length >= 2, true);
+});
+
+test("acceptUnverified uses the hash-bound fallback when staged HTML is gone", async () => {
+  const fixture = await harness({ factVerdict: "block", fallback: true });
+  await expectFailure(fixture.commit(), "cv_fact_check_failed", "fresh_preparation_provider_run");
+  const { rm } = await import("node:fs/promises");
+  await rm(join(fixture.root, "output", ".hfw-preparation-staging"), { recursive: true, force: true });
+  const committed = await fixture.acceptUnverified();
+  assert.equal(committed.cvProvenance.source, "user_accepted_unverified");
+  assert.equal(committed.cvProvenance.tailored, false);
+  assert.equal(committed.cvProvenance.sourceSha256, digest(PDF));
+  assert.equal(committed.cvProvenance.renderRecovery.code, "pdf_generation_failed");
+  assert.ok(committed.warnings.some((warning) => (
+    warning.code === "cv_fact_check_failed" && warning.recoveredBy === "user_accepted_unverified"
+  )));
+  assert.ok(committed.warnings.some((warning) => (
+    warning.code === "pdf_generation_failed" && warning.recoveredBy === "user_reviewed_fallback"
+  )));
+});
+
+test("acceptUnverified fails visibly when neither staged HTML nor fallback exists", async () => {
+  const fixture = await harness({ factVerdict: "block" });
+  await expectFailure(fixture.commit(), "cv_fact_check_failed", "fresh_preparation_provider_run");
+  const { rm } = await import("node:fs/promises");
+  await rm(join(fixture.root, "output", ".hfw-preparation-staging"), { recursive: true, force: true });
+  await expectFailure(fixture.acceptUnverified(), "pdf_fallback_not_configured", "repair_runtime_then_retry");
+});
+
+test("ordinary commit still blocks a failed fact check after acceptUnverified exists", async () => {
+  const fixture = await harness({ factVerdict: "block" });
+  await expectFailure(fixture.commit(), "cv_fact_check_failed", "fresh_preparation_provider_run");
 });
 
 test("verify-cv-facts exit failures keep bounded invented-claim diagnostics", async () => {

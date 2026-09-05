@@ -150,6 +150,16 @@ export async function openPreparationArtifact(preparationId: string, artifact: "
   return invoke<void>("open_preparation_artifact", { preparationId, artifact });
 }
 
+export async function openExternalUrl(url: string): Promise<void> {
+  if (!isTauri()) throw new Error("Opening listing URLs is available in the desktop app.");
+  return invoke<void>("open_external_url", { url });
+}
+
+export async function continueUnverifiedPreparation(preparationId: string): Promise<DashboardState> {
+  if (!isTauri()) throw new Error("Continue anyway is available in the desktop app.");
+  return invoke<DashboardState>("continue_unverified_preparation", { preparationId });
+}
+
 export async function quitApp(): Promise<void> {
   if (!isTauri()) return;
   return invoke<void>("quit_app");

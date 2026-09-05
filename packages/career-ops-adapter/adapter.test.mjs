@@ -307,6 +307,7 @@ test("capabilities expose the fixed safety boundary", async () => {
     "profile.queue_filters.get",
     "preparation.context.get",
     "preparation.result.recover",
+    "preparation.result.acceptUnverified",
     "preparation.result.commit",
     "preparation.artifacts.delete",
     "answers.context.get",

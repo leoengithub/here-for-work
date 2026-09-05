@@ -15,6 +15,7 @@ export type Operation =
   | "profile.queue_filters.get"
   | "preparation.context.get"
   | "preparation.result.recover"
+  | "preparation.result.acceptUnverified"
   | "preparation.result.commit"
   | "preparation.artifacts.delete"
   | "answers.context.get"
@@ -60,10 +61,11 @@ export interface HereForWorkCareerOpsCapabilityManifest {
     source: "configured" | "upstream_default" | "unavailable";
   };
   /**
-   * @minItems 17
-   * @maxItems 17
+   * @minItems 18
+   * @maxItems 18
    */
   operations: [
+    Operation,
     Operation,
     Operation,
     Operation,
