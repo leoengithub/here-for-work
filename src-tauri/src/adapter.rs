@@ -558,6 +558,38 @@ impl AdapterConfig {
         serde_json::from_value(value).map_err(|error| AdapterError::InvalidData(error.to_string()))
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn accept_unverified_preparation(
+        &self,
+        input: &PreparationRoleInput,
+        event_date: &str,
+        job: Value,
+        result: Value,
+        fallback_configuration: Option<&Value>,
+        canonical_evaluation: Value,
+        artifact_plan: Value,
+    ) -> Result<PreparationCommit, AdapterError> {
+        let payload = json!({
+            "preparationId": input.preparation_id,
+            "eventDate": event_date,
+            "company": input.company,
+            "title": input.title,
+            "location": input.location,
+            "url": input.url,
+            "job": job,
+            "result": result,
+            "canonicalEvaluation": canonical_evaluation,
+            "artifactPlan": artifact_plan,
+        });
+        let value = self.request_with_timeout_and_environment(
+            "preparation.result.acceptUnverified",
+            payload,
+            Duration::from_secs(240),
+            fallback_configuration,
+        )?;
+        serde_json::from_value(value).map_err(|error| AdapterError::InvalidData(error.to_string()))
+    }
+
     pub fn recover_preparation_result(
         &self,
         preparation_id: &str,

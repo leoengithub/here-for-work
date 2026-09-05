@@ -16,6 +16,7 @@ import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseDocument } from "yaml";
 import {
+  acceptUnverifiedPreparationTransaction,
   commitSelectivePreparationTransaction,
   reviewedCvFallbackReady,
 } from "./preparation-transaction.mjs";
@@ -83,6 +84,7 @@ const operations = Object.freeze([
   "profile.queue_filters.get",
   "preparation.context.get",
   "preparation.result.recover",
+  "preparation.result.acceptUnverified",
   "preparation.result.commit",
   "preparation.artifacts.delete",
   "answers.context.get",
@@ -2120,7 +2122,14 @@ async function inspectPreparationArtifacts(input) {
   const validFallback = provenance.source === "user_reviewed_fallback" && provenance.tailored === false
     && typeof provenance.sourceSha256 === "string" && /^[a-f0-9]{64}$/.test(provenance.sourceSha256)
     && provenance.renderRecovery?.code === "pdf_generation_failed";
-  if (!validTailored && !validFallback) return refresh("hfw_provenance_invalid");
+  const validUnverifiedTailored = provenance.source === "user_accepted_unverified" && provenance.tailored === true
+    && provenance.sourceSha256 == null && provenance.renderRecovery == null;
+  const validUnverifiedFallback = provenance.source === "user_accepted_unverified" && provenance.tailored === false
+    && typeof provenance.sourceSha256 === "string" && /^[a-f0-9]{64}$/.test(provenance.sourceSha256)
+    && provenance.renderRecovery?.code === "pdf_generation_failed";
+  if (!validTailored && !validFallback && !validUnverifiedTailored && !validUnverifiedFallback) {
+    return refresh("hfw_provenance_invalid");
+  }
   const after = await capabilityManifest();
   const afterCapability = after.capabilities.find(({ id }) => id === "artifacts.inspect.v1");
   if (after.upstreamRevision !== before.upstreamRevision
@@ -2406,6 +2415,44 @@ async function execute(request) {
         throw new Error("Selective preparation requires both canonicalEvaluation and artifactPlan.");
       }
       return commitSelectivePreparationTransaction({
+          input: { ...request.input, eventDate },
+          role,
+          root,
+          trackerDb,
+          stagingRoot,
+          fallbackConfiguration: userReviewedCvFallback,
+          preparationSources,
+          contextHash,
+          assertPreparationResult,
+          runCareerOpsScript,
+          inspectArtifacts: inspectPreparationArtifacts,
+      });
+    }
+    case "preparation.result.acceptUnverified": {
+      assertInputKeys(request.input, [
+        "preparationId", "eventDate", "company", "title", "location", "url", "job", "result",
+        "canonicalEvaluation", "artifactPlan",
+      ], request.operation);
+      if (!stagingRoot) throw new Error("Writable adapter staging is not configured.");
+      const preparationId = requiredText(request.input, "preparationId", 36).toLowerCase();
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(preparationId)) {
+        throw new Error("preparationId must be a version-4 UUID.");
+      }
+      const eventDate = localDate(request.input);
+      const role = roleInput(request.input);
+      const job = request.input?.job;
+      if (!job || typeof job !== "object" || Array.isArray(job)) throw new Error("job must be the typed live job returned by preparation.context.get.");
+      const jobKeys = ["title", "company", "location", "url", "sourceUrl", "description", "descriptionAvailable", "postedAt", "provider"];
+      if (Object.keys(job).some((key) => !jobKeys.includes(key))) throw new Error("job contains an unknown field.");
+      if (typeof job.description !== "string" || job.description.length < 100 || job.description.length > 120_000) throw new Error("job description is outside its size bounds.");
+      if (!["ashby", "greenhouse", "lever", "generic"].includes(job.provider)) throw new Error("job provider is unsupported.");
+      if (typeof job.descriptionAvailable !== "boolean") throw new Error("job description availability is invalid.");
+      if (normalizeUrl(job.sourceUrl) !== normalizeUrl(role.url)) throw new Error("job source URL no longer matches the requested role.");
+      publicHttpsUrl(job.url, "resolved application URL");
+      if (!request.input.canonicalEvaluation || !request.input.artifactPlan) {
+        throw new Error("Selective preparation requires both canonicalEvaluation and artifactPlan.");
+      }
+      return acceptUnverifiedPreparationTransaction({
           input: { ...request.input, eventDate },
           role,
           root,

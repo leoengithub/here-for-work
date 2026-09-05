@@ -65,7 +65,7 @@ Every listed role has already passed the inclusion gates and full career-ops eva
 
 Listing age is shown without a prefix, as `Today`, `1 day ago`, or `N days ago`, using Europe/Madrid calendar days. It is absent when the source publication date is missing, invalid, in the future, or conflicts across merged source occurrences. `discoveredAt` and first-seen time are never substitutes for a source publication date.
 
-Selecting the role title opens the source listing in Queue, Needs attention, Applications, and Details whenever an application URL exists; a missing URL stays plain text, not a fake control. Selecting **Prepare** starts the complete application workflow without an intermediate lightweight detail view.
+Selecting the role title opens the source listing in Queue, Needs attention, Applications, and Details whenever an application URL exists; a missing URL stays plain text, not a fake control. The desktop app opens that HTTPS URL with the native macOS opener. In-webview `target="_blank"` navigation is not the opener. Selecting **Prepare** starts the complete application workflow without an intermediate lightweight detail view.
 
 ### Applications
 
@@ -95,12 +95,18 @@ Shows the career-ops report, tailored CV, full evidence and uncertainty, prepara
 6. HereForWork checks liveness and artifact freshness, reuses the current career-ops report/CV, and asks career-ops to generate or refresh only missing, failed, or stale work. A below-threshold role selected by the user may receive its missing CV/PDF at this point. A newly suspicious or blocked live result stops safely while unresolved authorization remains explicit.
    If PDF rendering alone fails after HTML and fact checks, an explicitly configured,
    hash-bound user-reviewed CV may recover the preparation and is shown as not tailored.
+   If bounded fact checks fail, **Prepare again** starts a fresh provider run. **Continue anyway**
+   is an explicit user override on that same preparation: HereForWork finishes the current
+   draft without claiming a fact-check pass, publishes the staged tailored HTML as PDF when
+   it still exists or the hash-bound user-reviewed fallback when it does not, then opens the
+   live form. That CV is shown as user-accepted and unverified.
 7. HereForWork automatically opens the application in a new tab of the user-selected ordinary Chrome profile.
 8. The extension inspects the live form and returns typed field descriptions.
 9. career-ops drafts answers grounded in verified profile sources and the inspected questions.
 10. The extension fills and verifies supported safe fields and attaches the exact
-    manifest-matched preparation PDF—either the fact-checked tailored output or the
-    visibly identified user-reviewed fallback—to one unambiguous CV/resume control. An
+    manifest-matched preparation PDF—the fact-checked tailored output, the visibly
+    identified user-reviewed fallback, or a user-accepted unverified CV—to one
+    unambiguous CV/resume control. An
     existing user-selected file is preserved. Other file controls, ambiguous CV
     controls, unsupported types, and unverifiable fields are skipped.
 11. Success requires exactly one result for every planned field and correct settled read-back for every required fillable. If the extension fails before any fill because of eligible transport, tab, compatibility, result, read-back, or unsupported-flow conditions, it releases its single-driver lease before a separately supported review-only fallback driver may begin. Partial fill, authentication, CAPTCHA, anti-bot, or uncertain page state instead becomes a visible human handoff. The current audited career-ops Playwright/apply surfaces do not yet expose the required public lease and result contract, so this fallback remains capability-blocked until HereForWork can wrap a supported review-only boundary without modifying career-ops. When neither driver can autofill safely, ordered grounded answers remain available for copy/paste recovery.

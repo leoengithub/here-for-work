@@ -431,12 +431,19 @@ async function saveState(statePath, state, updates = {}) {
 
 function reportWithProvenance(reportHeader, role, result, eventDate, reportNum, pdfRelative, provenance) {
   const base = reportHeader(role, result, eventDate, reportNum, pdfRelative);
+  if (provenance.source === "user_accepted_unverified") {
+    const notice = provenance.tailored
+      ? "**CV source:** User-accepted unverified CV. Bounded fact checks did not pass; the user chose to continue. This CV is not marked fact-checked.\n"
+      : "**CV source:** User-accepted unverified fallback PDF. Bounded fact checks did not pass; this PDF was not tailored and is not marked fact-checked.\n";
+    return base.replace("\n---\n", `\n${notice}\n---\n`);
+  }
   if (provenance.source !== "user_reviewed_fallback") return base;
   const notice = "**CV source:** User-reviewed fallback PDF. The attached CV was not tailored for this role, and the proposed CV changes below were not applied to it.\n";
   return base.replace("\n---\n", `\n${notice}\n---\n`);
 }
 
 const FALLBACK_CHANGES_NOTICE = "> The attached PDF is the user's reviewed fallback CV. It is not tailored for this role. The items below are proposed changes only and were not applied to that PDF.";
+const UNVERIFIED_CHANGES_NOTICE = "> The attached CV is user-accepted and unverified. Bounded fact checks did not pass; it is not marked fact-checked.";
 
 function changesWithoutFallbackNotice(changes) {
   const normalized = changes.trim();
@@ -446,9 +453,50 @@ function changesWithoutFallbackNotice(changes) {
 }
 
 function changesWithProvenance(changes, provenance) {
-  const clean = changesWithoutFallbackNotice(changes);
+  const clean = changesWithoutFallbackNotice(changes)
+    .replace(`${UNVERIFIED_CHANGES_NOTICE}\n\n`, "")
+    .trim();
+  if (provenance.source === "user_accepted_unverified" && provenance.tailored === false) {
+    return `${UNVERIFIED_CHANGES_NOTICE}\n\n${FALLBACK_CHANGES_NOTICE}\n\n${clean}\n`;
+  }
+  if (provenance.source === "user_accepted_unverified") {
+    return `${UNVERIFIED_CHANGES_NOTICE}\n\n${clean}\n`;
+  }
   if (provenance.source !== "user_reviewed_fallback") return `${clean}\n`;
   return `${FALLBACK_CHANGES_NOTICE}\n\n${clean}\n`;
+}
+
+async function findExistingStagedHtml(stagedRoot) {
+  const candidates = [resolve(stagedRoot, "candidate", "cv", "tailored", "v001", "cv.html")];
+  try {
+    const entries = await readdir(stagedRoot);
+    for (const entry of entries) {
+      candidates.push(resolve(stagedRoot, entry, "cv.html"));
+      candidates.push(resolve(stagedRoot, entry, "cv", "tailored", "v001", "cv.html"));
+    }
+  } catch {
+    // Staging directory is absent on the first attempt.
+  }
+  for (const path of candidates) {
+    if (await validateHtml(path)) return path;
+  }
+  return null;
+}
+
+function unverifiedFactCheckWarning(detail) {
+  return {
+    code: "cv_fact_check_failed",
+    stage: "stage.fact_verification",
+    recoveredBy: "user_accepted_unverified",
+    detail: boundedWarning(detail || "CV fact check failed without a usable diagnostic."),
+  };
+}
+
+export async function acceptUnverifiedPreparationTransaction(options) {
+  if (typeof options.inspectArtifacts === "function") {
+    return commitSelectivePreparationTransaction({ ...options, acceptUnverified: true });
+  }
+  return commitPreparationTransaction({ ...options, acceptUnverified: true });
 }
 
 /**
@@ -472,6 +520,7 @@ export async function commitPreparationTransaction(options) {
     runCareerOpsScript,
     historyRecords,
     reportHeader,
+    acceptUnverified = false,
   } = options;
   const preparationId = String(input?.preparationId ?? "").toLowerCase();
   if (!UUID_V4_RE.test(preparationId)) failure("invalid_request", { diagnosticId: null });
@@ -602,6 +651,11 @@ export async function commitPreparationTransaction(options) {
       await writePrivate(providerResultPath, providerResultBytes, { flag: "wx" });
     }
 
+    const existingHtml = acceptUnverified ? await findExistingStagedHtml(stagedRoot) : null;
+    const preservedHtml = existingHtml ? await readFile(existingHtml) : null;
+    const priorFactDetail = state.lastFailure?.detail
+      || state.lastFailure?.diagnostics
+      || null;
     await rm(stagedRoot, { recursive: true, force: true });
     await mkdir(candidateRoot, { recursive: true, mode: 0o700 });
     await saveState(statePath, state, { status: "staging", stage: "stage.sources" });
@@ -624,43 +678,62 @@ export async function commitPreparationTransaction(options) {
     await saveState(statePath, state, { stage: "stage.reserve" });
 
     await saveState(statePath, state, { stage: "stage.cv_html" });
-    await command("build-cv-html.mjs", [stagedPayload, stagedHtml], {}, "cv_build_failed", "stage.cv_html", "retry_same_preparation");
-    if (!await validateHtml(stagedHtml)) failure("cv_build_failed", diagnostic);
+    if (preservedHtml) {
+      await writePrivate(stagedHtml, preservedHtml);
+    } else if (!acceptUnverified) {
+      await command("build-cv-html.mjs", [stagedPayload, stagedHtml], {}, "cv_build_failed", "stage.cv_html", "retry_same_preparation");
+    }
+    const htmlReady = await validateHtml(stagedHtml);
+    if (!htmlReady && !acceptUnverified) failure("cv_build_failed", diagnostic);
 
+    const warnings = [];
     await saveState(statePath, state, { stage: "stage.fact_verification" });
-    const factArgs = [stagedHtml, "--source", resolve(root, "cv.md")];
-    if (await existsAsFile(resolve(root, "article-digest.md"))) factArgs.push("--source", resolve(root, "article-digest.md"));
-    if (await existsAsFile(resolve(root, "config", "cv-facts.json"))) factArgs.push("--config", resolve(root, "config", "cv-facts.json"));
-    factArgs.push("--json");
-    const factCheck = await command("verify-cv-facts.mjs", factArgs, {}, "cv_fact_check_failed", "stage.fact_verification", "fresh_preparation_provider_run");
-    if (!validFactCheck(factCheck.output)) {
-      failure("cv_fact_check_failed", {
-        ...diagnostic,
-        diagnostics: factCheckFailureDetail(factCheck.output),
-      });
+    if (htmlReady) {
+      const factArgs = [stagedHtml, "--source", resolve(root, "cv.md")];
+      if (await existsAsFile(resolve(root, "article-digest.md"))) factArgs.push("--source", resolve(root, "article-digest.md"));
+      if (await existsAsFile(resolve(root, "config", "cv-facts.json"))) factArgs.push("--config", resolve(root, "config", "cv-facts.json"));
+      factArgs.push("--json");
+      const factCheck = await command("verify-cv-facts.mjs", factArgs, {}, "cv_fact_check_failed", "stage.fact_verification", "fresh_preparation_provider_run");
+      if (!validFactCheck(factCheck.output)) {
+        if (!acceptUnverified) {
+          failure("cv_fact_check_failed", {
+            ...diagnostic,
+            diagnostics: factCheckFailureDetail(factCheck.output),
+          });
+        }
+        warnings.push(unverifiedFactCheckWarning(factCheckFailureDetail(factCheck.output)));
+      }
+    } else if (acceptUnverified) {
+      warnings.push(unverifiedFactCheckWarning(priorFactDetail));
     }
 
     let cvProvenance = { source: "tailored_generated", tailored: true, sourceSha256: null, renderRecovery: null };
-    const warnings = [];
     await saveState(statePath, state, { stage: "stage.pdf" });
     let renderError = null;
-    try {
-      await command("generate-pdf.mjs", [
-        stagedHtml,
-        stagedPdf,
-        `--format=${input.result.cvPayload.page_format}`,
-        `--report=${reportNum}`,
-        "--allow-reorder",
-      ], {
-        CAREER_OPS_TRACKER: canonicalTracker,
-        CAREER_OPS_TRACKER_DB: trackerDb,
-        CAREER_OPS_PDF_INDEX: stagedIndex,
-      }, "pdf_generation_failed", "stage.pdf", "repair_runtime_then_retry");
-      if (!await validatePdf(stagedPdf)) failure("pdf_generation_failed", diagnostic);
-    } catch (error) {
-      renderError = error instanceof PreparationTransactionError
-        ? error
-        : new PreparationTransactionError("pdf_generation_failed", diagnostic);
+    if (acceptUnverified && !preservedHtml) {
+      renderError = new PreparationTransactionError("pdf_generation_failed", { ...diagnostic, stage: "stage.pdf" });
+      if (!htmlReady) {
+        await writePrivate(stagedHtml, "<html><body><p>User-accepted unverified fallback CV. Bounded fact checks did not pass.</p></body></html>\n");
+      }
+    } else {
+      try {
+        await command("generate-pdf.mjs", [
+          stagedHtml,
+          stagedPdf,
+          `--format=${input.result.cvPayload.page_format}`,
+          `--report=${reportNum}`,
+          "--allow-reorder",
+        ], {
+          CAREER_OPS_TRACKER: canonicalTracker,
+          CAREER_OPS_TRACKER_DB: trackerDb,
+          CAREER_OPS_PDF_INDEX: stagedIndex,
+        }, "pdf_generation_failed", "stage.pdf", "repair_runtime_then_retry");
+        if (!await validatePdf(stagedPdf)) failure("pdf_generation_failed", diagnostic);
+      } catch (error) {
+        renderError = error instanceof PreparationTransactionError
+          ? error
+          : new PreparationTransactionError("pdf_generation_failed", diagnostic);
+      }
     }
     if (renderError) {
       const fallback = parseFallbackConfiguration(fallbackConfiguration);
@@ -679,7 +752,7 @@ export async function commitPreparationTransaction(options) {
       await copyFile(fallbackPath, stagedPdf);
       const recovery = renderFailureMetadata(renderError);
       cvProvenance = {
-        source: "user_reviewed_fallback",
+        source: acceptUnverified ? "user_accepted_unverified" : "user_reviewed_fallback",
         tailored: false,
         sourceSha256: fallback.sha256,
         renderRecovery: recovery,
@@ -695,6 +768,8 @@ export async function commitPreparationTransaction(options) {
         [reportNum, relativeInside(root, stagedPdf), relativeInside(root, stagedHtml), input.result.cvPayload.page_format, input.eventDate].join("\t"),
         "",
       ].join("\n"));
+    } else if (acceptUnverified) {
+      cvProvenance = { source: "user_accepted_unverified", tailored: true, sourceSha256: null, renderRecovery: null };
     }
     const validPdf = await validatePdf(stagedPdf);
     if (!validPdf) failure("pdf_generation_failed", diagnostic);
@@ -909,6 +984,7 @@ export async function commitPreparationTransaction(options) {
           stage: failureError.stage,
           retryPolicy: failureError.retryPolicy,
           exitCode: failureError.exitCode,
+          detail: failureError.diagnostics || failureError.message,
           updatedAt: new Date().toISOString(),
         },
       }).catch(() => null);
@@ -987,7 +1063,7 @@ export async function commitSelectivePreparationTransaction(options) {
   const {
     input, root: configuredRoot, trackerDb, stagingRoot: configuredStagingRoot,
     fallbackConfiguration, preparationSources, contextHash, assertPreparationResult,
-    runCareerOpsScript, inspectArtifacts,
+    runCareerOpsScript, inspectArtifacts, acceptUnverified = false,
   } = options;
   const preparationId = String(input?.preparationId ?? "").toLowerCase();
   const diagnostic = { diagnosticId: UUID_V4_RE.test(preparationId) ? preparationId : null };
@@ -1101,6 +1177,9 @@ export async function commitSelectivePreparationTransaction(options) {
         if (sha256(await readFile(providerResultPath)) !== sha256(bytes)) failure("staging_conflict", diagnostic);
       } else await writePrivate(providerResultPath, bytes, { flag: "wx" });
     }
+    const priorFactDetail = state.lastFailure?.detail || state.lastFailure?.diagnostics || null;
+    const existingHtml = acceptUnverified ? await findExistingStagedHtml(stagedRoot) : null;
+    const preservedHtml = existingHtml ? await readFile(existingHtml) : null;
     await rm(stagedRoot, { recursive: true, force: true });
     const version = await nextTailoredVersion(root, currentPlan.trackerId, options.role.company, options.role.title);
     const candidate = resolve(stagedRoot, version.version);
@@ -1110,45 +1189,68 @@ export async function commitSelectivePreparationTransaction(options) {
     const stagedChanges = resolve(candidate, "changes.md");
     await mkdir(candidate, { recursive: true, mode: 0o700 });
     await saveState(statePath, state, { status: "staging", stage: "stage.cv_html" });
-    if (currentPlan.cv.scope === "full_cv") {
+    if (preservedHtml) {
+      if (currentPlan.cv.scope === "full_cv") {
+        await writePrivate(stagedPayload, `${JSON.stringify(input.result.cvPayload, null, 2)}\n`);
+      }
+      await writePrivate(stagedHtml, preservedHtml);
+      await writePrivate(stagedChanges, changesWithProvenance(input.result?.cvChangesMarkdown || "", { source: "user_accepted_unverified" }));
+    } else if (currentPlan.cv.scope === "full_cv") {
       await writePrivate(stagedPayload, `${JSON.stringify(input.result.cvPayload, null, 2)}\n`);
-      await command("build-cv-html.mjs", [stagedPayload, stagedHtml], {}, "cv_build_failed", "stage.cv_html", "retry_same_preparation");
-      if (!await validateHtml(stagedHtml)) failure("cv_build_failed", diagnostic);
+      if (!acceptUnverified) {
+        await command("build-cv-html.mjs", [stagedPayload, stagedHtml], {}, "cv_build_failed", "stage.cv_html", "retry_same_preparation");
+      }
+      if (!await validateHtml(stagedHtml) && !acceptUnverified) failure("cv_build_failed", diagnostic);
       await writePrivate(stagedChanges, changesWithProvenance(input.result.cvChangesMarkdown, { source: "tailored_generated" }));
     } else {
       await copyFile(resolve(root, currentPlan.cv.artifacts.html.path), stagedHtml);
       await copyFile(resolve(root, currentPlan.cv.artifacts.changes.path), stagedChanges);
       if (!await validateHtml(stagedHtml)) failure("cv_build_failed", diagnostic);
     }
+    const htmlReady = await validateHtml(stagedHtml);
+    const warnings = [];
     await saveState(statePath, state, { stage: "stage.fact_verification" });
-    const factArgs = [stagedHtml, "--source", resolve(root, "cv.md")];
-    if (await existsAsFile(resolve(root, "article-digest.md"))) factArgs.push("--source", resolve(root, "article-digest.md"));
-    if (await existsAsFile(resolve(root, "config", "cv-facts.json"))) factArgs.push("--config", resolve(root, "config", "cv-facts.json"));
-    factArgs.push("--json");
-    const factCheck = await command("verify-cv-facts.mjs", factArgs, {}, "cv_fact_check_failed", "stage.fact_verification", "fresh_preparation_provider_run");
-    if (!validFactCheck(factCheck.output)) {
-      failure("cv_fact_check_failed", {
-        ...diagnostic,
-        diagnostics: factCheckFailureDetail(factCheck.output),
-      });
+    if (htmlReady) {
+      const factArgs = [stagedHtml, "--source", resolve(root, "cv.md")];
+      if (await existsAsFile(resolve(root, "article-digest.md"))) factArgs.push("--source", resolve(root, "article-digest.md"));
+      if (await existsAsFile(resolve(root, "config", "cv-facts.json"))) factArgs.push("--config", resolve(root, "config", "cv-facts.json"));
+      factArgs.push("--json");
+      const factCheck = await command("verify-cv-facts.mjs", factArgs, {}, "cv_fact_check_failed", "stage.fact_verification", "fresh_preparation_provider_run");
+      if (!validFactCheck(factCheck.output)) {
+        if (!acceptUnverified) {
+          failure("cv_fact_check_failed", {
+            ...diagnostic,
+            diagnostics: factCheckFailureDetail(factCheck.output),
+          });
+        }
+        warnings.push(unverifiedFactCheckWarning(factCheckFailureDetail(factCheck.output)));
+      }
+    } else if (acceptUnverified) {
+      warnings.push(unverifiedFactCheckWarning(priorFactDetail));
     }
 
     let cvProvenance = currentPlan.cv.scope === "pdf_only"
       ? currentPlan.cv.provenance
       : { source: "tailored_generated", tailored: true, sourceSha256: null, renderRecovery: null };
-    const warnings = [];
     const stagedIndex = resolve(effectDirectory, "pdf-index.staged.tsv");
     const format = currentPlan.cv.scope === "full_cv" ? input.result.cvPayload.page_format : currentPlan.cv.format;
     if (!["a4", "letter"].includes(format)) failure("invalid_request", { stage: "stage.pdf_format" });
     let renderError = null;
-    try {
-      await command("generate-pdf.mjs", [stagedHtml, stagedPdf, `--format=${format}`, `--report=${currentPlan.reportNumber}`, "--allow-reorder"], {
-        CAREER_OPS_TRACKER: await existsAsFile(resolve(root, "data/applications.md")) ? resolve(root, "data/applications.md") : resolve(root, "applications.md"),
-        CAREER_OPS_TRACKER_DB: trackerDb,
-        CAREER_OPS_PDF_INDEX: stagedIndex,
-      }, "pdf_generation_failed", "stage.pdf", "repair_runtime_then_retry");
-    } catch (error) { renderError = error; }
-    if (!renderError && !await validatePdf(stagedPdf)) renderError = new PreparationTransactionError("pdf_generation_failed", diagnostic);
+    if (acceptUnverified && !preservedHtml) {
+      renderError = new PreparationTransactionError("pdf_generation_failed", { ...diagnostic, stage: "stage.pdf" });
+      if (!htmlReady) {
+        await writePrivate(stagedHtml, "<html><body><p>User-accepted unverified fallback CV. Bounded fact checks did not pass.</p></body></html>\n");
+      }
+    } else {
+      try {
+        await command("generate-pdf.mjs", [stagedHtml, stagedPdf, `--format=${format}`, `--report=${currentPlan.reportNumber}`, "--allow-reorder"], {
+          CAREER_OPS_TRACKER: await existsAsFile(resolve(root, "data/applications.md")) ? resolve(root, "data/applications.md") : resolve(root, "applications.md"),
+          CAREER_OPS_TRACKER_DB: trackerDb,
+          CAREER_OPS_PDF_INDEX: stagedIndex,
+        }, "pdf_generation_failed", "stage.pdf", "repair_runtime_then_retry");
+      } catch (error) { renderError = error; }
+      if (!renderError && !await validatePdf(stagedPdf)) renderError = new PreparationTransactionError("pdf_generation_failed", diagnostic);
+    }
     if (renderError) {
       const fallback = parseFallbackConfiguration(fallbackConfiguration);
       if (!fallback) failure("pdf_fallback_not_configured", { ...diagnostic, stage: "stage.pdf_fallback" });
@@ -1160,10 +1262,18 @@ export async function commitSelectivePreparationTransaction(options) {
       if (!await validatePdf(fallbackPath, { expectedHash: fallback.sha256 })) failure("pdf_fallback_invalid", diagnostic);
       await copyFile(fallbackPath, stagedPdf);
       const recovery = renderFailureMetadata(renderError);
-      cvProvenance = { source: "user_reviewed_fallback", tailored: false, sourceSha256: fallback.sha256, renderRecovery: recovery };
+      cvProvenance = {
+        source: acceptUnverified ? "user_accepted_unverified" : "user_reviewed_fallback",
+        tailored: false,
+        sourceSha256: fallback.sha256,
+        renderRecovery: recovery,
+      };
       warnings.push({ code: recovery.code, stage: recovery.stage, recoveredBy: "user_reviewed_fallback", detail: recovery.detail });
-      await writePrivate(stagedChanges, changesWithProvenance(await readFile(stagedChanges, "utf8"), cvProvenance));
+      await writePrivate(stagedChanges, changesWithProvenance(await readFile(stagedChanges, "utf8").catch(() => ""), cvProvenance));
       await writePrivate(stagedIndex, `${PDF_INDEX_HEADER}${currentPlan.reportNumber}\t${relativeInside(root, stagedPdf)}\t${relativeInside(root, stagedHtml)}\t${format}\t${input.eventDate}\n`);
+    } else if (acceptUnverified) {
+      cvProvenance = { source: "user_accepted_unverified", tailored: true, sourceSha256: null, renderRecovery: null };
+      await writePrivate(stagedChanges, changesWithProvenance(await readFile(stagedChanges, "utf8"), cvProvenance));
     } else if (currentPlan.cv.scope === "pdf_only" && currentPlan.cv.provenance.source === "user_reviewed_fallback") {
       cvProvenance = { source: "tailored_generated", tailored: true, sourceSha256: null, renderRecovery: null };
       await writePrivate(stagedChanges, changesWithProvenance(await readFile(stagedChanges, "utf8"), cvProvenance));
@@ -1236,7 +1346,7 @@ export async function commitSelectivePreparationTransaction(options) {
     if (state) await saveState(statePath, state, {
       status: rollbackIncomplete ? "manual_repair_required" : "failed",
       stage: rollbackIncomplete ? "publish.rollback" : original.stage,
-      lastFailure: { code: original.code, stage: original.stage, retryPolicy: rollbackIncomplete ? "manual_repair_required" : original.retryPolicy, updatedAt: new Date().toISOString() },
+      lastFailure: { code: original.code, stage: original.stage, retryPolicy: rollbackIncomplete ? "manual_repair_required" : original.retryPolicy, detail: original.diagnostics || original.message, updatedAt: new Date().toISOString() },
     }).catch(() => null);
     if (rollbackIncomplete) throw new PreparationTransactionError("rollback_failed", diagnostic);
     throw original;

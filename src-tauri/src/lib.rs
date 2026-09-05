@@ -492,6 +492,215 @@ fn prepare_role(
     })
 }
 
+#[tauri::command]
+fn continue_unverified_preparation(
+    preparation_id: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<DashboardState, String> {
+    let work = {
+        let mut store = state
+            .store
+            .lock()
+            .map_err(|_| "Operational store lock was poisoned".to_string())?;
+        store
+            .begin_unverified_continue(&preparation_id)
+            .map_err(|error| error.to_string())?
+    };
+    let url = work
+        .role
+        .application_url
+        .clone()
+        .ok_or("The role has no application URL")?;
+    let capabilities = state
+        .adapter
+        .capabilities()
+        .map_err(|error| error.to_string())?;
+    let Some(artifact_capability) = capabilities
+        .capabilities
+        .iter()
+        .find(|capability| capability.id == CareerOpsCapabilityId::ArtifactsInspectV1)
+        .filter(|capability| capability.status == CareerOpsCapabilityStatus::Degraded)
+        .and_then(|capability| capability.compatibility_fingerprint.clone())
+    else {
+        if let Ok(mut store) = state.store.lock() {
+            let _ = store.fail_preparation(
+                &work.id,
+                "artifact_inspection_unavailable",
+                "artifacts.inspect.v1",
+                "Selective career-ops artifact inspection is unavailable.",
+            );
+        }
+        return Err("Selective career-ops artifact inspection is unavailable".to_string());
+    };
+    let input = PreparationRoleInput {
+        preparation_id: work.id.clone(),
+        company: work.role.company.clone(),
+        title: work.role.title.clone(),
+        location: work.role.location.clone(),
+        url,
+        tracker_id: work.evaluation.tracker_id,
+        report_path: work.evaluation.report_path.clone(),
+        report_sha256: work.evaluation.report_sha256.clone(),
+        upstream_revision: work.evaluation.upstream_revision.clone(),
+        evaluation_compatibility_fingerprint: work
+            .evaluation
+            .evaluation_compatibility_fingerprint
+            .clone(),
+        artifact_compatibility_fingerprint: artifact_capability,
+    };
+    let context = match state.adapter.preparation_context(&input) {
+        Ok(context) => context,
+        Err(error) => {
+            if let Ok(mut store) = state.store.lock() {
+                let _ = store.fail_preparation(
+                    &work.id,
+                    classify_preparation_error("context_unavailable", &error.to_string()),
+                    "preparation.context.get",
+                    &error.to_string(),
+                );
+            }
+            return Err(error.to_string());
+        }
+    };
+    let result = match state
+        .adapter
+        .recover_preparation_result(&work.id, &context.context_hash)
+    {
+        Ok(Some(result)) => result,
+        Ok(None) => {
+            if let Ok(mut store) = state.store.lock() {
+                let _ = store.fail_preparation(
+                    &work.id,
+                    "recovery_failed",
+                    "preparation.result.recover",
+                    "The staged provider result is no longer available. Prepare again starts a fresh provider run.",
+                );
+            }
+            return Err("The staged provider result is no longer available. Prepare again starts a fresh provider run.".to_string());
+        }
+        Err(error) => {
+            if let Ok(mut store) = state.store.lock() {
+                let _ = store.fail_preparation(
+                    &work.id,
+                    classify_preparation_error("recovery_failed", &error.to_string()),
+                    "preparation.result.recover",
+                    &error.to_string(),
+                );
+            }
+            return Err(error.to_string());
+        }
+    };
+    let fallback_configuration = {
+        let store = state
+            .store
+            .lock()
+            .map_err(|_| "Operational store lock was poisoned".to_string())?;
+        let setting = store
+            .cv_fallback_setting()
+            .map_err(|error| error.to_string())?;
+        match (&setting.path, &setting.sha256) {
+            (Some(_), Some(_)) => Some(
+                serde_json::to_value(setting)
+                    .map_err(|error| format!("Fallback configuration is invalid: {error}"))?,
+            ),
+            _ => None,
+        }
+    };
+    let committed = {
+        let _canonical_write = state
+            .canonical_write_lock
+            .lock()
+            .map_err(|_| "Canonical writer lock was poisoned".to_string())?;
+        match state.adapter.accept_unverified_preparation(
+            &input,
+            &madrid_today(),
+            context.job,
+            result,
+            fallback_configuration.as_ref(),
+            context.canonical_evaluation,
+            context.artifact_plan,
+        ) {
+            Ok(committed) => committed,
+            Err(error) => {
+                if let Ok(mut store) = state.store.lock() {
+                    let (code, stage, detail, retry_policy) =
+                        error.preparation_failure("preparation.result.acceptUnverified");
+                    let error_class = classify_preparation_error(&code, &detail).to_string();
+                    let _ = store.fail_preparation_with_policy(
+                        &work.id,
+                        &error_class,
+                        &stage,
+                        &detail,
+                        &retry_policy,
+                    );
+                }
+                return Err(error.to_string());
+            }
+        }
+    };
+    if committed.preparation_id != work.id || committed.context_hash != context.context_hash {
+        if let Ok(mut store) = state.store.lock() {
+            let _ = store.fail_preparation(
+                &work.id,
+                "commit_identity_mismatch",
+                "preparation.result.acceptUnverified",
+                "career-ops committed artifacts for a different preparation context.",
+            );
+        }
+        return Err("career-ops committed a mismatched preparation".to_string());
+    }
+    for artifact in [
+        &committed.artifacts.report,
+        &committed.artifacts.cv_html,
+        &committed.artifacts.cv_pdf,
+        &committed.artifacts.cv_changes,
+    ] {
+        if artifact.path.is_empty()
+            || artifact.sha256.len() != 64
+            || !artifact.sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            if let Ok(mut store) = state.store.lock() {
+                let _ = store.fail_preparation(
+                    &work.id,
+                    "invalid_artifact_reference",
+                    "artifact.validation",
+                    "career-ops returned an invalid artifact reference.",
+                );
+            }
+            return Err("career-ops returned an invalid artifact reference".to_string());
+        }
+    }
+    if !cv_provenance_is_valid(&committed) {
+        if let Ok(mut store) = state.store.lock() {
+            let _ = store.fail_preparation(
+                &work.id,
+                "invalid_cv_provenance",
+                "artifact.validation",
+                "The adapter returned invalid CV provenance.",
+            );
+        }
+        return Err("The adapter returned invalid CV provenance".to_string());
+    }
+    let mut store = state
+        .store
+        .lock()
+        .map_err(|_| "Operational store lock was poisoned".to_string())?;
+    store
+        .complete_preparation(
+            &work.id,
+            &PreparationCompletion {
+                tracker_id: committed.tracker_id,
+                report_path: &committed.artifacts.report.path,
+                report_hash: &committed.artifacts.report.sha256,
+                cv_pdf_path: &committed.artifacts.cv_pdf.path,
+                cv_pdf_hash: &committed.artifacts.cv_pdf.sha256,
+                cv_source: &committed.cv_provenance.source,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    store.dashboard().map_err(|error| error.to_string())
+}
+
 fn classify_preparation_error<'a>(fallback: &'a str, detail: &str) -> &'a str {
     let detail = detail.to_ascii_lowercase();
     if detail.contains("context does not match")
@@ -877,31 +1086,7 @@ fn process_preparation_work(app: &tauri::AppHandle, work: PreparationWork) -> Re
             return Err("career-ops returned an invalid artifact reference".to_string());
         }
     }
-    let valid_provenance = match committed.cv_provenance.source.as_str() {
-        "tailored_generated" => {
-            committed.cv_provenance.tailored
-                && committed.cv_provenance.source_sha256.is_none()
-                && committed.cv_provenance.render_recovery.is_none()
-        }
-        "user_reviewed_fallback" => {
-            !committed.cv_provenance.tailored
-                && committed
-                    .cv_provenance
-                    .source_sha256
-                    .as_deref()
-                    .is_some_and(|hash| {
-                        hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
-                    })
-                && committed.cv_provenance.render_recovery.is_some()
-                && committed.warnings.iter().any(|warning| {
-                    warning.code == "pdf_generation_failed"
-                        && warning.stage == "stage.pdf"
-                        && warning.recovered_by == "user_reviewed_fallback"
-                        && !warning.detail.is_empty()
-                })
-        }
-        _ => false,
-    };
+    let valid_provenance = cv_provenance_is_valid(&committed);
     if !valid_provenance {
         if let Ok(mut store) = state.store.lock() {
             let _ = store.fail_preparation(
@@ -1116,6 +1301,78 @@ fn focus_review_form(
         .map_err(|_| "Operational store lock was poisoned".to_string())?
         .queue_focus_review(&session_id)
         .map_err(|error| error.to_string())
+}
+
+fn sha256_hex(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+pub(crate) fn cv_provenance_is_valid(committed: &adapter::PreparationCommit) -> bool {
+    let has_fact_check_warning = committed.warnings.iter().any(|warning| {
+        warning.code == "cv_fact_check_failed"
+            && warning.recovered_by == "user_accepted_unverified"
+            && !warning.detail.is_empty()
+    });
+    let has_fallback_warning = committed.warnings.iter().any(|warning| {
+        warning.code == "pdf_generation_failed"
+            && warning.stage == "stage.pdf"
+            && warning.recovered_by == "user_reviewed_fallback"
+            && !warning.detail.is_empty()
+    });
+    match committed.cv_provenance.source.as_str() {
+        "tailored_generated" => {
+            committed.cv_provenance.tailored
+                && committed.cv_provenance.source_sha256.is_none()
+                && committed.cv_provenance.render_recovery.is_none()
+        }
+        "user_reviewed_fallback" => {
+            !committed.cv_provenance.tailored
+                && committed
+                    .cv_provenance
+                    .source_sha256
+                    .as_deref()
+                    .is_some_and(sha256_hex)
+                && committed.cv_provenance.render_recovery.is_some()
+                && has_fallback_warning
+        }
+        "user_accepted_unverified" if committed.cv_provenance.tailored => {
+            committed.cv_provenance.source_sha256.is_none()
+                && committed.cv_provenance.render_recovery.is_none()
+                && has_fact_check_warning
+        }
+        "user_accepted_unverified" => {
+            !committed.cv_provenance.tailored
+                && committed
+                    .cv_provenance
+                    .source_sha256
+                    .as_deref()
+                    .is_some_and(sha256_hex)
+                && committed.cv_provenance.render_recovery.is_some()
+                && has_fallback_warning
+                && has_fact_check_warning
+        }
+        _ => false,
+    }
+}
+
+pub(crate) fn public_https_url(value: &str) -> Result<String, String> {
+    let parsed = url::Url::parse(value).map_err(|_| {
+        "The listing URL must be a public HTTPS address with a host.".to_string()
+    })?;
+    if parsed.scheme() != "https" || parsed.host_str().is_none_or(str::is_empty) {
+        return Err("The listing URL must be a public HTTPS address with a host.".to_string());
+    }
+    Ok(value.to_string())
+}
+
+#[tauri::command]
+fn open_external_url(url: String) -> Result<(), String> {
+    let url = public_https_url(&url)?;
+    std::process::Command::new("/usr/bin/open")
+        .arg(&url)
+        .spawn()
+        .map_err(|error| error.to_string())?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -2719,9 +2976,11 @@ pub fn run() {
             queue_manual_discovery,
             run_provider_probe,
             prepare_role,
+            continue_unverified_preparation,
             cancel_preparation,
             get_preparation_detail,
             open_preparation_artifact,
+            open_external_url,
             get_browser_setup,
             configure_browser_bridge,
             get_browser_sessions,
@@ -2951,6 +3210,74 @@ mod tests {
                 super::preparation_gate(&result).unwrap(),
                 PreparationGate::Discard(_)
             ));
+        }
+    }
+
+    #[test]
+    fn unverified_provenance_requires_the_fact_check_warning() {
+        let tailored = crate::adapter::PreparationCommit {
+            preparation_id: "11111111-1111-4111-8111-111111111111".to_string(),
+            context_hash: "a".repeat(64),
+            tracker_id: 42,
+            artifacts: crate::adapter::PreparationArtifacts {
+                report: crate::adapter::ArtifactReference {
+                    path: "reports/042.md".to_string(),
+                    sha256: "b".repeat(64),
+                },
+                cv_html: crate::adapter::ArtifactReference {
+                    path: "output/042/cv.html".to_string(),
+                    sha256: "c".repeat(64),
+                },
+                cv_pdf: crate::adapter::ArtifactReference {
+                    path: "output/042/cv.pdf".to_string(),
+                    sha256: "d".repeat(64),
+                },
+                cv_changes: crate::adapter::ArtifactReference {
+                    path: "output/042/changes.md".to_string(),
+                    sha256: "e".repeat(64),
+                },
+            },
+            cv_provenance: crate::adapter::PreparationCvProvenance {
+                source: "user_accepted_unverified".to_string(),
+                tailored: true,
+                source_sha256: None,
+                render_recovery: None,
+            },
+            warnings: vec![crate::adapter::PreparationWarning {
+                code: "cv_fact_check_failed".to_string(),
+                stage: "stage.fact_verification".to_string(),
+                recovered_by: "user_accepted_unverified".to_string(),
+                detail: "CV fact check failed — unsupported metric-like claims: 8 years".to_string(),
+            }],
+        };
+        assert!(super::cv_provenance_is_valid(&tailored));
+        let mut missing_warning = tailored.clone();
+        missing_warning.warnings.clear();
+        assert!(!super::cv_provenance_is_valid(&missing_warning));
+    }
+
+    #[test]
+    fn public_https_url_requires_https_and_a_host() {
+        assert_eq!(
+            super::public_https_url("https://jobs.example.test/role").unwrap(),
+            "https://jobs.example.test/role"
+        );
+        assert_eq!(
+            super::public_https_url("https://jobs.example.test:443/apply?ref=1#top").unwrap(),
+            "https://jobs.example.test:443/apply?ref=1#top"
+        );
+        for rejected in [
+            "http://jobs.example.test/role",
+            "javascript:alert(1)",
+            "file:///etc/passwd",
+            "https://",
+            "not-a-url",
+            "",
+        ] {
+            assert!(
+                super::public_https_url(rejected).is_err(),
+                "expected {rejected} to be rejected"
+            );
         }
     }
 

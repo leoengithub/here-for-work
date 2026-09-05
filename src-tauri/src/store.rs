@@ -4638,6 +4638,80 @@ impl Store {
         Ok(())
     }
 
+    pub fn begin_unverified_continue(
+        &mut self,
+        preparation_id: &str,
+    ) -> Result<PreparationWork, StoreError> {
+        let now = Utc::now().to_rfc3339();
+        let transaction = self.connection.transaction()?;
+        let preparation = transaction
+            .query_row(
+                "SELECT p.role_id, p.provider, p.status, p.error_class,
+                        r.company, r.title, r.location, r.application_url,
+                        LOWER(TRIM(COALESCE(r.canonical_status, '')))
+                          IN ('applied', 'discarded', 'rejected')
+                   FROM preparation_jobs p JOIN roles r ON r.id = p.role_id
+                  WHERE p.id = ?1",
+                [preparation_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        AdapterRoleContext {
+                            company: row.get(4)?,
+                            title: row.get(5)?,
+                            location: row.get(6)?,
+                            application_url: row.get(7)?,
+                        },
+                        row.get::<_, bool>(8)?,
+                    ))
+                },
+            )
+            .optional()?
+            .ok_or_else(|| {
+                StoreError::InvalidPreparation("preparation is missing".to_string())
+            })?;
+        let (role_id, provider, status, error_class, role, role_is_terminal) = preparation;
+        if role_is_terminal {
+            return Err(StoreError::InvalidPreparation(
+                "the role already has a terminal canonical outcome".to_string(),
+            ));
+        }
+        if status != "action_required" || error_class.as_deref() != Some("cv_fact_check_failed") {
+            return Err(StoreError::InvalidPreparation(
+                "Continue anyway is only available after a CV fact-check failure.".to_string(),
+            ));
+        }
+        let changed = transaction.execute(
+            "UPDATE preparation_jobs
+                SET status = 'preparing', step = 'preparing_cv',
+                    updated_at = ?1
+              WHERE id = ?2 AND status = 'action_required'
+                AND error_class = 'cv_fact_check_failed'",
+            params![now, preparation_id],
+        )?;
+        if changed != 1 {
+            return Err(StoreError::InvalidPreparation(
+                "preparation is missing or no longer waiting for a fact-check decision".to_string(),
+            ));
+        }
+        transaction.execute(
+            "UPDATE roles SET preparation_state = 'preparing', updated_at = ?1 WHERE id = ?2",
+            params![now, role_id],
+        )?;
+        transaction.commit()?;
+        let evaluation = self.current_preparation_evaluation(&role_id)?;
+        Ok(PreparationWork {
+            id: preparation_id.to_string(),
+            role_id,
+            provider,
+            role,
+            evaluation,
+        })
+    }
+
     pub fn complete_preparation(
         &mut self,
         preparation_id: &str,
@@ -4699,6 +4773,8 @@ impl Store {
                 Uuid::new_v4().to_string(),
                 if completion.cv_source == "user_reviewed_fallback" {
                     "career-ops prepared a report; PDF rendering failed, so HereForWork used the configured user-reviewed CV without tailoring it."
+                } else if completion.cv_source == "user_accepted_unverified" {
+                    "User accepted an unverified CV and continued to the form."
                 } else {
                     "career-ops prepared a report and fact-checked tailored CV."
                 },
@@ -9634,6 +9710,78 @@ mod tests {
         assert_eq!(dashboard.preparations[0].id, restarted.id);
         assert_eq!(dashboard.preparations[0].status, "preparing");
         assert!(dashboard.preparations.iter().all(|item| item.id != first.id));
+    }
+
+    #[test]
+    fn continue_unverified_accepts_only_fact_check_action_required() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+        import_evaluated(&mut store, DATASET);
+        let role_id = store.dashboard().unwrap().roles[0].id.clone();
+        let first = queue_and_claim(&mut store, &role_id, "codex");
+        store
+            .fail_preparation_with_policy(
+                &first.id,
+                "provider_failed",
+                "provider.invoke",
+                "Provider failed.",
+                "retry_same_preparation",
+            )
+            .unwrap();
+        assert!(store.begin_unverified_continue(&first.id).is_err());
+
+        let queued = store.begin_preparation(&role_id, "codex").unwrap();
+        let retried = store.claim_preparation_work().unwrap().unwrap();
+        assert_eq!(retried.id, queued.id);
+        store
+            .fail_preparation_with_policy(
+                &retried.id,
+                "cv_fact_check_failed",
+                "stage.fact_verification",
+                "CV fact check failed — unsupported metric-like claims: 8 years",
+                "fresh_preparation_provider_run",
+            )
+            .unwrap();
+        let continued = store.begin_unverified_continue(&retried.id).unwrap();
+        assert_eq!(continued.id, retried.id);
+        store
+            .complete_preparation(
+                &continued.id,
+                &PreparationCompletion {
+                    tracker_id: 42,
+                    report_path: "reports/042-example.md",
+                    report_hash: &"b".repeat(64),
+                    cv_pdf_path: "output/042-example/cv.pdf",
+                    cv_pdf_hash: &"c".repeat(64),
+                    cv_source: "user_accepted_unverified",
+                },
+            )
+            .unwrap();
+        let dashboard = store.dashboard().unwrap();
+        assert_eq!(dashboard.preparations[0].status, "completed");
+        assert_eq!(
+            dashboard.preparations[0].cv_source.as_deref(),
+            Some("user_accepted_unverified")
+        );
+        assert!(!dashboard.activity[0].message.contains("fact-checked"));
+        assert!(dashboard.activity[0].message.contains("unverified"));
+        let handoff = store.next_preparation_for_browser_handoff().unwrap();
+        assert_eq!(handoff.as_deref(), Some(continued.id.as_str()));
+        store
+            .configure_browser(
+                "abcdefghijklmnopabcdefghijklmnop",
+                "019d0000-0000-7000-8000-000000000001",
+                "Profile 1",
+            )
+            .unwrap();
+        let session = store.queue_application_session(&continued.id).unwrap();
+        assert_eq!(session.preparation_id.as_deref(), Some(continued.id.as_str()));
+        assert!(
+            store
+                .claim_browser_command(chrono::Utc::now(), chrono::Duration::seconds(30))
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[test]

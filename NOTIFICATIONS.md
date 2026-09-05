@@ -43,7 +43,9 @@ Retry is available in preparation Details when the stored policy permits recover
 `retry_same_preparation` and `repair_runtime_then_retry` reuse the same preparation id.
 `fresh_preparation_provider_run` and `fresh_preparation_id` expose Prepare again, which
 cancels the failed job and starts a new preparation id so provider results are never
-reused. `manual_repair_required` stays diagnostic only.
+reused. `cv_fact_check_failed` also exposes Continue anyway: an explicit confirm that
+completes the same preparation as user-accepted and unverified, then queues the browser
+session. It never claims a fact-check pass. `manual_repair_required` stays diagnostic only.
 
 The HereForWork adapter owns the durable compensating preparation transaction and uses
 fixed upstream career-ops CLIs. Structured code, stage, retry policy, and bounded

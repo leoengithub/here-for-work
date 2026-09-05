@@ -205,8 +205,124 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("tab", { name: "applications" }));
     const failedRow = container.querySelector<HTMLElement>('[data-preparation-id="failed"]')!;
     expect(within(failedRow).getByRole("button", { name: "Prepare again" })).toBeEnabled();
+    expect(within(failedRow).getByRole("button", { name: "Continue anyway" })).toBeEnabled();
     expect(within(failedRow).queryByRole("button", { name: "Retry preparation" })).not.toBeInTheDocument();
     expect(failedRow).toHaveTextContent("Prepare again starts a fresh provider run");
+  });
+
+  it("opens listing titles through open_external_url in the desktop app", async () => {
+    const invoke = vi.fn(async (command: string) => {
+      if (command === "get_dashboard") return applicationsPreviewDashboard;
+      if (command === "get_cv_fallback_setting") return { path: null, sha256: null };
+      if (command === "take_in_app_outcome_notifications") return [];
+      if (command === "get_browser_setup") return applicationsPreviewBrowserSetup;
+      if (command === "get_browser_sessions") return applicationsPreviewSessions;
+      if (command === "open_external_url") return undefined;
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    (window as typeof window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = { invoke };
+    render(<App />);
+    await screen.findByRole("heading", { name: "Review queue" });
+    fireEvent.click(screen.getByRole("tab", { name: "applications" }));
+    const title = screen.getByRole("link", { name: "Staff Frontend Engineer" });
+    expect(title).toHaveAttribute("href", "https://example.test/fact-check-failed/apply");
+    fireEvent.click(title);
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith(
+        "open_external_url",
+        { url: "https://example.test/fact-check-failed/apply" },
+        undefined,
+      );
+    });
+  });
+
+  it("confirms Continue anyway with the stored invented-claim detail", async () => {
+    const failed = applicationsPreviewDashboard.preparations.find((item) => item.id === "fact-check-failed")!;
+    const completed = {
+      ...failed,
+      status: "completed" as const,
+      step: "prepared",
+      errorClass: null,
+      errorStage: null,
+      errorDetail: null,
+      retryPolicy: null,
+      cvSource: "user_accepted_unverified" as const,
+      reportPath: "reports/fact-check-failed.md",
+      cvPdfPath: "output/fact-check-failed/cv.pdf",
+    };
+    const after = {
+      ...applicationsPreviewDashboard,
+      preparations: applicationsPreviewDashboard.preparations.map((item) => (
+        item.id === "fact-check-failed" ? completed : item
+      )),
+    };
+    const invoke = vi.fn(async (command: string) => {
+      if (command === "get_dashboard") return applicationsPreviewDashboard;
+      if (command === "get_cv_fallback_setting") return { path: null, sha256: null };
+      if (command === "take_in_app_outcome_notifications") return [];
+      if (command === "get_browser_setup") return applicationsPreviewBrowserSetup;
+      if (command === "get_browser_sessions") return applicationsPreviewSessions;
+      if (command === "continue_unverified_preparation") return after;
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    (window as typeof window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = { invoke };
+    const { container } = render(<App />);
+    await screen.findByRole("heading", { name: "Review queue" });
+    fireEvent.click(screen.getByRole("tab", { name: "applications" }));
+    const failedRow = container.querySelector<HTMLElement>('[data-preparation-id="fact-check-failed"]')!;
+    fireEvent.click(within(failedRow).getByRole("button", { name: "Continue anyway" }));
+    expect(failedRow).toHaveTextContent("unsupported metric-like claims: 8 years");
+    expect(failedRow).toHaveTextContent("will not be marked fact-checked");
+    fireEvent.click(within(failedRow).getByRole("button", { name: "Continue with unverified CV" }));
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith(
+        "continue_unverified_preparation",
+        { preparationId: "fact-check-failed" },
+        undefined,
+      );
+    });
+    await waitFor(() => {
+      expect(failedRow).toHaveTextContent("User-accepted unverified CV");
+    });
+  });
+
+  it("exposes Continue anyway in Details for fact-check failures only", async () => {
+    const failed = applicationsPreviewDashboard.preparations.find((item) => item.id === "fact-check-failed")!;
+    const invoke = vi.fn(async (command: string) => {
+      if (command === "get_dashboard") return applicationsPreviewDashboard;
+      if (command === "get_cv_fallback_setting") return { path: null, sha256: null };
+      if (command === "take_in_app_outcome_notifications") return [];
+      if (command === "get_browser_setup") return applicationsPreviewBrowserSetup;
+      if (command === "get_browser_sessions") return applicationsPreviewSessions;
+      if (command === "get_preparation_detail") {
+        return {
+          preparationId: failed.id,
+          roleId: failed.roleId,
+          company: failed.company,
+          title: failed.title,
+          provider: failed.provider,
+          status: failed.status,
+          stage: failed.errorStage,
+          errorClass: failed.errorClass,
+          errorDetail: failed.errorDetail,
+          retryPolicy: failed.retryPolicy,
+          reportMarkdown: null,
+          reportPath: null,
+          cvPdfPath: null,
+          cvSource: null,
+        };
+      }
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    (window as typeof window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = { invoke };
+    const { container } = render(<App />);
+    await screen.findByRole("heading", { name: "Review queue" });
+    fireEvent.click(screen.getByRole("tab", { name: "applications" }));
+    fireEvent.click(within(container.querySelector<HTMLElement>('[data-preparation-id="fact-check-failed"]')!).getByRole("button", { name: "Details" }));
+    expect(await screen.findByRole("heading", { name: failed.title })).toBeInTheDocument();
+    const detail = screen.getByRole("dialog");
+    expect(within(detail).getByRole("button", { name: "Prepare again" })).toBeEnabled();
+    expect(within(detail).getByRole("button", { name: "Continue anyway" })).toBeEnabled();
   });
 
   it("queues a fresh preparation when Prepare again is clicked", async () => {
@@ -337,6 +453,8 @@ describe("App", () => {
     expect(container.querySelector('[data-preparation-id="tracking"]')).not.toHaveTextContent("Undo preparation");
     expect(within(container.querySelector<HTMLElement>('[data-preparation-id="failed"]')!).getByRole("button", { name: "Dismiss" })).toBeEnabled();
     expect(within(container.querySelector<HTMLElement>('[data-preparation-id="fact-check-failed"]')!).getByRole("button", { name: "Prepare again" })).toBeEnabled();
+    expect(within(container.querySelector<HTMLElement>('[data-preparation-id="fact-check-failed"]')!).getByRole("button", { name: "Continue anyway" })).toBeEnabled();
+    expect(within(container.querySelector<HTMLElement>('[data-preparation-id="failed"]')!).queryByRole("button", { name: "Continue anyway" })).not.toBeInTheDocument();
     expect(within(container.querySelector<HTMLElement>('[data-preparation-id="review"]')!).getByRole("button", { name: "Dismiss" })).toBeEnabled();
     for (const preparationId of ["waiting", "preparing", "recording", "tracking", "recorded"]) {
       expect(within(container.querySelector<HTMLElement>(`[data-preparation-id="${preparationId}"]`)!).queryByRole("button", { name: "Dismiss" }))

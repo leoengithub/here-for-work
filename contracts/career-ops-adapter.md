@@ -127,6 +127,10 @@ The extension keeps provider execution separate from canonical writes:
    a full CV refresh. It validates HTML, facts, PDF structure, paths, and hashes before
    exclusive version publication and a compare-and-swap PDF-index update. The canonical
    report and tracker row are immutable inputs. It does not update application status.
+   `preparation.result.acceptUnverified` reuses the same preparation and staged provider
+   result after an explicit user accept. It still invokes `verify-cv-facts.mjs` to record
+   the failed verdict, but that verdict cannot block publication. Provenance is
+   `user_accepted_unverified` and must never be described as fact-checked.
 5. `answers.context.get` binds a prepared application to the exact hash of a
    live, typed form snapshot. Job and form text remains marked as untrusted data.
 6. HereForWork invokes the selected provider against that bounded context.
@@ -191,7 +195,7 @@ extension preserves any file already selected by the user and skips ambiguous co
 non-PDF controls, unsupported attachment types, or unverifiable inputs.
 The public upload filename is `Leonardo_Gomez_Frontend_Engineer.pdf` for both
 tailored and reviewed-fallback artifacts; internal provenance continues to distinguish
-`tailored_generated` from `user_reviewed_fallback`.
+`tailored_generated` from `user_reviewed_fallback` and `user_accepted_unverified`.
 
 ### Compensating preparation transaction
 
@@ -215,7 +219,10 @@ checks passed and PDF generation/rendering then failed. The adapter re-resolves 
 path and verifies PDF structure and the exact saved hash. Missing, changed, or invalid
 fallback files fail explicitly. A successful recovery preserves the render diagnosis as
 a warning, records `cvSource=user_reviewed_fallback`, and states that the CV is reviewed
-by the user and was not tailored for that role.
+by the user and was not tailored for that role. An explicit Continue anyway after
+`cv_fact_check_failed` records `cvSource=user_accepted_unverified` with a
+`cv_fact_check_failed` warning recovered by `user_accepted_unverified`. That path never
+claims a fact-check pass.
 
 Canonical decision operations are:
 

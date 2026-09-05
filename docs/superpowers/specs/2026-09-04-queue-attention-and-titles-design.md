@@ -21,7 +21,7 @@ Needs attention cards show a reason and no action. Job titles look clickable but
 
 ## Needs attention card contract
 
-Always: title is a link to `applicationUrl` when present (`target=_blank`, `rel=noreferrer`).
+Always: title is a link to `applicationUrl` when present (`href`, `rel=noreferrer`). Desktop click opens that HTTPS URL through `open_external_url` / `/usr/bin/open`; in-webview `target="_blank"` is not the opener.
 
 | Reason class | Actions |
 | --- | --- |
