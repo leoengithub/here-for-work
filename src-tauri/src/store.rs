@@ -2299,7 +2299,12 @@ impl Store {
                 SELECT session_id FROM browser_commands
                  WHERE status = 'permanent' AND error_code = 'lease_expired'
                    AND command_type != 'focus_review'
-              )",
+              )
+                AND NOT EXISTS (
+                  SELECT 1 FROM browser_commands active
+                   WHERE active.session_id = browser_sessions.id
+                     AND active.status IN ('pending', 'leased')
+                )",
             [now_text.clone()],
         )?;
         transaction.execute(
@@ -2464,7 +2469,12 @@ impl Store {
                    AND error_code IN ('lease_expired', 'extension_handshake_timeout')
                    AND command_type != 'focus_review'
               )
-                AND status != 'action_required'",
+                AND status != 'action_required'
+                AND NOT EXISTS (
+                  SELECT 1 FROM browser_commands active
+                   WHERE active.session_id = browser_sessions.id
+                     AND active.status IN ('pending', 'leased')
+                )",
             [now_text.clone()],
         )?;
         transaction.execute(
@@ -12772,6 +12782,19 @@ mod tests {
         assert_eq!(retried.id, session.id);
         assert_eq!(retried.status, "waiting_for_extension");
         assert_eq!(store.browser_sessions().unwrap().len(), 1);
+        let after_retry = chrono::Utc::now();
+        assert!(
+            store
+                .recover_stalled_browser_commands(after_retry, chrono::Duration::seconds(15))
+                .unwrap()
+                .is_empty()
+        );
+        let claimed = store
+            .claim_browser_command(after_retry, chrono::Duration::seconds(30))
+            .unwrap()
+            .expect("retried inspect after handshake timeout must be claimable");
+        assert_eq!(claimed.session_id, session.id);
+        assert_eq!(claimed.command_type, "inspect_request");
     }
 
     #[test]
@@ -12804,6 +12827,53 @@ mod tests {
                 .error_code
                 .as_deref(),
             Some("extension_command_expired")
+        );
+    }
+
+    #[test]
+    fn retry_after_inspect_lease_exhaustion_stays_claimable() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+        let session = queue_completed_application_session(&mut store);
+        let mut now = chrono::Utc::now();
+
+        for _ in 1..=3 {
+            store
+                .claim_browser_command(now, chrono::Duration::seconds(30))
+                .unwrap()
+                .unwrap();
+            now += chrono::Duration::seconds(31);
+            let _ = store
+                .recover_stalled_browser_commands(now, chrono::Duration::seconds(15))
+                .unwrap();
+        }
+        assert_eq!(
+            store.browser_session(&session.id).unwrap().status,
+            "action_required"
+        );
+
+        let retried = store.retry_browser_session(&session.id).unwrap();
+        assert_eq!(retried.status, "waiting_for_extension");
+
+        let after_retry = chrono::Utc::now();
+        let immediately_recovered = store
+            .recover_stalled_browser_commands(after_retry, chrono::Duration::seconds(15))
+            .unwrap();
+        assert!(immediately_recovered.is_empty());
+        assert_eq!(
+            store.browser_session(&session.id).unwrap().status,
+            "waiting_for_extension"
+        );
+
+        let claimed = store
+            .claim_browser_command(after_retry, chrono::Duration::seconds(30))
+            .unwrap()
+            .expect("retried inspect_request must be claimable");
+        assert_eq!(claimed.session_id, session.id);
+        assert_eq!(claimed.command_type, "inspect_request");
+        assert_eq!(
+            store.browser_session(&session.id).unwrap().status,
+            "inspecting"
         );
     }
 
