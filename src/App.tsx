@@ -50,6 +50,7 @@ import {
   configureBrowserBridge,
   createOperationalBackup,
   dismissRole,
+  retryEvaluation,
   exportRedactedDiagnostics,
   exportOperationalSummary,
   getDashboard,
@@ -267,6 +268,26 @@ export function PreQueueStatus({ roles }: { roles: DashboardState["preQueueRoles
   return <p className="pre-queue-status" role="status">{parts.join(". ")}.</p>;
 }
 
+const RETRY_EVALUATION_REASONS = [
+  "evaluation_result_invalid_or_stale",
+  "evaluation_receipt_pointer_unreadable",
+  "evaluation_result_capability_unavailable",
+  "canonical_evaluation_missing_executor_unavailable",
+  "canonical_evaluation_pending_executor",
+  "evaluation_executor_failed",
+  "evaluation_executor_receipt_invalid",
+  "evaluation_executor_url_missing",
+] as const;
+
+export type AttentionCardAction = "dismiss" | "retry_evaluation" | null;
+
+export function attentionCardAction(reason: string, recoveryScope: string): AttentionCardAction {
+  if (reason === "canonical_status_not_evaluated") return "dismiss";
+  if ((RETRY_EVALUATION_REASONS as readonly string[]).includes(reason)) return "retry_evaluation";
+  if (recoveryScope === "global_reconcile") return null;
+  return null;
+}
+
 const preQueueReasonCopy: Record<string, string> = {
   canonical_history_unavailable: "Canonical history could not be read.",
   canonical_match_missing_or_ambiguous: "The canonical history match is missing or ambiguous.",
@@ -303,11 +324,16 @@ function PreQueueAttentionGroup({
   roles,
   busy,
   onGlobalRecovery,
+  onDismiss,
+  onRetryEvaluation,
 }: {
   roles: DashboardState["preQueueRoles"];
   busy: boolean;
   onGlobalRecovery: () => void;
+  onDismiss: (roleId: string, title: string) => void;
+  onRetryEvaluation: (roleId: string) => void;
 }) {
+  const [dismissRoleId, setDismissRoleId] = useState<string | null>(null);
   const attentionRoles = roles.filter((role) => role.state === "needs_attention");
   if (attentionRoles.length === 0) return null;
   const canRetryGlobally = attentionRoles.some((role) => (
@@ -329,18 +355,88 @@ function PreQueueAttentionGroup({
         </div>
       ) : null}
       <ul className="pre-queue-role-list" aria-label="Roles needing attention">
-        {attentionRoles.map((role) => (
+        {attentionRoles.map((role) => {
+          const titleId = `pre-queue-role-${role.roleId}-title`;
+          const action = attentionCardAction(role.reason, role.recovery.scope);
+          const dismissOpen = dismissRoleId === role.roleId;
+          return (
           <li className="pre-queue-role-list__item" key={role.roleId}>
-            <article className="pre-queue-role" aria-labelledby={`pre-queue-role-${role.roleId}-title`}>
+            <article className="pre-queue-role" aria-labelledby={titleId}>
               <div>
-                <h4 id={`pre-queue-role-${role.roleId}-title`}>{role.title}</h4>
+                <h4 id={titleId}>
+                  {role.applicationUrl ? (
+                    <a className="pre-queue-role__title" href={role.applicationUrl} target="_blank" rel="noreferrer">
+                      {role.title}
+                    </a>
+                  ) : role.title}
+                </h4>
                 <p className="pre-queue-role__company">{role.company}</p>
               </div>
               <p className="pre-queue-role__reason">{formatPreQueueReason(role.reason)}</p>
-              <p className="pre-queue-role__availability">{preQueueRecoveryCopy(role.recovery.scope)}</p>
+              <div className="pre-queue-role__recovery">
+                {action === "dismiss" ? (
+                  <Button
+                    variant="outline"
+                    type="button"
+                    aria-expanded={dismissOpen}
+                    aria-controls={`attention-dismiss-confirmation-${role.roleId}`}
+                    onClick={() => setDismissRoleId(role.roleId)}
+                    disabled={busy}
+                  >
+                    Dismiss
+                  </Button>
+                ) : null}
+                {action === "retry_evaluation" ? (
+                  <Button
+                    type="button"
+                    onClick={() => onRetryEvaluation(role.roleId)}
+                    disabled={busy}
+                  >
+                    Retry evaluation
+                  </Button>
+                ) : null}
+                {action === null ? (
+                  <p className="pre-queue-role__availability">{preQueueRecoveryCopy(role.recovery.scope)}</p>
+                ) : null}
+              </div>
+              {dismissOpen ? (
+                <Alert
+                  id={`attention-dismiss-confirmation-${role.roleId}`}
+                  className="pre-queue-role__confirmation"
+                  variant="destructive"
+                >
+                  <HugeiconsIcon icon={Alert02Icon} strokeWidth={2} aria-hidden="true" />
+                  <AlertTitle>Dismiss this role?</AlertTitle>
+                  <AlertDescription>
+                    <p>
+                      This marks {role.title} as Discarded in career-ops and removes it from Queue.
+                    </p>
+                    <div className="button-cluster">
+                      <Button
+                        className="text-foreground"
+                        variant="outline"
+                        type="button"
+                        onClick={() => setDismissRoleId(null)}
+                        disabled={busy}
+                      >
+                        Keep role
+                      </Button>
+                      <Button
+                        variant="destructive"
+                        type="button"
+                        onClick={() => onDismiss(role.roleId, role.title)}
+                        disabled={busy}
+                      >
+                        Dismiss role
+                      </Button>
+                    </div>
+                  </AlertDescription>
+                </Alert>
+              ) : null}
             </article>
           </li>
-        ))}
+          );
+        })}
       </ul>
     </section>
   );
@@ -1709,18 +1805,34 @@ export function App() {
     }
   };
 
-  const dismissQueueRole = async (roleId: string) => {
-    const role = dashboard?.roles.find((item) => item.id === roleId);
-    if (!role) return;
+  const dismissCanonicalRole = async (roleId: string, title: string) => {
     setBusy(true);
     setError(null);
     try {
       setDashboard(await dismissRole(roleId));
       dismissalNotices.show(
-        role.id,
-        role.title,
-        () => void restoreDismissedRole(role.id, role.title),
+        roleId,
+        title,
+        () => void restoreDismissedRole(roleId, title),
       );
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const dismissQueueRole = async (roleId: string) => {
+    const role = dashboard?.roles.find((item) => item.id === roleId);
+    if (!role) return;
+    await dismissCanonicalRole(role.id, role.title);
+  };
+
+  const retryAttentionEvaluation = async (roleId: string) => {
+    setBusy(true);
+    setError(null);
+    try {
+      setDashboard(await retryEvaluation(roleId));
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
     } finally {
@@ -2030,7 +2142,7 @@ export function App() {
     );
     const detailMarkAppliedLabel = detailPreparationSummary?.appliedTrackingPending
       ? "Retry tracking update"
-      : "I applied elsewhere";
+      : "Applied";
     const detailMarkAppliedConfirmLabel = detailPreparationSummary?.appliedTrackingPending
       ? "Retry tracking update"
       : "Record Applied";
@@ -2063,7 +2175,7 @@ export function App() {
               const recoveryAction = preparationRecoveryAction(item.status, item.retryPolicy, item.step);
               const markAppliedOpen = markAppliedPreparationId === item.id;
               const markAppliedInProgress = markingAppliedRoleId === item.roleId;
-              const markAppliedLabel = item.appliedTrackingPending ? "Retry tracking update" : "I applied elsewhere";
+              const markAppliedLabel = item.appliedTrackingPending ? "Retry tracking update" : "Applied";
               const markAppliedConfirmLabel = item.appliedTrackingPending ? "Retry tracking update" : "Record Applied";
               const canCancelPreparation = item.status === "queued"
                 || item.status === "preparing"
@@ -2078,7 +2190,13 @@ export function App() {
                 tabIndex={-1}
               >
                 <div className="preparation-list__identity">
-                  <strong>{item.title}</strong>
+                  <strong>
+                    {item.applicationUrl ? (
+                      <a className="preparation-list__title" href={item.applicationUrl} target="_blank" rel="noreferrer">
+                        {item.title}
+                      </a>
+                    ) : item.title}
+                  </strong>
                   <span>
                     {item.company} · {item.provider}
                     {item.cvSource === "user_reviewed_fallback" ? " · User-reviewed CV" : ""}
@@ -2327,7 +2445,13 @@ export function App() {
                 <p className="eyebrow">
                   {preparationDetail.status === "action_required" ? "Preparation failure" : "career-ops report"}
                 </p>
-                  <SheetTitle id="preparation-detail-title">{preparationDetail.title}</SheetTitle>
+                  <SheetTitle id="preparation-detail-title">
+                    {detailPreparationSummary?.applicationUrl ? (
+                      <a className="preparation-list__title" href={detailPreparationSummary.applicationUrl} target="_blank" rel="noreferrer">
+                        {preparationDetail.title}
+                      </a>
+                    ) : preparationDetail.title}
+                  </SheetTitle>
                   <p>{preparationDetail.company} · {preparationDetail.provider}</p>
               </div>
               </SheetHeader>
@@ -2507,11 +2631,6 @@ export function App() {
             queueOperationalState.kind === "idle" ? emptyQueueContent : null
           ) : (
             <div className="queue-groups">
-              <PreQueueAttentionGroup
-                roles={dashboard.preQueueRoles}
-                busy={busy}
-                onGlobalRecovery={() => void reconcileHistory()}
-              />
               {groupOrder.map((group) => {
                 const roles = dashboard.roles.filter((role) => role.queueGroup === group);
                 if (roles.length === 0) return null;
@@ -2538,6 +2657,13 @@ export function App() {
                   </section>
                 );
               })}
+              <PreQueueAttentionGroup
+                roles={dashboard.preQueueRoles}
+                busy={busy}
+                onGlobalRecovery={() => void reconcileHistory()}
+                onDismiss={(roleId, title) => void dismissCanonicalRole(roleId, title)}
+                onRetryEvaluation={(roleId) => void retryAttentionEvaluation(roleId)}
+              />
             </div>
           )}
         </section>

@@ -58,13 +58,14 @@ Roles are grouped in this order:
 
 1. Strong matches.
 2. Other new roles.
-3. Needs decision.
+3. Needs a decision.
+4. Needs attention.
 
 Every listed role has already passed the inclusion gates and full career-ops evaluation. Each group is a semantic list of compact, bounded cards. The linked role title owns the first line. Secondary decision information beneath it contains company, location or remote arrangement, optional source-backed relative listing age, the native career-ops 1–5 score, concise supporting evidence, blockers or gaps, compensation context, and material uncertainty. It remains compact and may wrap rather than hide decision-critical information. The right side contains only the quiet Dismiss action followed by the primary Prepare action. The card does not expand and is not itself clickable. ATS, source-occurrence count, preparation state, and discovery time do not appear. The score is never converted into a percentage or probability and HereForWork never computes a substitute.
 
 Listing age is shown without a prefix, as `Today`, `1 day ago`, or `N days ago`, using Europe/Madrid calendar days. It is absent when the source publication date is missing, invalid, in the future, or conflicts across merged source occurrences. `discoveredAt` and first-seen time are never substitutes for a source publication date.
 
-Selecting the role title opens the source listing. Selecting **Prepare** starts the complete application workflow without an intermediate lightweight detail view.
+Selecting the role title opens the source listing in Queue, Needs attention, Applications, and Details whenever an application URL exists; a missing URL stays plain text, not a fake control. Selecting **Prepare** starts the complete application workflow without an intermediate lightweight detail view.
 
 ### Applications
 
@@ -74,7 +75,7 @@ Selecting **Details** opens a right-side panel with a formatted preview of the c
 
 ### Settings
 
-Settings is a secondary utility surface, not a primary-navigation destination. It contains the preparation-provider choice, background-check status and control, queue filters, source health, browser pairing, provider checks, backup, export, tests, quit, and diagnostics. Settings owns configuration, diagnostics, and user-initiated maintenance/lifecycle utilities; it never resolves operational attention or recovery. There is no Activity tab. The header exposes Settings through an accessible settings-icon button rather than a third text destination. Queue never routes role attention to Settings: evaluating and waiting remain progress, while `preQueueRoles` with `state=needs_attention` appear in a separate Queue group with title, company, plain reason, and a typed recovery descriptor. The current backend has no role-scoped evaluation recovery command: globally recoverable reasons expose one typed group-level Retry history sync in Queue, while `repair_career_ops` and `none` remain diagnostic.
+Settings is a secondary utility surface, not a primary-navigation destination. It contains the preparation-provider choice, background-check status and control, queue filters, source health, browser pairing, provider checks, backup, export, tests, quit, and diagnostics. Settings owns configuration, diagnostics, and user-initiated maintenance/lifecycle utilities; it never resolves operational attention or recovery. There is no Activity tab. The header exposes Settings through an accessible settings-icon button rather than a third text destination. Queue never routes role attention to Settings: evaluating and waiting remain progress, while `preQueueRoles` with `state=needs_attention` appear after the decision groups with title, company, and a plain reason. The title opens the listing URL when one exists. SKIP / `canonical_status_not_evaluated` rows expose Dismiss (canonical Discarded after inline confirm). Stale and executor-hold reasons expose per-card Retry evaluation. History-reconcile reasons keep one typed group-level Retry history sync; other rows remain diagnostic.
 
 Queue retains a file-upload icon for explicit discovery-snapshot import. It opens the native file picker and imports the selected JSON; it is not labeled or presented as an automatic refresh.
 
@@ -181,7 +182,7 @@ Dismiss immediately records Discarded through the career-ops adapter, removes th
 
 **Dismiss in Applications** is distinct from Undo dismissal: it is available only when preparation failed or the live form is ready for review. After inline confirmation, it records the unsuitable role as Discarded, deletes only generated preparation artifacts, clears HereForWork's preparation and browser state, and removes the application row. A failed canonical write preserves the preparation and its files for retry. It is unavailable while work is active, while Applied tracking is pending, or after Applied has been confirmed.
 
-**I applied elsewhere in Applications** records Applied through the career-ops adapter when the user submitted outside HereForWork (for example LinkedIn Easy Apply). It is available on idle Applications rows (`action_required` or `completed`) when no application browser session is active or awaiting outcome confirmation. After inline confirmation it keeps generated preparation files, retires HereForWork preparation and browser work, cancels the Applications row, and never submits a form. A failed canonical write preserves the row for tracking retry only. Prefer **I submitted this application** when a live HereForWork browser session is waiting for outcome confirmation.
+**Applied in Applications** records Applied through the career-ops adapter when the user submitted outside HereForWork (for example LinkedIn Easy Apply). The visible CTA label is **Applied**; confirm remains **Keep role** / **Record Applied**, and the command name stays `mark_application_applied`. It is available on idle Applications rows (`action_required` or `completed`) when no application browser session is active or awaiting outcome confirmation. After inline confirmation it keeps generated preparation files, retires HereForWork preparation and browser work, cancels the Applications row, and never submits a form. A failed canonical write preserves the row for tracking retry only. Prefer **I submitted this application** when a live HereForWork browser session is waiting for outcome confirmation.
 
 ## Adapter Boundary
 

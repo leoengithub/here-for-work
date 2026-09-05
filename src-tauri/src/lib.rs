@@ -2328,6 +2328,21 @@ fn madrid_today() -> String {
 }
 
 #[tauri::command]
+fn retry_evaluation(
+    role_id: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<DashboardState, String> {
+    let mut store = state
+        .store
+        .lock()
+        .map_err(|_| "Operational store lock was poisoned".to_string())?;
+    store
+        .retry_evaluation_for_role(&role_id)
+        .map_err(|error| error.to_string())?;
+    store.dashboard().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn dismiss_role(
     role_id: String,
     state: tauri::State<'_, AppState>,
@@ -2724,6 +2739,7 @@ pub fn run() {
             preflight_latest_backup,
             check_integrations,
             reconcile_application_history,
+            retry_evaluation,
             dismiss_role,
             dismiss_preparation,
             undo_dismissal

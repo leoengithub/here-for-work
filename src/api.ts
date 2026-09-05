@@ -259,6 +259,11 @@ export async function setBackgroundEnabled(enabled: boolean): Promise<DashboardS
   return invoke<DashboardState>("set_background_enabled", { enabled });
 }
 
+export async function retryEvaluation(roleId: string): Promise<DashboardState> {
+  if (!isTauri()) throw new Error("Evaluation retry is available in the desktop app.");
+  return invoke<DashboardState>("retry_evaluation", { roleId });
+}
+
 export async function dismissRole(roleId: string): Promise<DashboardState> {
   if (!isTauri()) throw new Error("Canonical dismissal is available in the desktop app.");
   return invoke<DashboardState>("dismiss_role", { roleId });
