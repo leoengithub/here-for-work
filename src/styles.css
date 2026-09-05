@@ -824,6 +824,29 @@ h3 {
   line-height: 1.35;
 }
 
+.pre-queue-role__title,
+.preparation-list__title {
+  color: inherit;
+  text-decoration: none;
+}
+
+a.pre-queue-role__title:hover,
+a.preparation-list__title:hover {
+  text-decoration: underline;
+  text-underline-offset: 0.18em;
+}
+
+.pre-queue-role__recovery {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.5rem;
+}
+
+.pre-queue-role__confirmation {
+  grid-column: 1 / -1;
+}
+
 .pre-queue-role__company,
 .pre-queue-role__availability {
   margin-top: 0.2rem;
@@ -1154,6 +1177,10 @@ a.role-card__title:hover {
 
 .preparation-list__identity strong {
   overflow-wrap: anywhere;
+}
+
+.preparation-list__identity .preparation-list__title {
+  font-weight: inherit;
 }
 
 .application-state {

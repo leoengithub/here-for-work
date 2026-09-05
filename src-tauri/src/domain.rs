@@ -269,6 +269,7 @@ pub struct PreparationSummary {
     pub retry_policy: Option<String>,
     pub updated_at: String,
     pub applied_tracking_pending: bool,
+    pub application_url: Option<String>,
 }
 
 /// Candidate for Q7=B one-shot stuck-preparation cleanup.

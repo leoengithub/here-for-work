@@ -45,6 +45,7 @@ const preparationFixture: PreparationSummary = {
   retryPolicy: null,
   updatedAt: "2026-09-01T12:00:00Z",
   appliedTrackingPending: false,
+  applicationUrl: "https://example.test/preparation-1/apply",
 };
 
 const browserSessionFixture: BrowserSessionSummary = {
@@ -314,6 +315,11 @@ describe("App", () => {
     await screen.findByRole("heading", { name: "Review queue" });
     fireEvent.click(screen.getByRole("tab", { name: "applications" }));
 
+    expect(screen.getByRole("link", { name: "Senior React Frontend Developer" })).toHaveAttribute(
+      "href",
+      "https://example.test/failed/apply",
+    );
+    expect(screen.getAllByRole("button", { name: "Applied" }).length).toBeGreaterThan(0);
     expect(await screen.findAllByText("Preparation failed")).toHaveLength(2);
     expect(screen.getByText("Waiting")).toBeInTheDocument();
     expect(screen.getByText("Preparing CV")).toBeInTheDocument();
@@ -361,7 +367,7 @@ describe("App", () => {
     await screen.findByRole("heading", { name: "Review queue" });
     fireEvent.click(screen.getByRole("tab", { name: "applications" }));
     const failedRow = container.querySelector<HTMLElement>('[data-preparation-id="failed"]')!;
-    fireEvent.click(within(failedRow).getByRole("button", { name: "I applied elsewhere" }));
+    fireEvent.click(within(failedRow).getByRole("button", { name: "Applied" }));
     expect(within(failedRow).getByRole("alert")).toHaveTextContent(/as Applied in career-ops/i);
     fireEvent.click(within(failedRow).getByRole("button", { name: "Record Applied" }));
     await waitFor(() => expect(container.querySelector('[data-preparation-id="failed"]')).not.toBeInTheDocument());
@@ -637,7 +643,7 @@ describe("App", () => {
     expect(screen.getByRole("heading", { name: "Needs attention" })).toBeInTheDocument();
     expect(screen.getByText("Example Studio")).toBeInTheDocument();
     expect(screen.getByText("The evaluation result is invalid or stale.")).toBeInTheDocument();
-    expect(screen.getAllByText("Included in the group retry above.")).toHaveLength(2);
+    expect(screen.getByText("Included in the group retry above.")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Retry history sync" })).toBeEnabled();
     expect(screen.queryByText("1 role needs attention")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Open System" })).not.toBeInTheDocument();
@@ -649,8 +655,85 @@ describe("App", () => {
     expect(screen.queryByText(/%/)).not.toBeInTheDocument();
     expect(screen.queryByText(/Ashby|Greenhouse|Lever|Web form/)).not.toBeInTheDocument();
     expect(container.querySelectorAll(".role-card")).toHaveLength(3);
-    expect(screen.getAllByRole("button", { name: "Dismiss" })).toHaveLength(3);
+    expect(screen.getAllByRole("button", { name: "Dismiss" })).toHaveLength(4);
     expect(screen.getAllByRole("button", { name: "Prepare" })).toHaveLength(3);
+  });
+
+  it("routes Needs attention actions, links titles, and places attention after decisions", async () => {
+    window.history.replaceState({}, "", "/?queue-preview=decisions");
+    render(<App />);
+    await screen.findByRole("heading", { name: "Review queue" });
+
+    const headings = screen.getAllByRole("heading", { level: 3 }).map((heading) => heading.textContent);
+    expect(headings.indexOf("Needs a decision")).toBeGreaterThan(-1);
+    expect(headings.indexOf("Needs attention")).toBeGreaterThan(headings.indexOf("Needs a decision"));
+
+    expect(screen.getByRole("link", { name: "Senior Frontend Platform Engineer" })).toHaveAttribute(
+      "href",
+      "https://example.test/queue-1/apply",
+    );
+
+    const attentionList = screen.getByRole("list", { name: "Roles needing attention" });
+    const skipCard = within(attentionList).getByRole("article", { name: "Staff Frontend Engineer" });
+    expect(within(skipCard).getByRole("link", { name: "Staff Frontend Engineer" })).toHaveAttribute(
+      "href",
+      "https://example.test/attention-skip/apply",
+    );
+    expect(within(skipCard).getByRole("button", { name: "Dismiss" })).toBeEnabled();
+    expect(within(skipCard).queryByRole("button", { name: "Retry evaluation" })).not.toBeInTheDocument();
+
+    const staleCard = within(attentionList).getByRole("article", { name: "UI Engineer" });
+    expect(within(staleCard).getByRole("link", { name: "UI Engineer" })).toHaveAttribute(
+      "href",
+      "https://example.test/attention-stale/apply",
+    );
+    expect(within(staleCard).getByRole("button", { name: "Retry evaluation" })).toBeEnabled();
+    expect(within(staleCard).queryByRole("button", { name: "Dismiss" })).not.toBeInTheDocument();
+
+    const historyCard = within(attentionList).getByRole("article", { name: "Product Engineer" });
+    expect(within(historyCard).getByRole("link", { name: "Product Engineer" })).toHaveAttribute(
+      "href",
+      "https://example.test/attention-history/apply",
+    );
+    expect(within(historyCard).queryByRole("button", { name: "Dismiss" })).not.toBeInTheDocument();
+    expect(within(historyCard).queryByRole("button", { name: "Retry evaluation" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Retry history sync" })).toBeEnabled();
+  });
+
+  it("keeps a job title as plain text when no listing URL exists", () => {
+    const role = {
+      id: "role-plain",
+      company: "Acme",
+      title: "Frontend Engineer",
+      location: "Remote",
+      source: "Fixture",
+      sourceCount: 1,
+      queueGroup: "strong_match" as const,
+      eligibilitySummary: "Strong match",
+      uncertainty: null,
+      postedAt: "2026-08-30",
+      discoveredAt: "2026-08-31T08:00:00Z",
+      applicationUrl: null,
+      preparationState: "not_started" as const,
+      canonicalTrackerId: null,
+      canonicalStatus: null,
+    };
+    render(
+      <ul>
+        <RoleRow
+          role={role}
+          canPrepare={false}
+          canDismiss
+          busy={false}
+          enqueuing={false}
+          onPrepare={() => undefined}
+          onDismiss={() => undefined}
+        />
+      </ul>,
+    );
+
+    expect(screen.getByText("Frontend Engineer")).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Frontend Engineer" })).not.toBeInTheDocument();
   });
 
   it("keeps other roles actionable while one preparation is being queued", () => {

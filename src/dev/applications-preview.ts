@@ -28,6 +28,7 @@ function preparation(
     retryPolicy: null,
     updatedAt: now,
     appliedTrackingPending: false,
+    applicationUrl: `https://example.test/${id}/apply`,
     ...overrides,
   };
 }

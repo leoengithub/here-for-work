@@ -5964,7 +5964,8 @@ impl Store {
                        WHERE e.role_id = p.role_id
                          AND e.operation = 'application.applied.confirm'
                          AND e.status IN ('pending', 'action_required')
-                    ) AS applied_tracking_pending
+                    ) AS applied_tracking_pending,
+                    COALESCE(p.resolved_application_url, r.application_url)
                FROM preparation_jobs p
                JOIN roles r ON r.id = p.role_id
               WHERE p.status != 'cancelled'
@@ -5995,6 +5996,7 @@ impl Store {
                     retry_policy: row.get(14)?,
                     updated_at: row.get(15)?,
                     applied_tracking_pending: row.get(16)?,
+                    application_url: row.get(17)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
