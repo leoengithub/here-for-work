@@ -765,6 +765,39 @@ test("generic discovery resolves a source listing to its application form", asyn
   assert.equal(job.descriptionAvailable, true);
 });
 
+test("generic discovery unwraps an Ashby embed on a company journey page", async (context) => {
+  const requested = [];
+  context.mock.method(globalThis, "fetch", async (input) => {
+    const url = String(input);
+    requested.push(url);
+    if (url.startsWith("https://buffer.example.test/journey/3cc29ce6-6336-4a62-bf3b-b3d307f92f6d")) {
+      return new Response(`<!doctype html><html><body>
+        <h1>Senior Design Engineer</h1>
+        <iframe id="ashby_embed" title="Application"></iframe>
+        <script>window.embed="https://jobs.ashbyhq.com/buffer/3cc29ce6-6336-4a62-bf3b-b3d307f92f6d";</script>
+      </body></html>`, { status: 200, headers: { "content-type": "text/html" } });
+    }
+    throw new Error(`unexpected fetch ${url}`);
+  });
+
+  const job = await fetchJob({
+    company: "Buffer",
+    title: "Senior Design Engineer",
+    location: "Remote",
+    url: "https://buffer.example.test/journey/3cc29ce6-6336-4a62-bf3b-b3d307f92f6d?ashby_jid=3cc29ce6-6336-4a62-bf3b-b3d307f92f6d",
+  });
+
+  assert.deepEqual(requested, [
+    "https://buffer.example.test/journey/3cc29ce6-6336-4a62-bf3b-b3d307f92f6d?ashby_jid=3cc29ce6-6336-4a62-bf3b-b3d307f92f6d",
+  ]);
+  assert.equal(job.provider, "ashby");
+  assert.equal(job.url, "https://jobs.ashbyhq.com/buffer/3cc29ce6-6336-4a62-bf3b-b3d307f92f6d/application");
+  assert.equal(
+    job.sourceUrl,
+    "https://buffer.example.test/journey/3cc29ce6-6336-4a62-bf3b-b3d307f92f6d?ashby_jid=3cc29ce6-6336-4a62-bf3b-b3d307f92f6d",
+  );
+});
+
 test("generic discovery preserves the requested application URL when a page cannot be fetched", async (context) => {
   context.mock.method(globalThis, "fetch", async () => {
     throw new Error("login required");

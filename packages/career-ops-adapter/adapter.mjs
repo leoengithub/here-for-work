@@ -807,6 +807,30 @@ function locationFromJobPosting(posting, fallback) {
   return values.length ? [...new Set(values)].join(", ").slice(0, 500) : fallback;
 }
 
+const ASHBY_POSTING_HREF = /https:\/\/jobs\.ashbyhq\.com\/([a-z0-9][a-z0-9-]{0,62})\/([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})(?:\/application)?/gi;
+
+function extractAshbyApplicationUrl(html, pageUrl) {
+  const source = String(html ?? "");
+  let ashbyJobId = null;
+  try {
+    ashbyJobId = new URL(pageUrl).searchParams.get("ashby_jid");
+  } catch {
+    ashbyJobId = null;
+  }
+  if (ashbyJobId && !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(ashbyJobId)) {
+    ashbyJobId = null;
+  }
+  const matches = [...source.matchAll(ASHBY_POSTING_HREF)];
+  const picked = matches.find((match) => !ashbyJobId || match[2].toLowerCase() === ashbyJobId.toLowerCase())
+    ?? matches[0];
+  if (!picked) return null;
+  try {
+    return publicHttpsUrl(`https://jobs.ashbyhq.com/${picked[1]}/${picked[2]}/application`, "application URL").href;
+  } catch {
+    return null;
+  }
+}
+
 function applicationCandidates(html, baseUrl) {
   const candidates = [];
   const seen = new Set();
@@ -968,6 +992,19 @@ export async function fetchJob(role) {
   try {
     const sourcePage = await fetchHtml(sourceUrl.href);
     const sourceProvider = knownProviderByHost.get(new URL(sourcePage.url).hostname.toLowerCase()) ?? "generic";
+    const embeddedAshbyUrl = extractAshbyApplicationUrl(sourcePage.html, sourcePage.url);
+    if (embeddedAshbyUrl) {
+      if (root) {
+        try {
+          const listing = new URL(embeddedAshbyUrl);
+          listing.pathname = listing.pathname.replace(/\/application\/?$/, "");
+          return await fetchKnownJob(role, listing, "ashby");
+        } catch {
+          // Board lookup can drift; the posting URL is still the live application form.
+        }
+      }
+      return jobFromPage(role, { ...sourcePage, url: embeddedAshbyUrl }, "ashby", sourcePage);
+    }
     if (pageHasApplicationForm(sourcePage.html)) return jobFromPage(role, sourcePage, sourceProvider);
     for (const candidate of applicationCandidates(sourcePage.html, sourcePage.url)) {
       try {

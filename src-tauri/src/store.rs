@@ -3284,11 +3284,20 @@ impl Store {
             return self.browser_session(session_id);
         }
         let (command_type, payload_json) = failed_command.expect("checked above");
-        let payload: serde_json::Value = serde_json::from_str(&payload_json).map_err(|error| {
+        let mut payload: serde_json::Value = serde_json::from_str(&payload_json).map_err(|error| {
             StoreError::InvalidBrowserTransition(format!(
                 "stored browser payload is invalid: {error}"
             ))
         })?;
+        if command_type == "inspect_request" {
+            if let Some(form_url) = current_application_form_url(&transaction, session_id)? {
+                payload["expectedUrl"] = serde_json::Value::String(form_url.clone());
+                transaction.execute(
+                    "UPDATE browser_sessions SET page_url = ?1 WHERE id = ?2",
+                    params![form_url, session_id],
+                )?;
+            }
+        }
         let now = Utc::now().to_rfc3339();
         insert_browser_command(&transaction, session_id, &command_type, &payload, &now)?;
         let next_status = match command_type.as_str() {
@@ -6265,6 +6274,25 @@ impl Store {
             })
             .collect()
     }
+}
+
+fn current_application_form_url(
+    connection: &rusqlite::Connection,
+    session_id: &str,
+) -> Result<Option<String>, StoreError> {
+    let stored = connection
+        .query_row(
+            "SELECT COALESCE(p.resolved_application_url, r.application_url)
+               FROM browser_sessions s
+               JOIN preparation_jobs p ON p.id = s.preparation_id
+               JOIN roles r ON r.id = s.role_id
+              WHERE s.id = ?1",
+            [session_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten();
+    stored.map(|url| application_form_url(&url)).transpose()
 }
 
 fn application_form_url(value: &str) -> Result<String, StoreError> {
@@ -13022,6 +13050,45 @@ mod tests {
         assert_eq!(
             store.browser_session(&session.id).unwrap().status,
             "inspecting"
+        );
+    }
+
+    #[test]
+    fn retry_inspect_uses_the_current_resolved_application_url() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+        let session = queue_completed_application_session(&mut store);
+        let mut now = chrono::Utc::now();
+        for _ in 1..=3 {
+            store
+                .claim_browser_command(now, chrono::Duration::seconds(30))
+                .unwrap()
+                .unwrap();
+            now += chrono::Duration::seconds(31);
+            let _ = store
+                .recover_stalled_browser_commands(now, chrono::Duration::seconds(15))
+                .unwrap();
+        }
+        store
+            .connection
+            .execute(
+                "UPDATE preparation_jobs SET resolved_application_url = ?1",
+                ["https://jobs.ashbyhq.com/buffer/3cc29ce6-6336-4a62-bf3b-b3d307f92f6d/application"],
+            )
+            .unwrap();
+
+        store.retry_browser_session(&session.id).unwrap();
+        let claimed = store
+            .claim_browser_command(chrono::Utc::now(), chrono::Duration::seconds(30))
+            .unwrap()
+            .expect("retried inspect must be claimable");
+        assert_eq!(
+            claimed.payload["expectedUrl"],
+            "https://jobs.ashbyhq.com/buffer/3cc29ce6-6336-4a62-bf3b-b3d307f92f6d/application"
+        );
+        assert_eq!(
+            store.browser_session(&session.id).unwrap().page_url.as_deref(),
+            Some("https://jobs.ashbyhq.com/buffer/3cc29ce6-6336-4a62-bf3b-b3d307f92f6d/application")
         );
     }
 
