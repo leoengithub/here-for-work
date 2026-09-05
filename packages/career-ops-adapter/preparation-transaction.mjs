@@ -591,8 +591,12 @@ export async function commitPreparationTransaction(options) {
     const job = input.job;
     const sources = await preparationSources();
     const currentContextHash = contextHash(role, job, sources);
-    assertPreparationResult(input.result, currentContextHash);
-    if (input.result.contextHash !== currentContextHash) failure("context_changed", diagnostic);
+    if (acceptUnverified) {
+      assertPreparationResult(input.result, input.result.contextHash);
+    } else {
+      assertPreparationResult(input.result, currentContextHash);
+      if (input.result.contextHash !== currentContextHash) failure("context_changed", diagnostic);
+    }
     const identityHash = sha256(JSON.stringify(canonicalJson({
       preparationId,
       eventDate: input.eventDate,
@@ -601,6 +605,9 @@ export async function commitPreparationTransaction(options) {
       result: input.result,
     })));
     state = await readJson(statePath);
+    if (acceptUnverified && state?.status === "failed") {
+      state = null;
+    }
     if (state) {
       if (state.schemaVersion !== STATE_SCHEMA_VERSION || state.preparationId !== preparationId
           || state.identityHash !== identityHash || state.contextHash !== currentContextHash) {
@@ -644,7 +651,7 @@ export async function commitPreparationTransaction(options) {
     await saveState(statePath, state);
     const providerResultBytes = Buffer.from(`${JSON.stringify(input.result, null, 2)}\n`);
     if (await existsAsFile(providerResultPath)) {
-      if (sha256(await readFile(providerResultPath)) !== sha256(providerResultBytes)) {
+      if (!acceptUnverified && sha256(await readFile(providerResultPath)) !== sha256(providerResultBytes)) {
         failure("staging_conflict", diagnostic);
       }
     } else {
@@ -1135,8 +1142,12 @@ export async function commitSelectivePreparationTransaction(options) {
         warnings: [],
       };
     }
-    if (currentPlan.cv.scope === "full_cv") assertPreparationResult(input.result, currentContextHash);
-    else if (currentPlan.cv.scope !== "pdf_only" || input.result != null) failure("invalid_request");
+    if (currentPlan.cv.scope === "full_cv") {
+      assertPreparationResult(
+        input.result,
+        acceptUnverified ? input.result.contextHash : currentContextHash,
+      );
+    } else if (currentPlan.cv.scope !== "pdf_only" || input.result != null) failure("invalid_request");
 
     if (state?.status === "committed") {
       const replayPlan = await inspectArtifacts({ ...artifactInspectionIdentity, preparationId, contextHash: currentContextHash, company: options.role.company, title: options.role.title });

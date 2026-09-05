@@ -564,27 +564,29 @@ fn continue_unverified_preparation(
     };
     let result = match state
         .adapter
-        .recover_preparation_result(&work.id, &context.context_hash)
+        .recover_preparation_result(&work.id, &context.context_hash, true)
     {
         Ok(Some(result)) => result,
         Ok(None) => {
             if let Ok(mut store) = state.store.lock() {
-                let _ = store.fail_preparation(
+                let _ = store.fail_preparation_with_policy(
                     &work.id,
-                    "recovery_failed",
-                    "preparation.result.recover",
+                    "cv_fact_check_failed",
+                    "stage.fact_verification",
                     "The staged provider result is no longer available. Prepare again starts a fresh provider run.",
+                    "fresh_preparation_provider_run",
                 );
             }
             return Err("The staged provider result is no longer available. Prepare again starts a fresh provider run.".to_string());
         }
         Err(error) => {
             if let Ok(mut store) = state.store.lock() {
-                let _ = store.fail_preparation(
+                let _ = store.fail_preparation_with_policy(
                     &work.id,
-                    classify_preparation_error("recovery_failed", &error.to_string()),
-                    "preparation.result.recover",
-                    &error.to_string(),
+                    "cv_fact_check_failed",
+                    "stage.fact_verification",
+                    "Continue anyway could not reuse the staged draft. Prepare again starts a fresh provider run.",
+                    "fresh_preparation_provider_run",
                 );
             }
             return Err(error.to_string());
@@ -911,7 +913,7 @@ fn process_preparation_work(app: &tauri::AppHandle, work: PreparationWork) -> Re
     } else {
         match state
             .adapter
-            .recover_preparation_result(&work.id, &context.context_hash)
+            .recover_preparation_result(&work.id, &context.context_hash, false)
         {
             Ok(Some(result)) => result,
             Ok(None) => {

@@ -2373,7 +2373,7 @@ async function execute(request) {
       };
     }
     case "preparation.result.recover": {
-      assertInputKeys(request.input, ["preparationId", "contextHash"], request.operation);
+      assertInputKeys(request.input, ["preparationId", "contextHash", "allowStaleContext"], request.operation);
       if (!stagingRoot) throw new Error("Writable adapter staging is not configured.");
       const preparationId = requiredText(request.input, "preparationId", 36).toLowerCase();
       if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(preparationId)) {
@@ -2381,10 +2381,11 @@ async function execute(request) {
       }
       const contextHash = requiredText(request.input, "contextHash", 64).toLowerCase();
       if (!/^[a-f0-9]{64}$/.test(contextHash)) throw new Error("contextHash is invalid.");
+      const allowStaleContext = request.input?.allowStaleContext === true;
       try {
         const result = JSON.parse(await readFile(resolve(stagingRoot, preparationId, "provider-result.json"), "utf8"));
-        assertPreparationResult(result, contextHash);
-        return { outcome: "completed", preparationId, contextHash, result };
+        assertPreparationResult(result, allowStaleContext ? result.contextHash : contextHash);
+        return { outcome: "completed", preparationId, contextHash: result.contextHash, result };
       } catch (error) {
         if (error?.code === "ENOENT") return { outcome: "missing", preparationId, contextHash, result: null };
         throw error;

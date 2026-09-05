@@ -594,12 +594,14 @@ impl AdapterConfig {
         &self,
         preparation_id: &str,
         context_hash: &str,
+        allow_stale_context: bool,
     ) -> Result<Option<Value>, AdapterError> {
         let value = self.request(
             "preparation.result.recover",
             json!({
                 "preparationId": preparation_id,
                 "contextHash": context_hash,
+                "allowStaleContext": allow_stale_context,
             }),
         )?;
         let recovered: RecoveredPreparationResult = serde_json::from_value(value)
