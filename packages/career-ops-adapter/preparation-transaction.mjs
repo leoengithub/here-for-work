@@ -1163,6 +1163,9 @@ export async function commitSelectivePreparationTransaction(options) {
         cleanupPaths: Array.isArray(state.cleanupPaths) ? state.cleanupPaths : [],
       };
     }
+    if (acceptUnverified && state && (state.status === "failed" || state.contextHash !== currentContextHash)) {
+      state = null;
+    }
     if (state && (state.schemaVersion !== 3 || state.identityHash !== identityHash || state.contextHash !== currentContextHash)) {
       failure("staging_conflict", diagnostic);
     }
@@ -1185,7 +1188,9 @@ export async function commitSelectivePreparationTransaction(options) {
     if (input.result) {
       const bytes = Buffer.from(`${JSON.stringify(input.result, null, 2)}\n`);
       if (await existsAsFile(providerResultPath)) {
-        if (sha256(await readFile(providerResultPath)) !== sha256(bytes)) failure("staging_conflict", diagnostic);
+        if (!acceptUnverified && sha256(await readFile(providerResultPath)) !== sha256(bytes)) {
+          failure("staging_conflict", diagnostic);
+        }
       } else await writePrivate(providerResultPath, bytes, { flag: "wx" });
     }
     const priorFactDetail = state.lastFailure?.detail || state.lastFailure?.diagnostics || null;

@@ -427,6 +427,22 @@ test("acceptUnverified reuses a staged draft after the live context hash drifted
   assert.equal(committed.warnings[0].recoveredBy, "user_accepted_unverified");
 });
 
+test("selective acceptUnverified ignores a failed drifted commit-state", async () => {
+  const fixture = await selectiveHarness({ fallback: true });
+  const statePath = join(fixture.stagingRoot, fixture.input.preparationId, "commit-state.json");
+  await mkdir(dirname(statePath), { recursive: true });
+  await writeFile(statePath, JSON.stringify({
+    schemaVersion: 3,
+    status: "failed",
+    stage: "preflight.staging",
+    contextHash: "ab".repeat(32),
+    identityHash: "cd".repeat(32),
+    preparationId: fixture.input.preparationId,
+  }));
+  const committed = await fixture.acceptUnverified();
+  assert.equal(committed.cvProvenance.source, "user_accepted_unverified");
+});
+
 test("ordinary commit still blocks a failed fact check after acceptUnverified exists", async () => {
   const fixture = await harness({ factVerdict: "block" });
   await expectFailure(fixture.commit(), "cv_fact_check_failed", "fresh_preparation_provider_run");
