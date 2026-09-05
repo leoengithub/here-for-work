@@ -1,7 +1,7 @@
 # Queue attention, titles, and Applied label
 
 Date: 2026-09-04  
-Status: approved design (pending spec review)  
+Status: approved; implementation plan ready  
 Branch target: `hfw-queue-attention-ux` (draft PR → `main`)
 
 ## Problem
