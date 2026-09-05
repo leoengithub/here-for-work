@@ -492,6 +492,30 @@ function unverifiedFactCheckWarning(detail) {
   };
 }
 
+async function recordFactCheck(command, factArgs, diagnostic, acceptUnverified, warnings) {
+  try {
+    const factCheck = await command(
+      "verify-cv-facts.mjs",
+      factArgs,
+      {},
+      "cv_fact_check_failed",
+      "stage.fact_verification",
+      "fresh_preparation_provider_run",
+    );
+    if (validFactCheck(factCheck.output)) return;
+    if (!acceptUnverified) {
+      failure("cv_fact_check_failed", {
+        ...diagnostic,
+        diagnostics: factCheckFailureDetail(factCheck.output),
+      });
+    }
+    warnings.push(unverifiedFactCheckWarning(factCheckFailureDetail(factCheck.output)));
+  } catch (error) {
+    if (!acceptUnverified || error?.code !== "cv_fact_check_failed") throw error;
+    warnings.push(unverifiedFactCheckWarning(error.diagnostics || error.message));
+  }
+}
+
 export async function acceptUnverifiedPreparationTransaction(options) {
   if (typeof options.inspectArtifacts === "function") {
     return commitSelectivePreparationTransaction({ ...options, acceptUnverified: true });
@@ -700,16 +724,7 @@ export async function commitPreparationTransaction(options) {
       if (await existsAsFile(resolve(root, "article-digest.md"))) factArgs.push("--source", resolve(root, "article-digest.md"));
       if (await existsAsFile(resolve(root, "config", "cv-facts.json"))) factArgs.push("--config", resolve(root, "config", "cv-facts.json"));
       factArgs.push("--json");
-      const factCheck = await command("verify-cv-facts.mjs", factArgs, {}, "cv_fact_check_failed", "stage.fact_verification", "fresh_preparation_provider_run");
-      if (!validFactCheck(factCheck.output)) {
-        if (!acceptUnverified) {
-          failure("cv_fact_check_failed", {
-            ...diagnostic,
-            diagnostics: factCheckFailureDetail(factCheck.output),
-          });
-        }
-        warnings.push(unverifiedFactCheckWarning(factCheckFailureDetail(factCheck.output)));
-      }
+      await recordFactCheck(command, factArgs, diagnostic, acceptUnverified, warnings);
     } else if (acceptUnverified) {
       warnings.push(unverifiedFactCheckWarning(priorFactDetail));
     }
@@ -1231,16 +1246,7 @@ export async function commitSelectivePreparationTransaction(options) {
       if (await existsAsFile(resolve(root, "article-digest.md"))) factArgs.push("--source", resolve(root, "article-digest.md"));
       if (await existsAsFile(resolve(root, "config", "cv-facts.json"))) factArgs.push("--config", resolve(root, "config", "cv-facts.json"));
       factArgs.push("--json");
-      const factCheck = await command("verify-cv-facts.mjs", factArgs, {}, "cv_fact_check_failed", "stage.fact_verification", "fresh_preparation_provider_run");
-      if (!validFactCheck(factCheck.output)) {
-        if (!acceptUnverified) {
-          failure("cv_fact_check_failed", {
-            ...diagnostic,
-            diagnostics: factCheckFailureDetail(factCheck.output),
-          });
-        }
-        warnings.push(unverifiedFactCheckWarning(factCheckFailureDetail(factCheck.output)));
-      }
+      await recordFactCheck(command, factArgs, diagnostic, acceptUnverified, warnings);
     } else if (acceptUnverified) {
       warnings.push(unverifiedFactCheckWarning(priorFactDetail));
     }

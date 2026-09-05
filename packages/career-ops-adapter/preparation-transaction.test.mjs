@@ -443,6 +443,25 @@ test("selective acceptUnverified ignores a failed drifted commit-state", async (
   assert.equal(committed.cvProvenance.source, "user_accepted_unverified");
 });
 
+test("acceptUnverified continues when verify-cv-facts exits non-zero", async () => {
+  const fixture = await harness({
+    factVerdict: "block",
+    fallback: true,
+    failScript: "verify-cv-facts.mjs",
+    failScriptOutput: JSON.stringify({
+      verdict: "block",
+      invented: ["7 years", "3 applications"],
+      unsupportedFacts: [],
+      forbidden: [],
+      warnings: [],
+    }),
+  });
+  await expectFailure(fixture.commit(), "cv_fact_check_failed", "fresh_preparation_provider_run");
+  const committed = await fixture.acceptUnverified();
+  assert.equal(committed.cvProvenance.source, "user_accepted_unverified");
+  assert.equal(committed.warnings[0].recoveredBy, "user_accepted_unverified");
+});
+
 test("ordinary commit still blocks a failed fact check after acceptUnverified exists", async () => {
   const fixture = await harness({ factVerdict: "block" });
   await expectFailure(fixture.commit(), "cv_fact_check_failed", "fresh_preparation_provider_run");
