@@ -4174,7 +4174,16 @@ impl Store {
                 "an Applied role cannot be discarded".to_string(),
             ));
         }
-        self.begin_adapter_effect(role_id, "role.discard", None, None)
+        let tracker_id = self
+            .connection
+            .query_row(
+                "SELECT canonical_tracker_id FROM roles WHERE id = ?1",
+                [role_id],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .optional()?
+            .ok_or_else(|| StoreError::InvalidAdapterEffect("role was not found".to_string()))?;
+        self.begin_adapter_effect(role_id, "role.discard", None, tracker_id)
     }
 
     fn canonical_role_is_applied(&self, role_id: &str) -> Result<bool, StoreError> {
@@ -5346,7 +5355,7 @@ impl Store {
                 "application tracking is already in progress".to_string(),
             ));
         }
-        let effect = self.begin_adapter_effect(&role_id, "role.discard", None, None)?;
+        let effect = self.begin_discard_effect(&role_id)?;
         Ok(PreparationCleanupWork {
             preparation_id: preparation_id.to_string(),
             role_id,
@@ -5619,16 +5628,21 @@ impl Store {
             )
             .optional()?;
         if let Some((idempotency_key, stored_parent, stored_tracker_id)) = existing {
+            let resolved_tracker_id = stored_tracker_id.or(tracker_id);
             self.connection.execute(
-                "UPDATE adapter_effects SET status = 'pending', error_class = NULL, updated_at = ?1
-                  WHERE idempotency_key = ?2",
-                params![Utc::now().to_rfc3339(), idempotency_key],
+                "UPDATE adapter_effects
+                    SET status = 'pending',
+                        error_class = NULL,
+                        tracker_id = COALESCE(tracker_id, ?1),
+                        updated_at = ?2
+                  WHERE idempotency_key = ?3",
+                params![resolved_tracker_id, Utc::now().to_rfc3339(), idempotency_key],
             )?;
             return Ok(AdapterEffectContext {
                 idempotency_key,
                 role,
                 parent_effect_key: stored_parent,
-                tracker_id: stored_tracker_id,
+                tracker_id: resolved_tracker_id,
             });
         }
         let idempotency_key = Uuid::new_v4().to_string();

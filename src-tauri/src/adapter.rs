@@ -117,6 +117,8 @@ pub struct CanonicalRoleInput {
     pub title: String,
     pub location: String,
     pub url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tracker_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -723,6 +725,8 @@ impl AdapterConfig {
             .expect("canonical role input is an object");
         payload.insert("trackerId".to_string(), Value::Number(tracker_id.into()));
         payload.insert("userConfirmed".to_string(), Value::Bool(true));
+        // Applied confirm always uses the session-bound tracker id; drop any
+        // optional input copy so the explicit argument wins.
         self.canonical_effect("application.applied.confirm", Value::Object(payload))
     }
 

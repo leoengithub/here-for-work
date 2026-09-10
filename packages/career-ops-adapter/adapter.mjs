@@ -2681,10 +2681,30 @@ async function execute(request) {
       };
     }
     case "role.discard": {
-      assertInputKeys(request.input, ["idempotencyKey", "eventDate", "company", "title", "location", "url", "reason"], request.operation);
+      assertInputKeys(request.input, ["idempotencyKey", "eventDate", "company", "title", "location", "url", "reason", "trackerId"], request.operation);
       const key = idempotencyKey(request.input);
       const eventDate = localDate(request.input);
-      const record = await ensureCanonicalRole(request.input, "Discarded", key, eventDate);
+      const trackerId = request.input?.trackerId;
+      let record;
+      if (trackerId !== undefined && trackerId !== null) {
+        if (!Number.isInteger(trackerId) || trackerId < 1) throw new Error("trackerId must be a positive integer.");
+        record = (await historyRecords()).find((candidate) => Number(candidate.id) === trackerId);
+        if (!record) throw new Error("The canonical role row no longer exists.");
+        if (record.status === "Discarded" && String(record.notes).includes(`HereForWork effect ${key}`)) {
+          return { outcome: "completed", effect: { idempotencyKey: key, trackerId, status: record.status } };
+        }
+        if (record.status === "Applied") {
+          throw new Error("Canonical row is already Applied; refusing to overwrite it with Discarded.");
+        }
+        if (!new Set(["Evaluated", "Discarded"]).has(record.status)) {
+          throw new Error(`Canonical row is already ${String(record.status)}; refusing to overwrite it with Discarded.`);
+        }
+        await setCanonicalStatus(trackerId, "Discarded", key, eventDate);
+        record = (await historyRecords()).find((candidate) => Number(candidate.id) === trackerId);
+      } else {
+        record = await ensureCanonicalRole(request.input, "Discarded", key, eventDate);
+      }
+      if (!record || record.status !== "Discarded") throw new Error("Canonical writer did not persist Discarded.");
       return {
         outcome: "completed",
         effect: { idempotencyKey: key, trackerId: Number(record.id), status: record.status },

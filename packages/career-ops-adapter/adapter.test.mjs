@@ -1531,6 +1531,45 @@ test("Discard, Undo, and confirmed Applied use canonical writers idempotently", 
   assert.match(staleDiscard.error.message, /already Applied/);
 });
 
+test("Discard with trackerId uses the linked row even when discovery company text differs", async () => {
+  const fixture = await fakeCareerOps();
+  await writeFile(join(fixture.root, "state.json"), `${JSON.stringify([{
+    id: 233,
+    date: "2026-09-07",
+    company: "Integer Consulting",
+    role: "Frontend Developer (mid/senior)",
+    score: "3.0/5",
+    status: "Evaluated",
+    pdf: "❌",
+    report: "[233](../reports/233-integer-2026-09-07.md)",
+    notes: "Authorization Investigate",
+  }])}\n`);
+  const discardKey = "55555555-5555-4555-8555-555555555555";
+  const discard = await request({
+    id: "discard-linked",
+    protocolVersion: 1,
+    operation: "role.discard",
+    input: {
+      idempotencyKey: discardKey,
+      eventDate: "2026-09-10",
+      company: "Integer",
+      title: "Frontend Developer (mid/senior)",
+      location: "Aveiro, Portugal",
+      url: "https://www.linkedin.com/jobs/view/4463365317/",
+      trackerId: 233,
+      reason: "Not a fit",
+    },
+  }, fixture.env);
+  assert.equal(discard.ok, true);
+  assert.equal(discard.result.effect.trackerId, 233);
+  assert.equal(discard.result.effect.status, "Discarded");
+  const rows = JSON.parse(await readFile(join(fixture.root, "state.json"), "utf8"));
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].company, "Integer Consulting");
+  assert.equal(rows[0].status, "Discarded");
+  assert.match(rows[0].notes, /HereForWork effect 55555555-5555-4555-8555-555555555555/);
+});
+
 test("Applied is rejected without explicit user confirmation", async () => {
   const response = await request({
     id: "not-confirmed",
