@@ -2992,7 +2992,7 @@ export function App() {
           {mainContent}
         </TabsContent>
       )}
-      <Toaster toastManager={dismissalToast} timeout={30_000} limit={3} />
+      <Toaster toastManager={dismissalToast} timeout={10_000} limit={3} />
     </Tabs>
   );
 }

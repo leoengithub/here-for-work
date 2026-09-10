@@ -143,7 +143,7 @@ describe("dismissal notifications", () => {
     expect(screen.queryByRole("button", { name: "Close notification" })).not.toBeInTheDocument()
   })
 
-  it("expires each notice after 30 seconds", () => {
+  it("expires each notice after 10 seconds", () => {
     vi.useFakeTimers()
     const manager = createToastManager()
     const notices = createDismissalNoticeController(manager)
@@ -152,7 +152,7 @@ describe("dismissal notifications", () => {
     act(() => notices.show("role-1", "Frontend Engineer", () => undefined))
     const toastRoot = screen.getByText("Frontend Engineer dismissed").closest('[data-slot="toast"]')
 
-    act(() => vi.advanceTimersByTime(29_999))
+    act(() => vi.advanceTimersByTime(9_999))
     expect(toastRoot).not.toHaveAttribute("data-ending-style")
 
     act(() => vi.advanceTimersByTime(1))
@@ -170,20 +170,20 @@ describe("dismissal notifications", () => {
     const hoverToast = screen.getByText("Hover role dismissed").closest('[data-slot="toast"]')
 
     fireEvent.mouseEnter(viewport)
-    act(() => vi.advanceTimersByTime(30_000))
+    act(() => vi.advanceTimersByTime(10_000))
     expect(hoverToast).not.toHaveAttribute("data-ending-style")
     fireEvent.mouseLeave(viewport)
-    act(() => vi.advanceTimersByTime(30_000))
+    act(() => vi.advanceTimersByTime(10_000))
     expect(hoverToast).toHaveAttribute("data-ending-style")
 
     act(() => notices.show("focused", "Focused role", () => undefined))
     const focusedToast = screen.getByText("Focused role dismissed").closest('[data-slot="toast"]')
     fireEvent.keyDown(window, { key: "F6" })
     expect(viewport).toHaveFocus()
-    act(() => vi.advanceTimersByTime(30_000))
+    act(() => vi.advanceTimersByTime(10_000))
     expect(focusedToast).not.toHaveAttribute("data-ending-style")
     fireEvent.blur(viewport, { relatedTarget: document.body })
-    act(() => vi.advanceTimersByTime(30_000))
+    act(() => vi.advanceTimersByTime(10_000))
     expect(focusedToast).toHaveAttribute("data-ending-style")
   })
 
