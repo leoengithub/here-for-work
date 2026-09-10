@@ -1797,6 +1797,7 @@ fn confirm_application_applied(
         title: context.role.title,
         location: context.role.location,
         url: context.role.application_url,
+        tracker_id: None,
     };
     let effect = {
         let _canonical_write = state
@@ -1871,6 +1872,7 @@ fn mark_application_applied(
         title: context.role.title,
         location: context.role.location,
         url: context.role.application_url,
+        tracker_id: None,
     };
     let effect = {
         let _canonical_write = state
@@ -2745,6 +2747,7 @@ fn discard_role_internal(role_id: &str, state: &AppState) -> Result<DashboardSta
         title: effect.role.title,
         location: effect.role.location,
         url: effect.role.application_url,
+        tracker_id: effect.tracker_id,
     };
     let canonical = {
         let _canonical_write = state
@@ -2801,6 +2804,7 @@ fn dismiss_preparation(
         title: work.effect.role.title.clone(),
         location: work.effect.role.location.clone(),
         url: work.effect.role.application_url.clone(),
+        tracker_id: work.effect.tracker_id,
     };
     let canonical = {
         let _canonical_write = state

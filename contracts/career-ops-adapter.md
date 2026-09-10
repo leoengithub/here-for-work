@@ -227,6 +227,9 @@ claims a fact-check pass.
 Canonical decision operations are:
 
 - `role.discard`: record Discarded immediately and return an opaque undo token.
+  When HereForWork already holds a reconciled `canonical_tracker_id`, it passes
+  that `trackerId` so the writer updates the linked row even if discovery company
+  text differs from the canonical company string.
 - `role.discard.undo`: restore the exact prior state only when the canonical row
   still matches the effect represented by the undo token. A changed row returns
   a conflict instead of overwriting newer history.
