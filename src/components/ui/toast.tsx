@@ -10,6 +10,7 @@ import type { OutcomeNotification } from "@/types"
 const toast = ToastPrimitive.createToastManager()
 
 const OUTCOME_TOAST_TIMEOUT = 5_000
+const DISMISSAL_TOAST_TIMEOUT = 10_000
 
 function dismissalToastId(roleId: string) {
   return `dismissal-${roleId}`
@@ -24,7 +25,7 @@ function createDismissalNoticeController(
         id: dismissalToastId(roleId),
         title: `${roleTitle} dismissed`,
         priority: "low",
-        timeout: 30_000,
+        timeout: DISMISSAL_TOAST_TIMEOUT,
         actionProps: {
           children: "Undo",
           onClick: onUndo,
