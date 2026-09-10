@@ -67,7 +67,11 @@ executor's mutating path until the other executor's equivalent path is confirmed
 ### 3. Fourteen-day read-only shadow
 
 Run HereForWork's equivalent discovery path in strictly read-only shadow mode for 14 days.
-The period is acceptable only when every expected window is accounted for. A missed window
+The first shipped shadow capability is **file-based window accounting**: expected schedule
+nominals for staged sources are compared to imported sealed discovery-run coverage without
+claiming runs, advancing executor cursors, or mutating Gmail/canonical state. A true
+career-ops discover re-run remains deferred until an isolated non-mutating adapter exists;
+the 14-day gate still requires every expected window accounted for. A missed window
 does not disappear from the evidence: it must be recovered through catch-up or remain an
 explicit unresolved failure.
 

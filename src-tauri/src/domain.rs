@@ -111,6 +111,103 @@ pub struct DashboardState {
     pub recent_runs: Vec<RunSummary>,
     pub discovery_runs: Vec<DiscoveryRunDiagnostic>,
     pub discovery_cursors: Vec<DiscoveryCursor>,
+    pub discovery_inbox: DiscoveryInboxInventory,
+    pub discovery_inbox_auto_consume: bool,
+    pub discovery_shadow: DiscoveryShadowSummary,
+    pub discovery_shadow_enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DiscoveryShadowWindowStatus {
+    Missing,
+    MatchedCompleted,
+    MatchedPartial,
+    MatchedFailed,
+    Unexpected,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscoveryShadowWindow {
+    pub source_id: String,
+    pub expected_at: String,
+    pub status: DiscoveryShadowWindowStatus,
+    pub linked_run_id: Option<String>,
+    pub linked_digest: Option<String>,
+    pub last_checked_at: String,
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscoveryShadowSummary {
+    pub started_at: Option<String>,
+    pub expected: usize,
+    pub accounted: usize,
+    pub missing: usize,
+    pub partial_or_failed: usize,
+    pub windows: Vec<DiscoveryShadowWindow>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DiscoveryInboxFileStatus {
+    PendingImport,
+    Imported,
+    Invalid,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscoveryInboxSourceCounts {
+    pub source_id: String,
+    pub pending: usize,
+    pub imported: usize,
+    pub invalid: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscoveryInboxItem {
+    pub path: String,
+    pub source_id: String,
+    pub run_id: String,
+    pub status: DiscoveryInboxFileStatus,
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscoveryInboxInventory {
+    pub directory: String,
+    pub pending: usize,
+    pub imported: usize,
+    pub invalid: usize,
+    pub by_source: Vec<DiscoveryInboxSourceCounts>,
+    pub files: Vec<DiscoveryInboxItem>,
+}
+
+impl Default for DiscoveryInboxInventory {
+    fn default() -> Self {
+        Self {
+            directory: "/Users/leo/Work/here-for-work/inbox/discovery-runs".to_string(),
+            pending: 0,
+            imported: 0,
+            invalid: 0,
+            by_source: vec![
+                DiscoveryInboxSourceCounts {
+                    source_id: "frontend-role-scan".to_string(),
+                    ..Default::default()
+                },
+                DiscoveryInboxSourceCounts {
+                    source_id: "eu-job-radar".to_string(),
+                    ..Default::default()
+                },
+            ],
+            files: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

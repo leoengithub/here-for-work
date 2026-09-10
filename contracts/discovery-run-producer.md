@@ -130,10 +130,11 @@ only after its executor has a verified way to write a local JSON file and run th
 
 ## Migration boundary
 
-The current HereForWork surface supports selecting a final `.json` file through manual
-Refresh/import. It does not automatically watch `inbox/discovery-runs`, and this command
-does not replace either scheduled task. The remaining external step is to update each
-authoritative task with the applicable prompt above and a verified executor-side file/
-command handoff. After that, shadow ingestion and the per-source gates in
-[`SCHEDULING_MIGRATION.md`](../SCHEDULING_MIGRATION.md) are still required before any
+The HereForWork surface supports selecting a final `.json` file through manual
+Refresh/import and observation-only auto-consume of sealed files from the fixed inbox
+`/Users/leo/Work/here-for-work/inbox/discovery-runs`. Auto-consume defaults on and never
+promotes staged sources to executor authority. This command does not replace either
+scheduled task. Each authoritative task still needs the producer prompt above and a
+verified executor-side file/command handoff. Shadow ingestion and the per-source gates in
+[`SCHEDULING_MIGRATION.md`](../SCHEDULING_MIGRATION.md) remain required before any
 authority cutover.

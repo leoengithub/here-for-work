@@ -92,7 +92,63 @@ export interface DashboardState {
   recentRuns: RunSummary[];
   discoveryRuns: DiscoveryRunDiagnostic[];
   discoveryCursors: DiscoveryCursor[];
+  discoveryInbox: DiscoveryInboxInventory;
+  discoveryInboxAutoConsume: boolean;
+  discoveryShadow: DiscoveryShadowSummary;
+  discoveryShadowEnabled: boolean;
   queueEvaluationProgress?: QueueEvaluationProgress | null;
+}
+
+export type DiscoveryShadowWindowStatus =
+  | "missing"
+  | "matched_completed"
+  | "matched_partial"
+  | "matched_failed"
+  | "unexpected";
+
+export interface DiscoveryShadowWindow {
+  sourceId: string;
+  expectedAt: string;
+  status: DiscoveryShadowWindowStatus;
+  linkedRunId: string | null;
+  linkedDigest: string | null;
+  lastCheckedAt: string;
+  detail: string | null;
+}
+
+export interface DiscoveryShadowSummary {
+  startedAt: string | null;
+  expected: number;
+  accounted: number;
+  missing: number;
+  partialOrFailed: number;
+  windows: DiscoveryShadowWindow[];
+}
+
+export type DiscoveryInboxFileStatus = "pending_import" | "imported" | "invalid";
+
+export interface DiscoveryInboxSourceCounts {
+  sourceId: string;
+  pending: number;
+  imported: number;
+  invalid: number;
+}
+
+export interface DiscoveryInboxItem {
+  path: string;
+  sourceId: string;
+  runId: string;
+  status: DiscoveryInboxFileStatus;
+  lastError: string | null;
+}
+
+export interface DiscoveryInboxInventory {
+  directory: string;
+  pending: number;
+  imported: number;
+  invalid: number;
+  bySource: DiscoveryInboxSourceCounts[];
+  files: DiscoveryInboxItem[];
 }
 
 export interface QueueFilters {

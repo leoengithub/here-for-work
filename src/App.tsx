@@ -80,6 +80,8 @@ import {
   saveQueueFilters,
   setCvFallbackSetting,
   setBackgroundEnabled,
+  setDiscoveryInboxAutoConsume,
+  setDiscoveryShadowEnabled,
   startBrowserConnectionCheck,
   takeInAppOutcomeNotifications,
   dismissPreparation,
@@ -995,6 +997,8 @@ function SystemPanel({
   onCvFallbackPathChange,
   onSaveCvFallback,
   onToggleBackground,
+  onToggleDiscoveryInboxAutoConsume,
+  onToggleDiscoveryShadowEnabled,
   notificationsReady,
   onEnableNotifications,
   onTestNotification,
@@ -1033,6 +1037,8 @@ function SystemPanel({
   onCvFallbackPathChange: (path: string) => void;
   onSaveCvFallback: () => void;
   onToggleBackground: () => void;
+  onToggleDiscoveryInboxAutoConsume: () => void;
+  onToggleDiscoveryShadowEnabled: () => void;
   notificationsReady: boolean;
   onEnableNotifications: () => void;
   onTestNotification: () => void;
@@ -1160,6 +1166,46 @@ function SystemPanel({
               disabled={busy}
             >
               {dashboard.backgroundEnabled ? "Turn off" : "Turn on"}
+            </Button>
+          </div>
+          <div className="background-setting">
+            <div>
+              <span className="background-setting__label">Discovery inbox auto-consume</span>
+              <span className="background-setting__state">
+                {dashboard.discoveryInboxAutoConsume ? "On" : "Off"}
+              </span>
+              <span className="background-setting__state">
+                Observation only. Imports sealed discovery-run files from the fixed inbox; it does not make HereForWork the discovery executor.
+              </span>
+            </div>
+            <Button
+              variant="outline"
+              type="button"
+              aria-pressed={dashboard.discoveryInboxAutoConsume}
+              onClick={onToggleDiscoveryInboxAutoConsume}
+              disabled={busy}
+            >
+              {dashboard.discoveryInboxAutoConsume ? "Turn off" : "Turn on"}
+            </Button>
+          </div>
+          <div className="background-setting">
+            <div>
+              <span className="background-setting__label">Discovery shadow accounting</span>
+              <span className="background-setting__state">
+                {dashboard.discoveryShadowEnabled ? "On" : "Off"}
+              </span>
+              <span className="background-setting__state">
+                Observation only. Compares expected schedule windows to imported sealed runs while sources stay staged.
+              </span>
+            </div>
+            <Button
+              variant="outline"
+              type="button"
+              aria-pressed={dashboard.discoveryShadowEnabled}
+              onClick={onToggleDiscoveryShadowEnabled}
+              disabled={busy}
+            >
+              {dashboard.discoveryShadowEnabled ? "Turn off" : "Turn on"}
             </Button>
           </div>
         </div>
@@ -1311,6 +1357,32 @@ function SystemPanel({
           </div>
         ))}
       </dl>
+      <div className="history-control">
+        <div>
+          <h3>Discovery inbox</h3>
+          <p>
+            {dashboard.discoveryInbox.pending} pending, {dashboard.discoveryInbox.imported} imported, {dashboard.discoveryInbox.invalid} invalid under the fixed producer path.
+          </p>
+        </div>
+      </div>
+      <dl className="source-list">
+        {dashboard.discoveryInbox.bySource.map((source) => (
+          <div key={`inbox-${source.sourceId}`}>
+            <dt>{source.sourceId}</dt>
+            <dd>
+              {source.pending} pending · {source.imported} imported · {source.invalid} invalid
+            </dd>
+          </div>
+        ))}
+      </dl>
+      <div className="history-control">
+        <div>
+          <h3>Discovery shadow</h3>
+          <p>
+            {dashboard.discoveryShadow.accounted}/{dashboard.discoveryShadow.expected} expected windows accounted; {dashboard.discoveryShadow.missing} missing; {dashboard.discoveryShadow.partialOrFailed} partial/failed. Scheduled tasks remain authoritative.
+          </p>
+        </div>
+      </div>
       {dashboard.recentRuns.length > 0 || dashboard.discoveryRuns.length > 0 ? (
         <Collapsible className="run-details">
           <CollapsibleTrigger className="run-details__trigger">Recent run state</CollapsibleTrigger>
@@ -1620,6 +1692,30 @@ export function App() {
     setBusy(true);
     try {
       setDashboard(await setBackgroundEnabled(!dashboard.backgroundEnabled));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const toggleDiscoveryInboxAutoConsume = async () => {
+    if (!dashboard) return;
+    setBusy(true);
+    try {
+      setDashboard(await setDiscoveryInboxAutoConsume(!dashboard.discoveryInboxAutoConsume));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const toggleDiscoveryShadowEnabled = async () => {
+    if (!dashboard) return;
+    setBusy(true);
+    try {
+      setDashboard(await setDiscoveryShadowEnabled(!dashboard.discoveryShadowEnabled));
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
     } finally {
@@ -2132,6 +2228,8 @@ export function App() {
           onCvFallbackPathChange={setCvFallbackPath}
           onSaveCvFallback={() => void persistCvFallback()}
           onToggleBackground={() => void toggleBackground()}
+          onToggleDiscoveryInboxAutoConsume={() => void toggleDiscoveryInboxAutoConsume()}
+          onToggleDiscoveryShadowEnabled={() => void toggleDiscoveryShadowEnabled()}
           notificationsReady={notificationsReady}
           onEnableNotifications={() => void enableNotifications()}
           onTestNotification={() => void testNotification()}

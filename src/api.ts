@@ -60,6 +60,27 @@ const browserFallback: DashboardState = {
   recentRuns: [],
   discoveryRuns: [],
   discoveryCursors: [],
+  discoveryInbox: {
+    directory: "/Users/leo/Work/here-for-work/inbox/discovery-runs",
+    pending: 0,
+    imported: 0,
+    invalid: 0,
+    bySource: [
+      { sourceId: "frontend-role-scan", pending: 0, imported: 0, invalid: 0 },
+      { sourceId: "eu-job-radar", pending: 0, imported: 0, invalid: 0 },
+    ],
+    files: [],
+  },
+  discoveryInboxAutoConsume: true,
+  discoveryShadow: {
+    startedAt: null,
+    expected: 0,
+    accounted: 0,
+    missing: 0,
+    partialOrFailed: 0,
+    windows: [],
+  },
+  discoveryShadowEnabled: true,
 };
 
 export async function getDashboard(): Promise<DashboardState> {
@@ -267,6 +288,16 @@ export async function getDiscoveryCursors(): Promise<DiscoveryCursor[]> {
 export async function setBackgroundEnabled(enabled: boolean): Promise<DashboardState> {
   if (!isTauri()) throw new Error("Background settings are available in the desktop app.");
   return invoke<DashboardState>("set_background_enabled", { enabled });
+}
+
+export async function setDiscoveryInboxAutoConsume(enabled: boolean): Promise<DashboardState> {
+  if (!isTauri()) throw new Error("Discovery inbox settings are available in the desktop app.");
+  return invoke<DashboardState>("set_discovery_inbox_auto_consume", { enabled });
+}
+
+export async function setDiscoveryShadowEnabled(enabled: boolean): Promise<DashboardState> {
+  if (!isTauri()) throw new Error("Discovery shadow settings are available in the desktop app.");
+  return invoke<DashboardState>("set_discovery_shadow_enabled", { enabled });
 }
 
 export async function retryEvaluation(roleId: string): Promise<DashboardState> {

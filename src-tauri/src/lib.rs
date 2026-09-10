@@ -1,5 +1,7 @@
 mod adapter;
 mod bridge;
+mod discovery_inbox;
+mod discovery_shadow;
 mod domain;
 mod provider;
 mod store;
@@ -79,10 +81,11 @@ impl Drop for PreparationCancellationRegistration<'_> {
 
 #[tauri::command]
 fn get_dashboard(state: tauri::State<'_, AppState>) -> Result<DashboardState, String> {
-    let store = state
+    let mut store = state
         .store
         .lock()
         .map_err(|_| "Operational store lock was poisoned".to_string())?;
+    let _ = store.refresh_discovery_shadow(chrono::Utc::now());
     store.dashboard().map_err(|error| error.to_string())
 }
 
@@ -181,6 +184,122 @@ fn set_background_enabled(
             .map_err(|error| error.to_string())?;
     }
     store.dashboard().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn set_discovery_inbox_auto_consume(
+    enabled: bool,
+    state: tauri::State<'_, AppState>,
+) -> Result<DashboardState, String> {
+    let mut store = state
+        .store
+        .lock()
+        .map_err(|_| "Operational store lock was poisoned".to_string())?;
+    store
+        .set_discovery_inbox_auto_consume(enabled)
+        .map_err(|error| error.to_string())?;
+    store.dashboard().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn set_discovery_shadow_enabled(
+    enabled: bool,
+    state: tauri::State<'_, AppState>,
+) -> Result<DashboardState, String> {
+    let mut store = state
+        .store
+        .lock()
+        .map_err(|_| "Operational store lock was poisoned".to_string())?;
+    store
+        .set_discovery_shadow_enabled(enabled)
+        .map_err(|error| error.to_string())?;
+    if enabled {
+        let _ = store.refresh_discovery_shadow(chrono::Utc::now());
+    }
+    store.dashboard().map_err(|error| error.to_string())
+}
+
+fn start_discovery_inbox_worker(app: tauri::AppHandle) -> Result<(), String> {
+    std::thread::Builder::new()
+        .name("here-for-work-discovery-inbox-worker".to_string())
+        .spawn(move || {
+            loop {
+                let enabled = {
+                    let state = app.state::<AppState>();
+                    state
+                        .store
+                        .lock()
+                        .ok()
+                        .and_then(|store| store.discovery_inbox_auto_consume_enabled().ok())
+                        .unwrap_or(true)
+                };
+                if enabled {
+                    let consume_results = {
+                        let state = app.state::<AppState>();
+                        state.store.lock().ok().and_then(|mut store| {
+                            store
+                                .consume_discovery_inbox(std::path::Path::new(
+                                    discovery_inbox::DEFAULT_DISCOVERY_INBOX_DIR,
+                                ))
+                                .ok()
+                        })
+                    };
+                    if let Some(results) = consume_results {
+                        for (path, outcome) in results {
+                            let Ok(import_result) = outcome else {
+                                continue;
+                            };
+                            if import_result.replayed
+                                || (import_result.imported == 0 && import_result.updated == 0)
+                            {
+                                continue;
+                            }
+                            let sync = {
+                                let state = app.state::<AppState>();
+                                sync_evaluations_internal(&state)
+                            };
+                            let promoted = sync.as_ref().map(|value| value.promoted).unwrap_or(0);
+                            if promoted == 0 {
+                                continue;
+                            }
+                            let identity = std::path::Path::new(&path)
+                                .file_name()
+                                .and_then(|value| value.to_str())
+                                .and_then(discovery_inbox::parse_discovery_run_filename);
+                            let should_notify = if let Some((source_id, run_id)) = identity {
+                                app.state::<AppState>()
+                                    .store
+                                    .lock()
+                                    .ok()
+                                    .and_then(|mut store| {
+                                        store
+                                            .record_discovery_inbox_notification_dedupe(
+                                                &source_id, &run_id,
+                                            )
+                                            .ok()
+                                    })
+                                    .unwrap_or(false)
+                            } else {
+                                true
+                            };
+                            if should_notify {
+                                let _ = app
+                                    .notification()
+                                    .builder()
+                                    .title("New roles to review")
+                                    .body(format!(
+                                        "{promoted} evaluated role(s) are ready in HereForWork."
+                                    ))
+                                    .show();
+                            }
+                        }
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_secs(5));
+            }
+        })
+        .map(|_| ())
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -2950,6 +3069,7 @@ pub fn run() {
             start_browser_handoff_worker(app.handle().clone())?;
             start_answer_worker(app.handle().clone())?;
             start_outcome_notification_worker(app.handle().clone())?;
+            start_discovery_inbox_worker(app.handle().clone())?;
             if launch_in_background {
                 if let Some(window) = app.get_webview_window("main") {
                     let _ = window.hide();
@@ -2969,6 +3089,8 @@ pub fn run() {
             import_discovery_run,
             get_discovery_cursors,
             set_background_enabled,
+            set_discovery_inbox_auto_consume,
+            set_discovery_shadow_enabled,
             save_queue_filters,
             get_cv_fallback_setting,
             set_cv_fallback_setting,

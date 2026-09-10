@@ -146,6 +146,35 @@ installation, and read-only Queue/Settings launch smoke also passed. The histori
 remains unimported, no live form action was executed, and repository delivery is published
 on `origin/main`.
 
+## Discovery inbox observation (Phase A) — 2026-09-10
+
+Branch `hfw-discovery-handoff-phase-a` adds observation-only consumption of sealed
+`hereforwork.discovery-run` files from the fixed producer path
+`/Users/leo/Work/here-for-work/inbox/discovery-runs`. Settings exposes inbox inventory
+counts (pending / imported / invalid per source) and an auto-consume toggle that defaults
+on. Auto-consume reuses `import_discovery_run`, ignores `*.partial`, dedupes discovery
+notifications on `(sourceId, runId)`, and never flips `execution_mode` off `staged`.
+Manual Refresh/import remains available. This is still typed ingestion only: scheduled
+tasks remain authoritative; canary gates in `SCHEDULING_MIGRATION.md` are not started.
+
+## Discovery shadow accounting (Phase B) — 2026-09-10
+
+Same branch adds schema v33 read-only shadow window accounting: expected Madrid schedule
+nominals for staged sources are compared to imported sealed discovery-run coverage.
+Settings exposes a shadow toggle (default on) and an accounted/missing/partial summary.
+Shadow refresh does not claim runs, advance executor cursors, mutate Gmail/canonical
+state, or enqueue discovery notifications. Honest Phase B is file-based coverage
+accounting; a true re-run of career-ops discover remains deferred until an isolated
+non-mutating adapter exists.
+
+Migrations 26–32 are ported as DDL-compatible no-ops relative to newer personal
+databases so this build can open an operational DB already at schema 32, then apply
+v33 shadow tables.
+
+Validation on the branch: discovery_inbox + discovery_shadow Rust tests (23 passed),
+`App.test.tsx` (34 passed), and `tsc` clean. Live Desktop Settings visual approval against
+the rebuilt app remains open for the owner. No application was submitted.
+
 ## Verified implementation evidence
 
 - Apple Silicon `.app` launches without a local HTTP server.
@@ -378,7 +407,8 @@ their own scoped authority before transmitting personal data.
 - No source has completed the approved versioned-result baseline, 14-day read-only shadow,
   per-source canary, and explicit promotion in `SCHEDULING_MIGRATION.md`. Frontend Role Scan
   must canary first. EU Job Radar additionally requires typed, idempotent Gmail-effect
-  receipts before its canary.
+  receipts before its canary. Phase A observation-only inbox auto-consume does not change
+  this authority boundary.
 - No Gmail state, career-ops profile source, credentials, or scheduled task was mutated.
   Canonical history changed only through the explicit Prepare action described above.
 - Real report/CV generation plus Ashby and generic KoreLabs inspect, draft, fill, verify,
