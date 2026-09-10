@@ -13,17 +13,19 @@ use uuid::Uuid;
 use crate::domain::{
     ActivityEntry, AdapterEffectContext, AdapterRoleContext, BrowserAnswerCommitWork,
     BrowserAnswerWork, BrowserCommand, BrowserInspection, BrowserSessionSummary, CvFallbackSetting,
-    DashboardState, DiscoveryCursor, DiscoveryDataset, DiscoveryFinding, DiscoveryRun,
-    DiscoveryRunDiagnostic, DiscoveryRunEvidenceDiagnostic, DiscoveryRunFinding,
-    DiscoveryRunFindingDiagnostic, DiscoveryRunImportResult, DiscoveryRunMatchScore,
-    EvaluationResultRead, EvaluationSyncRole, HistoryRecord, ImportResult, LeasedRun,
-    OutcomeNotification, PreQueueRecovery, PreQueueRoleSummary, PreparationCleanupWork,
-    PreparationEvaluationIdentity, PreparationSummary, PreparationWork, QueueEvaluationSummary,
-    QueueFilters, QueueGroup, ReconcileResult, RestorePreflight, RoleSummary, RunSummary,
-    ScheduledRun, SourceScheduleSummary, StuckPreparationCandidate, StuckPreparationReset,
+    DashboardState, DiscoveryCursor, DiscoveryDataset, DiscoveryFinding, DiscoveryInboxFileStatus,
+    DiscoveryInboxInventory, DiscoveryRun, DiscoveryRunDiagnostic, DiscoveryRunEvidenceDiagnostic,
+    DiscoveryRunFinding, DiscoveryRunFindingDiagnostic, DiscoveryRunImportResult,
+    DiscoveryRunMatchScore, DiscoveryShadowSummary, DiscoveryShadowWindow,
+    DiscoveryShadowWindowStatus, EvaluationResultRead, EvaluationSyncRole, HistoryRecord,
+    ImportResult, LeasedRun, OutcomeNotification, PreQueueRecovery, PreQueueRoleSummary,
+    PreparationCleanupWork, PreparationEvaluationIdentity, PreparationSummary, PreparationWork,
+    QueueEvaluationSummary, QueueFilters, QueueGroup, ReconcileResult, RestorePreflight,
+    RoleSummary, RunSummary, ScheduledRun, SourceScheduleSummary, StuckPreparationCandidate,
+    StuckPreparationReset,
 };
 
-const SCHEMA_VERSION: i64 = 25;
+const SCHEMA_VERSION: i64 = 33;
 const MAX_RUN_ATTEMPTS: i64 = 3;
 const MAX_BROWSER_COMMAND_ATTEMPTS: i64 = 3;
 const MAX_EVALUATION_SYNC_ATTEMPTS: i64 = 3;
@@ -64,6 +66,8 @@ pub enum StoreError {
     InvalidAdapterEffect(String),
     #[error("invalid preparation: {0}")]
     InvalidPreparation(String),
+    #[error("{0}")]
+    SchemaMismatch(String),
 }
 
 pub struct Store {
@@ -1070,8 +1074,147 @@ impl Store {
             transaction.commit()?;
             version = 25;
         }
+        if version < 26 {
+            if !self.column_exists("evaluation_receipts", "authorization_details_json")? {
+                self.connection.execute_batch(
+                    "BEGIN IMMEDIATE;
+                     ALTER TABLE evaluation_receipts ADD COLUMN authorization_details_json TEXT;
+                     UPDATE schema_meta SET version = 26;
+                     COMMIT;",
+                )?;
+            } else {
+                self.connection
+                    .execute("UPDATE schema_meta SET version = 26", [])?;
+            }
+            version = 26;
+        }
+        if version < 27 {
+            self.connection.execute_batch(
+                "BEGIN IMMEDIATE;
+                 CREATE TABLE IF NOT EXISTS pipeline_submissions (
+                   role_id TEXT PRIMARY KEY REFERENCES roles(id) ON DELETE CASCADE,
+                   url TEXT NOT NULL,
+                   appended_at TEXT NOT NULL
+                 );
+                 UPDATE schema_meta SET version = 27;
+                 COMMIT;",
+            )?;
+            version = 27;
+        }
+        if version < 28 {
+            let add_column = if self.column_exists("evaluation_sync", "detail")? {
+                ""
+            } else {
+                "ALTER TABLE evaluation_sync ADD COLUMN detail TEXT;"
+            };
+            self.connection.execute_batch(&format!(
+                "BEGIN IMMEDIATE;
+                 {add_column}
+                 UPDATE evaluation_sync
+                    SET attempt = 0, input_hash = NULL
+                  WHERE state = 'needs_attention'
+                    AND reason = 'evaluation_result_invalid_or_stale';
+                 UPDATE schema_meta SET version = 28;
+                 COMMIT;"
+            ))?;
+            version = 28;
+        }
+        if version < 29 {
+            self.connection.execute_batch(
+                "BEGIN IMMEDIATE;
+                 CREATE TABLE IF NOT EXISTS role_supplied_urls (
+                   role_id TEXT PRIMARY KEY REFERENCES roles(id) ON DELETE CASCADE,
+                   url TEXT NOT NULL,
+                   provided_at TEXT NOT NULL
+                 );
+                 UPDATE schema_meta SET version = 29;
+                 COMMIT;",
+            )?;
+            version = 29;
+        }
+        if version < 30 {
+            self.connection.execute_batch(
+                "BEGIN IMMEDIATE;
+                 CREATE TABLE IF NOT EXISTS role_liveness (
+                   role_id TEXT PRIMARY KEY REFERENCES roles(id) ON DELETE CASCADE,
+                   url TEXT NOT NULL,
+                   state TEXT NOT NULL,
+                   reason TEXT NOT NULL,
+                   checked_at TEXT NOT NULL
+                 );
+                 UPDATE schema_meta SET version = 30;
+                 COMMIT;",
+            )?;
+            version = 30;
+        }
+        if version < 31 {
+            self.connection.execute_batch(
+                "BEGIN IMMEDIATE;
+                 CREATE TABLE IF NOT EXISTS form_anchor_arming (
+                   preparation_id TEXT PRIMARY KEY REFERENCES preparation_jobs(id) ON DELETE CASCADE,
+                   armed_at TEXT NOT NULL
+                 );
+                 UPDATE schema_meta SET version = 31;
+                 COMMIT;",
+            )?;
+            version = 31;
+        }
+        if version < 32 {
+            let add_column = if self.column_exists("evaluation_sync", "report_path")? {
+                ""
+            } else {
+                "ALTER TABLE evaluation_sync ADD COLUMN report_path TEXT;"
+            };
+            self.connection.execute_batch(&format!(
+                "BEGIN IMMEDIATE;
+                 {add_column}
+                 UPDATE schema_meta SET version = 32;
+                 COMMIT;"
+            ))?;
+            version = 32;
+        }
+        if version < 33 {
+            let transaction = self.connection.transaction()?;
+            transaction.execute_batch(
+                "CREATE TABLE IF NOT EXISTS discovery_shadow_windows (
+                   source_id TEXT NOT NULL,
+                   expected_at TEXT NOT NULL,
+                   status TEXT NOT NULL,
+                   linked_run_id TEXT,
+                   linked_digest TEXT,
+                   last_checked_at TEXT NOT NULL,
+                   detail TEXT,
+                   PRIMARY KEY (source_id, expected_at)
+                 );
+                 CREATE INDEX IF NOT EXISTS discovery_shadow_windows_status
+                   ON discovery_shadow_windows(status, source_id);",
+            )?;
+            let now = Utc::now().to_rfc3339();
+            transaction.execute(
+                "INSERT INTO settings(key, value, updated_at)
+                 VALUES ('discovery_shadow_enabled', 'true', ?1)
+                 ON CONFLICT(key) DO NOTHING",
+                params![now],
+            )?;
+            transaction.execute(
+                "INSERT INTO settings(key, value, updated_at)
+                 VALUES ('discovery_shadow_started_at', ?1, ?1)
+                 ON CONFLICT(key) DO NOTHING",
+                params![now],
+            )?;
+            transaction.execute("UPDATE schema_meta SET version = 33", [])?;
+            transaction.commit()?;
+            version = 33;
+        }
+        if version > SCHEMA_VERSION {
+            return Err(StoreError::SchemaMismatch(format!(
+                "operational database schema version {version} is newer than this app build ({SCHEMA_VERSION}); open a matching Desktop build or restore a compatible backup"
+            )));
+        }
         if version != SCHEMA_VERSION {
-            return Err(StoreError::Database(rusqlite::Error::InvalidQuery));
+            return Err(StoreError::SchemaMismatch(format!(
+                "operational database schema version {version} did not reach app schema {SCHEMA_VERSION}"
+            )));
         }
         Ok(())
     }
@@ -1853,6 +1996,344 @@ impl Store {
 
     pub fn background_enabled(&self) -> Result<bool, StoreError> {
         Ok(setting(&self.connection, "background_enabled")?.as_deref() == Some("true"))
+    }
+
+    pub fn discovery_inbox_auto_consume_enabled(&self) -> Result<bool, StoreError> {
+        Ok(match setting(&self.connection, "discovery_inbox_auto_consume")? {
+            Some(value) => value == "true",
+            None => true,
+        })
+    }
+
+    pub fn discovery_shadow_enabled(&self) -> Result<bool, StoreError> {
+        Ok(match setting(&self.connection, "discovery_shadow_enabled")? {
+            Some(value) => value == "true",
+            None => true,
+        })
+    }
+
+    pub fn set_discovery_shadow_enabled(&mut self, enabled: bool) -> Result<(), StoreError> {
+        self.connection.execute(
+            "INSERT INTO settings(key, value, updated_at) VALUES ('discovery_shadow_enabled', ?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+            params![
+                if enabled { "true" } else { "false" },
+                Utc::now().to_rfc3339()
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn discovery_shadow_started_at(&self) -> Result<Option<String>, StoreError> {
+        Ok(setting(&self.connection, "discovery_shadow_started_at")?)
+    }
+
+    pub fn ensure_discovery_shadow_started_at(&mut self) -> Result<String, StoreError> {
+        if let Some(existing) = self.discovery_shadow_started_at()? {
+            return Ok(existing);
+        }
+        let now = Utc::now().to_rfc3339();
+        self.connection.execute(
+            "INSERT INTO settings(key, value, updated_at) VALUES ('discovery_shadow_started_at', ?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+            params![now, now],
+        )?;
+        Ok(now)
+    }
+
+    pub fn refresh_discovery_shadow(
+        &mut self,
+        now: DateTime<Utc>,
+    ) -> Result<DiscoveryShadowSummary, StoreError> {
+        if !self.discovery_shadow_enabled()? {
+            return Ok(DiscoveryShadowSummary {
+                started_at: self.discovery_shadow_started_at()?,
+                ..DiscoveryShadowSummary::default()
+            });
+        }
+        let started_at_raw = self.ensure_discovery_shadow_started_at()?;
+        let started_at = DateTime::parse_from_rfc3339(&started_at_raw)
+            .map(|value| value.with_timezone(&Utc))
+            .unwrap_or(now);
+        let mut schedule_statement = self.connection.prepare(
+            "SELECT source_id, schedule_hours, execution_mode FROM source_schedules WHERE enabled = 1",
+        )?;
+        let schedules = schedule_statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(schedule_statement);
+
+        let mut imported_statement = self.connection.prepare(
+            "SELECT source_id, run_id, digest, status, coverage_start, coverage_end
+               FROM discovery_runs",
+        )?;
+        let imported_rows = imported_statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(imported_statement);
+
+        let mut imported_by_source: std::collections::HashMap<String, Vec<crate::discovery_shadow::ImportedShadowRun>> =
+            std::collections::HashMap::new();
+        for (source_id, run_id, digest, status, coverage_start, coverage_end) in imported_rows {
+            let Ok(window_start) = DateTime::parse_from_rfc3339(&coverage_start) else {
+                continue;
+            };
+            let Ok(window_end) = DateTime::parse_from_rfc3339(&coverage_end) else {
+                continue;
+            };
+            imported_by_source
+                .entry(source_id)
+                .or_default()
+                .push(crate::discovery_shadow::ImportedShadowRun {
+                    run_id,
+                    digest,
+                    status,
+                    window_start: window_start.with_timezone(&Utc),
+                    window_end: window_end.with_timezone(&Utc),
+                });
+        }
+
+        let checked_at = now.to_rfc3339();
+        let transaction = self.connection.transaction()?;
+        transaction.execute("DELETE FROM discovery_shadow_windows", [])?;
+        let mut expected = 0usize;
+        let mut accounted = 0usize;
+        let mut missing = 0usize;
+        let mut partial_or_failed = 0usize;
+        let mut windows = Vec::new();
+
+        for (source_id, hours, execution_mode) in schedules {
+            if execution_mode != "staged" {
+                // Shadow observation is only defined while sources remain staged.
+                continue;
+            }
+            let due = missed_nominal_times(started_at, now, &hours);
+            let runs = imported_by_source.get(&source_id).cloned().unwrap_or_default();
+            for expected_at in due {
+                expected += 1;
+                let classification =
+                    crate::discovery_shadow::classify_expected_window(expected_at, &runs);
+                match classification.status {
+                    DiscoveryShadowWindowStatus::Missing => missing += 1,
+                    DiscoveryShadowWindowStatus::MatchedPartial
+                    | DiscoveryShadowWindowStatus::MatchedFailed => {
+                        partial_or_failed += 1;
+                        accounted += 1;
+                    }
+                    DiscoveryShadowWindowStatus::MatchedCompleted => accounted += 1,
+                    DiscoveryShadowWindowStatus::Unexpected => partial_or_failed += 1,
+                }
+                let expected_at_text = expected_at.to_rfc3339();
+                transaction.execute(
+                    "INSERT INTO discovery_shadow_windows(
+                       source_id, expected_at, status, linked_run_id, linked_digest,
+                       last_checked_at, detail
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    params![
+                        source_id,
+                        expected_at_text,
+                        match classification.status {
+                            DiscoveryShadowWindowStatus::Missing => "missing",
+                            DiscoveryShadowWindowStatus::MatchedCompleted => "matched_completed",
+                            DiscoveryShadowWindowStatus::MatchedPartial => "matched_partial",
+                            DiscoveryShadowWindowStatus::MatchedFailed => "matched_failed",
+                            DiscoveryShadowWindowStatus::Unexpected => "unexpected",
+                        },
+                        classification.linked_run_id,
+                        classification.linked_digest,
+                        checked_at,
+                        classification.detail,
+                    ],
+                )?;
+                windows.push(DiscoveryShadowWindow {
+                    source_id: source_id.clone(),
+                    expected_at: expected_at_text,
+                    status: classification.status,
+                    linked_run_id: classification.linked_run_id,
+                    linked_digest: classification.linked_digest,
+                    last_checked_at: checked_at.clone(),
+                    detail: classification.detail,
+                });
+            }
+        }
+        transaction.commit()?;
+        Ok(DiscoveryShadowSummary {
+            started_at: Some(started_at_raw),
+            expected,
+            accounted,
+            missing,
+            partial_or_failed,
+            windows,
+        })
+    }
+
+    pub fn discovery_shadow_summary(&self) -> Result<DiscoveryShadowSummary, StoreError> {
+        let started_at = self.discovery_shadow_started_at()?;
+        let mut statement = self.connection.prepare(
+            "SELECT source_id, expected_at, status, linked_run_id, linked_digest, last_checked_at, detail
+               FROM discovery_shadow_windows
+              ORDER BY expected_at ASC, source_id ASC",
+        )?;
+        let windows = statement
+            .query_map([], |row| {
+                let status: String = row.get(2)?;
+                Ok(DiscoveryShadowWindow {
+                    source_id: row.get(0)?,
+                    expected_at: row.get(1)?,
+                    status: match status.as_str() {
+                        "matched_completed" => DiscoveryShadowWindowStatus::MatchedCompleted,
+                        "matched_partial" => DiscoveryShadowWindowStatus::MatchedPartial,
+                        "matched_failed" => DiscoveryShadowWindowStatus::MatchedFailed,
+                        "unexpected" => DiscoveryShadowWindowStatus::Unexpected,
+                        _ => DiscoveryShadowWindowStatus::Missing,
+                    },
+                    linked_run_id: row.get(3)?,
+                    linked_digest: row.get(4)?,
+                    last_checked_at: row.get(5)?,
+                    detail: row.get(6)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        let expected = windows.len();
+        let missing = windows
+            .iter()
+            .filter(|window| window.status == DiscoveryShadowWindowStatus::Missing)
+            .count();
+        let partial_or_failed = windows
+            .iter()
+            .filter(|window| {
+                matches!(
+                    window.status,
+                    DiscoveryShadowWindowStatus::MatchedPartial
+                        | DiscoveryShadowWindowStatus::MatchedFailed
+                        | DiscoveryShadowWindowStatus::Unexpected
+                )
+            })
+            .count();
+        let accounted = windows
+            .iter()
+            .filter(|window| {
+                matches!(
+                    window.status,
+                    DiscoveryShadowWindowStatus::MatchedCompleted
+                        | DiscoveryShadowWindowStatus::MatchedPartial
+                        | DiscoveryShadowWindowStatus::MatchedFailed
+                )
+            })
+            .count();
+        Ok(DiscoveryShadowSummary {
+            started_at,
+            expected,
+            accounted,
+            missing,
+            partial_or_failed,
+            windows,
+        })
+    }
+
+    pub fn set_discovery_inbox_auto_consume(
+        &mut self,
+        enabled: bool,
+    ) -> Result<(), StoreError> {
+        self.connection.execute(
+            "INSERT INTO settings(key, value, updated_at) VALUES ('discovery_inbox_auto_consume', ?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+            params![
+                if enabled { "true" } else { "false" },
+                Utc::now().to_rfc3339()
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn discovery_run_recorded_digest(
+        &self,
+        source_id: &str,
+        run_id: &str,
+    ) -> Result<Option<String>, StoreError> {
+        self.connection
+            .query_row(
+                "SELECT digest FROM discovery_runs WHERE source_id = ?1 AND run_id = ?2",
+                params![source_id, run_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(StoreError::from)
+    }
+
+    pub fn discovery_inbox_inventory(
+        &self,
+        directory: &Path,
+    ) -> Result<DiscoveryInboxInventory, StoreError> {
+        crate::discovery_inbox::inventory_discovery_inbox(directory, |source_id, run_id| {
+            self.discovery_run_recorded_digest(source_id, run_id)
+                .map_err(|error| crate::discovery_inbox::DiscoveryInboxError::Invalid(error.to_string()))
+        })
+        .map_err(|error| StoreError::InvalidDiscoveryRun(error.to_string()))
+    }
+
+    pub fn consume_discovery_inbox(
+        &mut self,
+        directory: &Path,
+    ) -> Result<Vec<(String, Result<DiscoveryRunImportResult, String>)>, StoreError> {
+        let inventory = self.discovery_inbox_inventory(directory)?;
+        let mut results = Vec::new();
+        for item in inventory
+            .files
+            .into_iter()
+            .filter(|item| item.status == DiscoveryInboxFileStatus::PendingImport)
+        {
+            let payload = match std::fs::read_to_string(&item.path) {
+                Ok(payload) => payload,
+                Err(error) => {
+                    results.push((item.path, Err(error.to_string())));
+                    continue;
+                }
+            };
+            let outcome = self
+                .import_discovery_run(&payload)
+                .map_err(|error| error.to_string());
+            results.push((item.path, outcome));
+        }
+        Ok(results)
+    }
+
+    pub fn record_discovery_inbox_notification_dedupe(
+        &mut self,
+        source_id: &str,
+        run_id: &str,
+    ) -> Result<bool, StoreError> {
+        let dedupe_key = format!("discovery-inbox-import:{source_id}:{run_id}");
+        let now = Utc::now().to_rfc3339();
+        let changed = self.connection.execute(
+            "INSERT OR IGNORE INTO notification_outbox(
+               id, dedupe_key, title, body, status, attempts, next_attempt_at, created_at,
+               event_kind
+             ) VALUES (?1, ?2, ?3, ?4, 'pending', 0, ?5, ?5, 'discovery')",
+            params![
+                Uuid::new_v4().to_string(),
+                dedupe_key,
+                "New roles to review",
+                "Evaluated role(s) are ready in HereForWork.",
+                now,
+            ],
+        )?;
+        Ok(changed > 0)
     }
 
     pub fn queue_filters(&self) -> Result<QueueFilters, StoreError> {
@@ -6209,6 +6690,14 @@ impl Store {
             .collect::<Result<Vec<_>, _>>()?;
         let discovery_runs = self.discovery_run_diagnostics()?;
         let discovery_cursors = self.discovery_cursors()?;
+        let discovery_inbox = self
+            .discovery_inbox_inventory(Path::new(
+                crate::discovery_inbox::DEFAULT_DISCOVERY_INBOX_DIR,
+            ))
+            .unwrap_or_default();
+        let discovery_inbox_auto_consume = self.discovery_inbox_auto_consume_enabled()?;
+        let discovery_shadow = self.discovery_shadow_summary()?;
+        let discovery_shadow_enabled = self.discovery_shadow_enabled()?;
 
         Ok(DashboardState {
             roles,
@@ -6232,6 +6721,10 @@ impl Store {
             recent_runs,
             discovery_runs,
             discovery_cursors,
+            discovery_inbox,
+            discovery_inbox_auto_consume,
+            discovery_shadow,
+            discovery_shadow_enabled,
         })
     }
 
@@ -7920,6 +8413,7 @@ mod tests {
         BrowserSessionSummary, EvaluationResultRead, HistoryRecord, ImportResult, PreparationWork,
         QueueGroup,
     };
+    use chrono::{DateTime, Utc};
     use rusqlite::params;
     use serde_json::Value;
     use sha2::{Digest, Sha256};
@@ -10277,6 +10771,181 @@ mod tests {
             1
         );
         assert!(store.claim_preparation_work().unwrap().is_some());
+    }
+
+    #[test]
+    fn discovery_inbox_inventory_marks_pending_sealed_run() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+        let inbox = tempfile::tempdir().unwrap();
+        let mut fixture = discovery_fixture();
+        fixture.as_object_mut().unwrap().remove("supersedesRunId");
+        let payload = sealed_discovery_run(fixture);
+        let parsed: Value = serde_json::from_str(&payload).unwrap();
+        let source_id = parsed["source"]["sourceId"].as_str().unwrap();
+        let run_id = parsed["runId"].as_str().unwrap();
+        let path = inbox.path().join(format!("discovery-run--{source_id}--{run_id}.json"));
+        std::fs::write(&path, &payload).unwrap();
+
+        let inventory = store.discovery_inbox_inventory(inbox.path()).unwrap();
+        assert_eq!(inventory.pending, 1);
+        assert_eq!(inventory.files[0].status, crate::domain::DiscoveryInboxFileStatus::PendingImport);
+    }
+
+    #[test]
+    fn discovery_inbox_consume_imports_pending_and_is_idempotent() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+        let inbox = tempfile::tempdir().unwrap();
+        let mut fixture = discovery_fixture();
+        fixture.as_object_mut().unwrap().remove("supersedesRunId");
+        let payload = sealed_discovery_run(fixture);
+        let parsed: Value = serde_json::from_str(&payload).unwrap();
+        let source_id = parsed["source"]["sourceId"].as_str().unwrap();
+        let run_id = parsed["runId"].as_str().unwrap();
+        let path = inbox.path().join(format!("discovery-run--{source_id}--{run_id}.json"));
+        std::fs::write(&path, &payload).unwrap();
+
+        let first = store.consume_discovery_inbox(inbox.path()).unwrap();
+        assert_eq!(first.len(), 1);
+        assert!(first[0].1.as_ref().unwrap().recorded || first[0].1.as_ref().unwrap().imported > 0);
+
+        let second = store.consume_discovery_inbox(inbox.path()).unwrap();
+        assert!(second.is_empty());
+        let inventory = store.discovery_inbox_inventory(inbox.path()).unwrap();
+        assert_eq!(inventory.imported, 1);
+        assert_eq!(inventory.pending, 0);
+    }
+
+    #[test]
+    fn discovery_inbox_auto_consume_defaults_on() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+        assert!(store.discovery_inbox_auto_consume_enabled().unwrap());
+        store.set_discovery_inbox_auto_consume(false).unwrap();
+        assert!(!store.dashboard().unwrap().discovery_inbox_auto_consume);
+        store.set_discovery_inbox_auto_consume(true).unwrap();
+        assert!(store.dashboard().unwrap().discovery_inbox_auto_consume);
+    }
+
+    #[test]
+    fn discovery_inbox_notification_dedupe_is_single_shot() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+        assert!(store
+            .record_discovery_inbox_notification_dedupe("frontend-role-scan", "run-1")
+            .unwrap());
+        assert!(!store
+            .record_discovery_inbox_notification_dedupe("frontend-role-scan", "run-1")
+            .unwrap());
+    }
+
+    #[test]
+    fn discovery_shadow_marks_missing_windows_without_mutating_executor_state() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+        // Madrid 08:00 on 2026-09-10 is 06:00Z (CEST). Cursor must be before that
+        // nominal and now must be after it so FRS is due while sources stay staged.
+        store
+            .connection
+            .execute(
+                "INSERT INTO settings(key, value, updated_at) VALUES ('discovery_shadow_started_at', ?1, ?1)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+                params!["2026-09-10T04:00:00Z"],
+            )
+            .unwrap();
+        let now = DateTime::parse_from_rfc3339("2026-09-10T07:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let before_mode: String = store
+            .connection
+            .query_row(
+                "SELECT execution_mode FROM source_schedules WHERE source_id = 'frontend-role-scan'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let before_cursor: Option<String> = store
+            .connection
+            .query_row(
+                "SELECT last_successful_at FROM source_schedules WHERE source_id = 'frontend-role-scan'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let summary = store.refresh_discovery_shadow(now).unwrap();
+        assert!(summary.expected > 0);
+        assert!(summary.missing > 0);
+        assert_eq!(
+            store
+                .connection
+                .query_row(
+                    "SELECT COUNT(*) FROM notification_outbox WHERE event_kind = 'discovery'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
+        let after_mode: String = store
+            .connection
+            .query_row(
+                "SELECT execution_mode FROM source_schedules WHERE source_id = 'frontend-role-scan'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let after_cursor: Option<String> = store
+            .connection
+            .query_row(
+                "SELECT last_successful_at FROM source_schedules WHERE source_id = 'frontend-role-scan'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(before_mode, "staged");
+        assert_eq!(after_mode, "staged");
+        assert_eq!(before_cursor, after_cursor);
+        assert!(store.claim_next_run(now, chrono::Duration::minutes(5)).unwrap().is_none());
+    }
+
+    #[test]
+    fn discovery_shadow_accounts_imported_completed_run() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("test.sqlite3")).unwrap();
+        store
+            .connection
+            .execute(
+                "INSERT INTO settings(key, value, updated_at) VALUES ('discovery_shadow_started_at', ?1, ?1)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+                params!["2026-09-10T04:00:00Z"],
+            )
+            .unwrap();
+        let mut fixture = discovery_fixture();
+        fixture.as_object_mut().unwrap().remove("supersedesRunId");
+        fixture["source"]["sourceId"] = serde_json::json!("frontend-role-scan");
+        fixture["source"]["displayName"] = serde_json::json!("Frontend Role Scan");
+        // Cover Madrid 08:00 / 06:00Z nominal; generatedAt must be >= windowEnd.
+        fixture["coverage"]["windowStart"] = serde_json::json!("2026-09-10T04:00:00Z");
+        fixture["coverage"]["windowEnd"] = serde_json::json!("2026-09-10T07:00:00Z");
+        fixture["generatedAt"] = serde_json::json!("2026-09-10T07:05:00Z");
+        fixture["runId"] = serde_json::json!("frontend-role-scan:run:shadow-1");
+        fixture["windowId"] = serde_json::json!("frontend-role-scan:window:shadow-1");
+        for finding in fixture["findings"].as_array_mut().unwrap() {
+            finding["sourceId"] = serde_json::json!("frontend-role-scan");
+            finding["source"] = serde_json::json!("Frontend Role Scan");
+        }
+        let payload = sealed_discovery_run(fixture);
+        store.import_discovery_run(&payload).unwrap();
+        let now = DateTime::parse_from_rfc3339("2026-09-10T07:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let summary = store.refresh_discovery_shadow(now).unwrap();
+        assert!(summary.accounted > 0);
+        assert!(summary.windows.iter().any(|window| {
+            window.source_id == "frontend-role-scan"
+                && window.status == crate::domain::DiscoveryShadowWindowStatus::MatchedCompleted
+        }));
     }
 
     #[test]

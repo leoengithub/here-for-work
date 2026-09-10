@@ -75,6 +75,27 @@ export const applicationsPreviewDashboard: DashboardState = {
   recentRuns: [],
   discoveryRuns: [],
   discoveryCursors: [],
+  discoveryInbox: {
+    directory: "/Users/leo/Work/here-for-work/inbox/discovery-runs",
+    pending: 0,
+    imported: 0,
+    invalid: 0,
+    bySource: [
+      { sourceId: "frontend-role-scan", pending: 0, imported: 0, invalid: 0 },
+      { sourceId: "eu-job-radar", pending: 0, imported: 0, invalid: 0 },
+    ],
+    files: [],
+  },
+  discoveryInboxAutoConsume: true,
+  discoveryShadow: {
+    startedAt: null,
+    expected: 0,
+    accounted: 0,
+    missing: 0,
+    partialOrFailed: 0,
+    windows: [],
+  },
+  discoveryShadowEnabled: true,
 };
 
 function queueRole(
